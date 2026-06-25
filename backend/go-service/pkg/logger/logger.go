@@ -11,11 +11,12 @@ import (
 )
 
 type Config struct {
+	Service    string
 	Level      string
 	Format     string
 	Output     string
-	FilePath   string
-	AddSource  bool
+	Dir        string
+	Filename   string
 	MaxSizeMB  int
 	MaxBackups int
 	MaxAgeDays int
@@ -29,8 +30,9 @@ func Setup(cfg Config) error {
 	}
 
 	options := &slog.HandlerOptions{
-		Level:     parseLevel(cfg.Level),
-		AddSource: cfg.AddSource,
+		Level:       parseLevel(cfg.Level),
+		AddSource:   true,
+		ReplaceAttr: replaceSourceAttr,
 	}
 
 	var handler slog.Handler
@@ -43,8 +45,29 @@ func Setup(cfg Config) error {
 		return fmt.Errorf("unsupported log format %q", cfg.Format)
 	}
 
-	slog.SetDefault(slog.New(handler))
+	base := slog.New(handler)
+	if cfg.Service != "" {
+		base = base.With("service", cfg.Service)
+	}
+	slog.SetDefault(base)
 	return nil
+}
+
+func replaceSourceAttr(_ []string, attr slog.Attr) slog.Attr {
+	if attr.Key != slog.SourceKey {
+		return attr
+	}
+	source, ok := attr.Value.Any().(*slog.Source)
+	if !ok || source == nil {
+		return attr
+	}
+	return slog.Group(
+		slog.SourceKey,
+		slog.String("path", source.File),
+		slog.String("file", filepath.Base(source.File)),
+		slog.String("function", source.Function),
+		slog.Int("line", source.Line),
+	)
 }
 
 func writer(cfg Config) (io.Writer, error) {
@@ -54,14 +77,15 @@ func writer(cfg Config) (io.Writer, error) {
 	case "stderr":
 		return os.Stderr, nil
 	case "file":
-		if cfg.FilePath == "" {
-			return nil, fmt.Errorf("log file_path cannot be empty when output is file")
+		path, err := filePath(cfg)
+		if err != nil {
+			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(cfg.FilePath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, fmt.Errorf("create log directory: %w", err)
 		}
 		return &lumberjack.Logger{
-			Filename:   cfg.FilePath,
+			Filename:   path,
 			MaxSize:    positiveOrDefault(cfg.MaxSizeMB, 100),
 			MaxBackups: positiveOrDefault(cfg.MaxBackups, 10),
 			MaxAge:     positiveOrDefault(cfg.MaxAgeDays, 30),
@@ -70,6 +94,17 @@ func writer(cfg Config) (io.Writer, error) {
 	default:
 		return nil, fmt.Errorf("unsupported log output %q", cfg.Output)
 	}
+}
+
+func filePath(cfg Config) (string, error) {
+	if cfg.Filename == "" {
+		return "", fmt.Errorf("log filename cannot be empty when output is file")
+	}
+	dir := cfg.Dir
+	if dir == "" {
+		dir = "logs"
+	}
+	return filepath.Join(dir, cfg.Filename), nil
 }
 
 func parseLevel(level string) slog.Level {

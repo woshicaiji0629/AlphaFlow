@@ -17,19 +17,13 @@ ws_base = "wss://fx-ws.gateio.ws/v4/ws/usdt"
 settle = "usdt"
 symbols = ["ETH_USDT"]
 
-[redis]
-addr = "localhost:6379"
-password = ""
-db = 0
-pool_size = 20
-min_idle_conns = 5
-
 [logging]
+service = "market-data"
 level = "info"
 format = "json"
 output = "stdout"
-file_path = "logs/market-data.log"
-add_source = true
+dir = "logs"
+filename = "market-data.log"
 max_size_mb = 100
 max_backups = 10
 max_age_days = 30

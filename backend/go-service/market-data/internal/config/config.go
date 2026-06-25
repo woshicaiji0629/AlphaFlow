@@ -14,7 +14,6 @@ type Config struct {
 	Binance   BinanceConfig   `toml:"binance"`
 	OKX       OKXConfig       `toml:"okx"`
 	Gate      GateConfig      `toml:"gate"`
-	Redis     RedisConfig     `toml:"redis"`
 	Logging   LoggingConfig   `toml:"logging"`
 	WebSocket WebSocketConfig `toml:"websocket"`
 	Retention RetentionConfig `toml:"retention"`
@@ -42,20 +41,13 @@ type GateConfig struct {
 	Symbols  []string `toml:"symbols"`
 }
 
-type RedisConfig struct {
-	Addr         string `toml:"addr"`
-	Password     string `toml:"password"`
-	DB           int    `toml:"db"`
-	PoolSize     int    `toml:"pool_size"`
-	MinIdleConns int    `toml:"min_idle_conns"`
-}
-
 type LoggingConfig struct {
+	Service    string `toml:"service"`
 	Level      string `toml:"level"`
 	Format     string `toml:"format"`
 	Output     string `toml:"output"`
-	FilePath   string `toml:"file_path"`
-	AddSource  bool   `toml:"add_source"`
+	Dir        string `toml:"dir"`
+	Filename   string `toml:"filename"`
 	MaxSizeMB  int    `toml:"max_size_mb"`
 	MaxBackups int    `toml:"max_backups"`
 	MaxAgeDays int    `toml:"max_age_days"`
@@ -110,19 +102,13 @@ func defaultConfig() Config {
 			Settle:   "usdt",
 			Symbols:  []string{"ETH_USDT"},
 		},
-		Redis: RedisConfig{
-			Addr:         "localhost:6379",
-			Password:     "",
-			DB:           0,
-			PoolSize:     20,
-			MinIdleConns: 5,
-		},
 		Logging: LoggingConfig{
+			Service:    "market-data",
 			Level:      "info",
 			Format:     "json",
 			Output:     "stdout",
-			FilePath:   "logs/market-data.log",
-			AddSource:  true,
+			Dir:        "logs",
+			Filename:   "market-data.log",
 			MaxSizeMB:  100,
 			MaxBackups: 10,
 			MaxAgeDays: 30,
@@ -176,9 +162,6 @@ func validate(cfg Config) error {
 		if len(cfg.Gate.Symbols) == 0 {
 			return fmt.Errorf("gate symbols cannot be empty when enabled")
 		}
-	}
-	if cfg.Redis.Addr == "" {
-		return fmt.Errorf("redis addr cannot be empty")
 	}
 	if cfg.Retention.LiquidationLimit <= 0 {
 		return fmt.Errorf("liquidation_limit must be positive")

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"alphaflow/go-service/pkg/constants"
 )
 
 func TestLoadConfigFromTOML(t *testing.T) {
@@ -28,19 +30,13 @@ ws_base = "wss://gate.example.test"
 settle = "USDT"
 symbols = ["eth_usdt"]
 
-[redis]
-addr = "redis.test:6379"
-password = "secret"
-db = 2
-pool_size = 30
-min_idle_conns = 6
-
 [logging]
+service = "test-service"
 level = "debug"
 format = "text"
 output = "file"
-file_path = "logs/test.log"
-add_source = true
+dir = "logs"
+filename = "test.log"
 max_size_mb = 10
 max_backups = 3
 max_age_days = 7
@@ -79,18 +75,6 @@ polling_ttl = "6h"
 	if got := cfg.Gate.Symbols[0]; got != "ETH_USDT" {
 		t.Fatalf("Gate symbol = %q, want ETH_USDT", got)
 	}
-	if cfg.Redis.DB != 2 {
-		t.Fatalf("Redis DB = %d", cfg.Redis.DB)
-	}
-	if cfg.Redis.Password != "secret" {
-		t.Fatalf("Redis password = %q, want secret", cfg.Redis.Password)
-	}
-	if cfg.Redis.PoolSize != 30 {
-		t.Fatalf("Redis pool size = %d, want 30", cfg.Redis.PoolSize)
-	}
-	if cfg.Redis.MinIdleConns != 6 {
-		t.Fatalf("Redis min idle conns = %d, want 6", cfg.Redis.MinIdleConns)
-	}
 	if got := cfg.Retention.LiquidationLimit; got != 100 {
 		t.Fatalf("liquidation limit = %d, want 100", got)
 	}
@@ -106,8 +90,14 @@ polling_ttl = "6h"
 	if got := cfg.Logging.Output; got != "file" {
 		t.Fatalf("log output = %q, want file", got)
 	}
-	if got := cfg.Logging.FilePath; got != "logs/test.log" {
-		t.Fatalf("log file path = %q, want logs/test.log", got)
+	if got := cfg.Logging.Service; got != "test-service" {
+		t.Fatalf("log service = %q, want test-service", got)
+	}
+	if got := cfg.Logging.Dir; got != "logs" {
+		t.Fatalf("log dir = %q, want logs", got)
+	}
+	if got := cfg.Logging.Filename; got != "test.log" {
+		t.Fatalf("log filename = %q, want test.log", got)
 	}
 	if got := cfg.WebSocket.ReconnectDelay; got != "3s" {
 		t.Fatalf("reconnect delay = %q, want 3s", got)
@@ -141,6 +131,23 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	}
 	if got := GateIntervals(); len(got) == 0 || got[0] != "1m" {
 		t.Fatalf("GateIntervals = %#v, want first 1m", got)
+	}
+}
+
+func TestRedisConfigs(t *testing.T) {
+	configs := RedisConfigs()
+	defaultRedis, ok := configs[constants.RedisDefaultInstance]
+	if !ok {
+		t.Fatal("default redis config missing")
+	}
+	if defaultRedis.Addr != "localhost:6379" {
+		t.Fatalf("Redis addr = %q, want localhost:6379", defaultRedis.Addr)
+	}
+	if defaultRedis.PoolSize != 20 {
+		t.Fatalf("Redis pool size = %d, want 20", defaultRedis.PoolSize)
+	}
+	if defaultRedis.MinIdleConns != 5 {
+		t.Fatalf("Redis min idle conns = %d, want 5", defaultRedis.MinIdleConns)
 	}
 }
 
