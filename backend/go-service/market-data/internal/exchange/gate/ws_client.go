@@ -83,6 +83,8 @@ func NewWSClient(baseURL string, settle string, statsInterval string) *WSClient 
 	return &WSClient{baseURL: baseURL, settle: settle, statsInterval: statsInterval}
 }
 
+const readLimit = 1 << 20
+
 func (c *WSClient) Run(
 	ctx context.Context,
 	streams []exchange.Stream,
@@ -94,6 +96,7 @@ func (c *WSClient) Run(
 	if err != nil {
 		return fmt.Errorf("connect websocket: %w", err)
 	}
+	conn.SetReadLimit(readLimit)
 	defer conn.Close(websocket.StatusNormalClosure, "closing")
 
 	for _, stream := range streams {
@@ -270,8 +273,8 @@ func (c *WSClient) dispatchLiquidations(
 	msg messageEnvelope,
 	handler exchange.Handler,
 ) error {
-	var result []wsLiquidation
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
+	result, err := decodeLiquidations(msg.Result)
+	if err != nil {
 		return fmt.Errorf("decode liquidation result: %w", err)
 	}
 	for _, item := range result {
@@ -280,6 +283,19 @@ func (c *WSClient) dispatchLiquidations(
 		}
 	}
 	return nil
+}
+
+func decodeLiquidations(raw json.RawMessage) ([]wsLiquidation, error) {
+	var result []wsLiquidation
+	if err := json.Unmarshal(raw, &result); err == nil {
+		return result, nil
+	}
+
+	var item wsLiquidation
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return nil, err
+	}
+	return []wsLiquidation{item}, nil
 }
 
 func (c *WSClient) klineFromWS(eventTime int64, raw wsKline) (model.Kline, error) {

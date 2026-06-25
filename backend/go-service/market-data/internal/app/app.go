@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
+	"time"
 
-	"alphaflow/go-service/market-data/internal/binance"
+	"alphaflow/go-service/market-data/internal/aggregator"
 	"alphaflow/go-service/market-data/internal/collector"
 	"alphaflow/go-service/market-data/internal/config"
-	"alphaflow/go-service/market-data/internal/gate"
-	"alphaflow/go-service/market-data/internal/okx"
+	"alphaflow/go-service/market-data/internal/exchange/binance"
+	"alphaflow/go-service/market-data/internal/exchange/bitget"
+	"alphaflow/go-service/market-data/internal/exchange/bybit"
+	"alphaflow/go-service/market-data/internal/exchange/gate"
+	"alphaflow/go-service/market-data/internal/indicator"
 	"alphaflow/go-service/market-data/internal/store"
 	"alphaflow/go-service/pkg/constants"
 	"alphaflow/go-service/pkg/httpclient"
@@ -36,11 +42,11 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}()
 
-	collectors, err := buildCollectors(cfg, redisManager)
+	collectors, klineAggregator, indicatorRunner, restartDelay, err := buildRuntime(cfg, redisManager)
 	if err != nil {
 		return err
 	}
-	if err := runCollectors(ctx, collectors); err != nil {
+	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, restartDelay); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("market-data stopped")
 			return nil
@@ -69,27 +75,21 @@ func setupLogger(cfg config.Config) error {
 	return nil
 }
 
-func buildCollectors(
+func buildRuntime(
 	cfg config.Config,
 	redisManager *redisclient.Manager,
-) ([]*collector.Collector, error) {
-	latestTTL, err := config.LatestTTL(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("load latest ttl: %w", err)
-	}
-	pollingTTL, err := config.PollingTTL(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("load polling ttl: %w", err)
-	}
+) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, time.Duration, error) {
 	reconnectDelay, err := config.ReconnectDelay(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("load reconnect delay: %w", err)
+		return nil, nil, nil, 0, fmt.Errorf("load reconnect delay: %w", err)
 	}
 
 	redisStore := store.NewRedisStore(redisManager.Get(constants.RedisDefaultInstance), store.Retention{
-		KlineLimit: cfg.Retention.KlineLimit,
-		LatestTTL:  latestTTL,
-		PollingTTL: pollingTTL,
+		KlineLimit:     config.KlineLimit(),
+		KlineTTL:       config.KlineTTL(),
+		LiquidationTTL: config.LiquidationTTL(),
+		LatestTTL:      config.LatestTTL(),
+		PollingTTL:     config.PollingTTL(),
 	})
 	httpClient := httpclient.New()
 
@@ -101,30 +101,13 @@ func buildCollectors(
 				Intervals:            config.BinanceIntervals(),
 				RESTLimit:            config.RESTLimit(),
 				ReconnectDelay:       reconnectDelay,
-				LiquidationLimit:     cfg.Retention.LiquidationLimit,
+				LiquidationLimit:     config.LiquidationLimit(),
 				PollOpenInterest:     true,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 			},
-			binance.NewRESTClient(cfg.Binance.RESTBase, httpClient),
-			binance.NewWSClient(cfg.Binance.WSBase),
-			redisStore,
-		))
-	}
-	if cfg.OKX.Enabled {
-		collectors = append(collectors, collector.New(
-			collector.Options{
-				Symbols:              cfg.OKX.Symbols,
-				Intervals:            config.OKXIntervals(),
-				RESTLimit:            config.RESTLimit(),
-				ReconnectDelay:       reconnectDelay,
-				LiquidationLimit:     cfg.Retention.LiquidationLimit,
-				PollOpenInterest:     false,
-				OpenInterestInterval: config.OpenInterestInterval(),
-				MarkPriceInterval:    config.MarkPriceInterval(),
-			},
-			okx.NewRESTClient(cfg.OKX.RESTBase, httpClient),
-			okx.NewWSClient(cfg.OKX.WSBase),
+			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
+			binance.NewWSClient(config.BinanceWSBase()),
 			redisStore,
 		))
 	}
@@ -136,42 +119,224 @@ func buildCollectors(
 				Intervals:            gateIntervals,
 				RESTLimit:            config.RESTLimit(),
 				ReconnectDelay:       reconnectDelay,
-				LiquidationLimit:     cfg.Retention.LiquidationLimit,
+				LiquidationLimit:     config.LiquidationLimit(),
 				PollOpenInterest:     false,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 			},
-			gate.NewRESTClient(cfg.Gate.RESTBase, cfg.Gate.Settle, httpClient),
-			gate.NewWSClient(cfg.Gate.WSBase, cfg.Gate.Settle, gateIntervals[0]),
+			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
+			gate.NewWSClient(config.GateWSBase(), config.GateSettle(), gateIntervals[0]),
+			redisStore,
+		))
+	}
+	if cfg.Bitget.Enabled {
+		collectors = append(collectors, collector.New(
+			collector.Options{
+				Symbols:              cfg.Bitget.Symbols,
+				Intervals:            config.BitgetIntervals(),
+				RESTLimit:            config.RESTLimit(),
+				ReconnectDelay:       reconnectDelay,
+				LiquidationLimit:     config.LiquidationLimit(),
+				PollOpenInterest:     false,
+				OpenInterestInterval: config.OpenInterestInterval(),
+				MarkPriceInterval:    config.MarkPriceInterval(),
+			},
+			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
+			bitget.NewWSClient(config.BitgetWSBase(), config.BitgetProductType()),
+			redisStore,
+		))
+	}
+	if cfg.Bybit.Enabled {
+		collectors = append(collectors, collector.New(
+			collector.Options{
+				Symbols:              cfg.Bybit.Symbols,
+				Intervals:            config.BybitIntervals(),
+				RESTLimit:            config.RESTLimit(),
+				ReconnectDelay:       reconnectDelay,
+				LiquidationLimit:     config.LiquidationLimit(),
+				PollOpenInterest:     false,
+				OpenInterestInterval: config.OpenInterestInterval(),
+				MarkPriceInterval:    config.MarkPriceInterval(),
+			},
+			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),
+			bybit.NewWSClient(config.BybitWSBase(), config.BybitCategory()),
 			redisStore,
 		))
 	}
 	if len(collectors) == 0 {
-		return nil, fmt.Errorf("no exchange enabled")
+		return nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
 	}
-	return collectors, nil
+	klineAggregator := aggregator.New(redisStore, aggregator.Options{
+		Rules:           aggregationRules(cfg),
+		ScanInterval:    config.AggregationScanInterval(),
+		LookbackPeriods: config.KlineLimit(),
+	})
+	indicatorRunner := indicator.NewRunner(redisStore, indicator.RunnerOptions{
+		Rules:           indicatorRules(cfg),
+		ScanInterval:    config.IndicatorScanInterval(),
+		LookbackPeriods: config.IndicatorLookbackPeriods(),
+	})
+	return collectors, klineAggregator, indicatorRunner, reconnectDelay, nil
 }
 
-func runCollectors(ctx context.Context, collectors []*collector.Collector) error {
+func runMarketData(
+	ctx context.Context,
+	collectors []*collector.Collector,
+	klineAggregator *aggregator.Aggregator,
+	indicatorRunner *indicator.Runner,
+	restartDelay time.Duration,
+) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, len(collectors))
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
 	for _, c := range collectors {
+		wg.Add(1)
 		go func() {
-			errCh <- c.Run(ctx)
+			defer wg.Done()
+			runCollectorLoop(ctx, c, restartDelay)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- klineAggregator.Run(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- indicatorRunner.Run(ctx)
+	}()
 
 	err := <-errCh
 	cancel()
+	wg.Wait()
 	if err != nil {
 		return err
 	}
-	for range len(collectors) - 1 {
-		if err := <-errCh; err != nil {
-			return err
+	return nil
+}
+
+func runCollectorLoop(ctx context.Context, c *collector.Collector, restartDelay time.Duration) {
+	for {
+		err := c.Run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			slog.Error("collector stopped", "error", err, "restart_delay", restartDelay)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(restartDelay):
 		}
 	}
-	return nil
+}
+
+func aggregationRules(cfg config.Config) []aggregator.Rule {
+	rules := []aggregator.Rule{}
+	if cfg.Binance.Enabled {
+		rules = append(rules, aggregator.Rule{
+			Exchange:       "binance",
+			Market:         "um",
+			Symbols:        cfg.Binance.Symbols,
+			SourceInterval: "5m",
+			TargetInterval: "10m",
+		})
+	}
+	if cfg.Gate.Enabled {
+		rules = append(rules, missingIntervalRules("gate", config.GateSettle(), cfg.Gate.Symbols)...)
+	}
+	if cfg.Bitget.Enabled {
+		rules = append(rules, missingIntervalRules("bitget", strings.ToLower(config.BitgetProductType()), cfg.Bitget.Symbols)...)
+	}
+	if cfg.Bybit.Enabled {
+		rules = append(rules, aggregator.Rule{
+			Exchange:       "bybit",
+			Market:         config.BybitCategory(),
+			Symbols:        cfg.Bybit.Symbols,
+			SourceInterval: "5m",
+			TargetInterval: "10m",
+		})
+	}
+	return rules
+}
+
+func indicatorRules(cfg config.Config) []indicator.Rule {
+	rules := []indicator.Rule{}
+	if cfg.Binance.Enabled {
+		rules = append(rules, indicator.Rule{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   cfg.Binance.Symbols,
+			Intervals: withExtraIntervals(config.BinanceIntervals(), "10m"),
+		})
+	}
+	if cfg.Gate.Enabled {
+		rules = append(rules, indicator.Rule{
+			Exchange:  "gate",
+			Market:    config.GateSettle(),
+			Symbols:   cfg.Gate.Symbols,
+			Intervals: withExtraIntervals(config.GateIntervals(), "3m", "10m", "2h"),
+		})
+	}
+	if cfg.Bitget.Enabled {
+		rules = append(rules, indicator.Rule{
+			Exchange:  "bitget",
+			Market:    strings.ToLower(config.BitgetProductType()),
+			Symbols:   cfg.Bitget.Symbols,
+			Intervals: withExtraIntervals(config.BitgetIntervals(), "3m", "10m", "2h"),
+		})
+	}
+	if cfg.Bybit.Enabled {
+		rules = append(rules, indicator.Rule{
+			Exchange:  "bybit",
+			Market:    config.BybitCategory(),
+			Symbols:   cfg.Bybit.Symbols,
+			Intervals: withExtraIntervals(config.BybitIntervals(), "10m"),
+		})
+	}
+	return rules
+}
+
+func withExtraIntervals(intervals []string, extra ...string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(intervals)+len(extra))
+	for _, interval := range append(intervals, extra...) {
+		if _, ok := seen[interval]; ok {
+			continue
+		}
+		seen[interval] = struct{}{}
+		result = append(result, interval)
+	}
+	return result
+}
+
+func missingIntervalRules(exchange string, market string, symbols []string) []aggregator.Rule {
+	return []aggregator.Rule{
+		{
+			Exchange:       exchange,
+			Market:         market,
+			Symbols:        symbols,
+			SourceInterval: "1m",
+			TargetInterval: "3m",
+		},
+		{
+			Exchange:       exchange,
+			Market:         market,
+			Symbols:        symbols,
+			SourceInterval: "5m",
+			TargetInterval: "10m",
+		},
+		{
+			Exchange:       exchange,
+			Market:         market,
+			Symbols:        symbols,
+			SourceInterval: "1h",
+			TargetInterval: "2h",
+		},
+	}
 }

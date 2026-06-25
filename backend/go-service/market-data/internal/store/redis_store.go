@@ -17,9 +17,11 @@ type RedisStore struct {
 }
 
 type Retention struct {
-	KlineLimit int64
-	LatestTTL  time.Duration
-	PollingTTL time.Duration
+	KlineLimit     int64
+	KlineTTL       time.Duration
+	LiquidationTTL time.Duration
+	LatestTTL      time.Duration
+	PollingTTL     time.Duration
 }
 
 func NewRedisStore(client *redis.Client, retention Retention) *RedisStore {
@@ -47,6 +49,35 @@ func (s *RedisStore) LastOpenTime(
 	return int64(values[0].Score), true, nil
 }
 
+func (s *RedisStore) RangeKlines(
+	ctx context.Context,
+	exchange string,
+	market string,
+	symbol string,
+	interval string,
+	start int64,
+	end int64,
+) ([]model.Kline, error) {
+	key := model.RedisKey(exchange, market, symbol, interval)
+	values, err := s.client.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: strconv.FormatInt(start, 10),
+		Max: strconv.FormatInt(end, 10),
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read klines: %w", err)
+	}
+
+	klines := make([]model.Kline, 0, len(values))
+	for _, value := range values {
+		var kline model.Kline
+		if err := json.Unmarshal([]byte(value), &kline); err != nil {
+			return nil, fmt.Errorf("decode kline: %w", err)
+		}
+		klines = append(klines, kline)
+	}
+	return klines, nil
+}
+
 func (s *RedisStore) UpsertKline(ctx context.Context, kline model.Kline) error {
 	key := model.RedisKey(kline.Exchange, kline.Market, kline.Symbol, kline.Interval)
 	payload, err := json.Marshal(kline)
@@ -62,6 +93,7 @@ func (s *RedisStore) UpsertKline(ctx context.Context, kline model.Kline) error {
 		Member: payload,
 	})
 	pipe.ZRemRangeByRank(ctx, key, 0, -(s.retention.KlineLimit + 1))
+	pipe.Expire(ctx, key, s.retention.KlineTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("upsert kline: %w", err)
 	}
@@ -133,8 +165,50 @@ func (s *RedisStore) AddLiquidation(
 		Member: payload,
 	})
 	pipe.ZRemRangeByRank(ctx, key, 0, -(limit + 1))
+	pipe.Expire(ctx, key, s.retention.LiquidationTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("add liquidation: %w", err)
+	}
+	return nil
+}
+
+func (s *RedisStore) SetMarketStatus(ctx context.Context, status model.MarketStatus) error {
+	key := model.MarketStatusKey(status.Exchange, status.Market)
+	payload, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("marshal market status: %w", err)
+	}
+	if err := s.client.Set(ctx, key, payload, 0).Err(); err != nil {
+		return fmt.Errorf("set market status: %w", err)
+	}
+	return nil
+}
+
+func (s *RedisStore) IsMarketAvailable(ctx context.Context, exchange string, market string) (bool, error) {
+	key := model.MarketStatusKey(exchange, market)
+	value, err := s.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read market status: %w", err)
+	}
+
+	var status model.MarketStatus
+	if err := json.Unmarshal([]byte(value), &status); err != nil {
+		return false, fmt.Errorf("decode market status: %w", err)
+	}
+	return status.Available, nil
+}
+
+func (s *RedisStore) SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
+	key := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal indicator: %w", err)
+	}
+	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
+		return fmt.Errorf("set indicator: %w", err)
 	}
 	return nil
 }

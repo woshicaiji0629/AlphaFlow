@@ -1,0 +1,23 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: alphaflow-redis
+    ports:
+      - "6380:6380"
+    volumes:
+      - ./data/redis:/data
+    command: ["redis-server", "--port", "6380", "--appendonly", "yes"]
+    restart: unless-stopped
+
+  market-data:
+    build:
+      context: ./backend/go-service
+      dockerfile: Dockerfile.market-data
+    container_name: alphaflow-market-data
+    depends_on:
+      - redis
+    environment:
+      ALPHAFLOW_REDIS_ADDR: redis:6380
+    volumes:
+      - ./logs/go-service:/workspace/logs/go-service
+    restart: unless-stopped

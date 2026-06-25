@@ -105,6 +105,8 @@ func NewWSClient(baseURL string) *WSClient {
 	return &WSClient{baseURL: baseURL}
 }
 
+const readLimit = 1 << 20
+
 func (c *WSClient) Run(
 	ctx context.Context,
 	streams []exchange.Stream,
@@ -114,6 +116,7 @@ func (c *WSClient) Run(
 	if err != nil {
 		return fmt.Errorf("connect websocket: %w", err)
 	}
+	conn.SetReadLimit(readLimit)
 	defer conn.Close(websocket.StatusNormalClosure, "closing")
 
 	for {

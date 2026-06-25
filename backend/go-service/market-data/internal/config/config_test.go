@@ -13,22 +13,19 @@ func TestLoadConfigFromTOML(t *testing.T) {
 	path := writeConfig(t, `
 [binance]
 enabled = true
-rest_base = "https://example.test"
-ws_base = "wss://example.test"
 symbols = ["ethusdt", "btcusdt"]
-
-[okx]
-enabled = true
-rest_base = "https://okx.example.test"
-ws_base = "wss://okx.example.test"
-symbols = ["eth-usdt-swap"]
 
 [gate]
 enabled = true
-rest_base = "https://gate.example.test"
-ws_base = "wss://gate.example.test"
-settle = "USDT"
 symbols = ["eth_usdt"]
+
+[bitget]
+enabled = true
+symbols = ["ethusdt"]
+
+[bybit]
+enabled = true
+symbols = ["ethusdt"]
 
 [logging]
 service = "test-service"
@@ -45,11 +42,6 @@ compress = true
 [websocket]
 reconnect_delay = "3s"
 
-[retention]
-kline_limit = 500
-liquidation_limit = 100
-latest_ttl = "12h"
-polling_ttl = "6h"
 `)
 
 	cfg, err := Load(path)
@@ -57,29 +49,23 @@ polling_ttl = "6h"
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Binance.RESTBase != "https://example.test" {
-		t.Fatalf("RESTBase = %q", cfg.Binance.RESTBase)
-	}
 	if got := cfg.Binance.Symbols[0]; got != "ETHUSDT" {
 		t.Fatalf("Binance symbol = %q, want ETHUSDT", got)
-	}
-	if !cfg.OKX.Enabled {
-		t.Fatal("OKX should be enabled")
-	}
-	if got := cfg.OKX.Symbols[0]; got != "ETH-USDT-SWAP" {
-		t.Fatalf("OKX symbol = %q, want ETH-USDT-SWAP", got)
-	}
-	if got := cfg.Gate.Settle; got != "usdt" {
-		t.Fatalf("Gate settle = %q, want usdt", got)
 	}
 	if got := cfg.Gate.Symbols[0]; got != "ETH_USDT" {
 		t.Fatalf("Gate symbol = %q, want ETH_USDT", got)
 	}
-	if got := cfg.Retention.LiquidationLimit; got != 100 {
-		t.Fatalf("liquidation limit = %d, want 100", got)
+	if !cfg.Bitget.Enabled {
+		t.Fatal("Bitget should be enabled")
 	}
-	if got := cfg.Retention.KlineLimit; got != 500 {
-		t.Fatalf("kline limit = %d, want 500", got)
+	if got := cfg.Bitget.Symbols[0]; got != "ETHUSDT" {
+		t.Fatalf("Bitget symbol = %q, want ETHUSDT", got)
+	}
+	if !cfg.Bybit.Enabled {
+		t.Fatal("Bybit should be enabled")
+	}
+	if got := cfg.Bybit.Symbols[0]; got != "ETHUSDT" {
+		t.Fatalf("Bybit symbol = %q, want ETHUSDT", got)
 	}
 	if got := cfg.Logging.Level; got != "debug" {
 		t.Fatalf("log level = %q, want debug", got)
@@ -126,11 +112,47 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	if MarkPriceInterval() != "1s" {
 		t.Fatalf("MarkPriceInterval = %q, want 1s", MarkPriceInterval())
 	}
+	if KlineLimit() != 500 {
+		t.Fatalf("KlineLimit = %d, want 500", KlineLimit())
+	}
+	if KlineTTL() != 7*24*time.Hour {
+		t.Fatalf("KlineTTL = %s, want 168h", KlineTTL())
+	}
+	if LiquidationLimit() != 200 {
+		t.Fatalf("LiquidationLimit = %d, want 200", LiquidationLimit())
+	}
+	if LiquidationTTL() != 24*time.Hour {
+		t.Fatalf("LiquidationTTL = %s, want 24h", LiquidationTTL())
+	}
+	if LatestTTL() != 24*time.Hour {
+		t.Fatalf("LatestTTL = %s, want 24h", LatestTTL())
+	}
+	if PollingTTL() != 24*time.Hour {
+		t.Fatalf("PollingTTL = %s, want 24h", PollingTTL())
+	}
 	if got := BinanceIntervals(); len(got) == 0 || got[0] != "1m" {
 		t.Fatalf("BinanceIntervals = %#v, want first 1m", got)
 	}
+	if BinanceRESTBase() == "" || BinanceWSBase() == "" {
+		t.Fatal("Binance endpoints should not be empty")
+	}
 	if got := GateIntervals(); len(got) == 0 || got[0] != "1m" {
 		t.Fatalf("GateIntervals = %#v, want first 1m", got)
+	}
+	if GateRESTBase() == "" || GateWSBase() == "" || GateSettle() != "usdt" {
+		t.Fatal("Gate constants should be set")
+	}
+	if got := BitgetIntervals(); len(got) == 0 || got[0] != "1m" {
+		t.Fatalf("BitgetIntervals = %#v, want first 1m", got)
+	}
+	if BitgetRESTBase() == "" || BitgetWSBase() == "" || BitgetProductType() != "USDT-FUTURES" {
+		t.Fatal("Bitget constants should be set")
+	}
+	if got := BybitIntervals(); len(got) == 0 || got[0] != "1m" {
+		t.Fatalf("BybitIntervals = %#v, want first 1m", got)
+	}
+	if BybitRESTBase() == "" || BybitWSBase() == "" || BybitCategory() != "linear" {
+		t.Fatal("Bybit constants should be set")
 	}
 }
 
@@ -140,14 +162,24 @@ func TestRedisConfigs(t *testing.T) {
 	if !ok {
 		t.Fatal("default redis config missing")
 	}
-	if defaultRedis.Addr != "localhost:6379" {
-		t.Fatalf("Redis addr = %q, want localhost:6379", defaultRedis.Addr)
+	if defaultRedis.Addr != "localhost:6380" {
+		t.Fatalf("Redis addr = %q, want localhost:6380", defaultRedis.Addr)
 	}
 	if defaultRedis.PoolSize != 20 {
 		t.Fatalf("Redis pool size = %d, want 20", defaultRedis.PoolSize)
 	}
 	if defaultRedis.MinIdleConns != 5 {
 		t.Fatalf("Redis min idle conns = %d, want 5", defaultRedis.MinIdleConns)
+	}
+}
+
+func TestRedisConfigsFromEnv(t *testing.T) {
+	t.Setenv("ALPHAFLOW_REDIS_ADDR", "redis:6380")
+
+	configs := RedisConfigs()
+	defaultRedis := configs[constants.RedisDefaultInstance]
+	if defaultRedis.Addr != "redis:6380" {
+		t.Fatalf("Redis addr = %q, want redis:6380", defaultRedis.Addr)
 	}
 }
 

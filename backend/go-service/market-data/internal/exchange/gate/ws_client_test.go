@@ -208,6 +208,32 @@ func TestDispatchLiquidation(t *testing.T) {
 	}
 }
 
+func TestDispatchSingleObjectLiquidation(t *testing.T) {
+	raw := json.RawMessage(`{
+		"time_ms": 1541505434123,
+		"channel": "futures.public_liquidates",
+		"event": "update",
+		"result": {
+			"price": 215.1,
+			"size": "-124",
+			"time_ms": 1541486601123,
+			"contract": "ETH_USDT"
+		}
+	}`)
+
+	handler := &fakeHandler{}
+	client := NewWSClient("wss://example.test", "usdt", "1m")
+	if err := client.dispatch(context.Background(), raw, handler); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if handler.liquidation.Symbol != "ETH_USDT" {
+		t.Fatalf("symbol = %q, want ETH_USDT", handler.liquidation.Symbol)
+	}
+	if handler.liquidation.Price != "215.1" {
+		t.Fatalf("price = %q, want 215.1", handler.liquidation.Price)
+	}
+}
+
 func TestParseStreamName(t *testing.T) {
 	interval, symbol, err := parseStreamName("1h_ETH_USDT")
 	if err != nil {

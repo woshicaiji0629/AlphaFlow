@@ -31,3 +31,7 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Local runtime data
+/data/redis/
+/logs/

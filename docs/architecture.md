@@ -99,14 +99,7 @@ Go 行情服务使用本地 TOML 配置文件维护币种、周期、Redis 和 B
 backend/go-service/market-data/configs/local.toml
 ```
 
-交易所接入通过 `market-data/internal/exchange` 定义统一 REST/WebSocket 适配边界。Binance 作为当前第一个适配器，后续 OKX 等交易所应实现同一组接口，collector 不直接绑定具体交易所实现。
-
-OKX 第一版只接入 Swap K 线：
-
-- REST 初始化和重连补偿。
-- WebSocket K 线实时同步。
-- 默认 symbol 为 `ETH-USDT-SWAP`。
-- Redis key 使用 `okx:swap:k:ETH-USDT-SWAP:{interval}`。
+交易所接入通过 `market-data/internal/exchange` 定义统一 REST/WebSocket 适配边界。Binance 和 Gate 适配器实现同一组接口，collector 不直接绑定具体交易所实现。
 
 Python 服务初期从 Redis 消费行情数据，重点放在策略实验、回测入口，以及后续管理 API。
 

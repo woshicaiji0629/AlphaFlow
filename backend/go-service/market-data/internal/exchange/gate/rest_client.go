@@ -21,13 +21,35 @@ type RESTClient struct {
 }
 
 type restKline struct {
-	Time        float64 `json:"t"`
-	Volume      string  `json:"v"`
-	Close       string  `json:"c"`
-	High        string  `json:"h"`
-	Low         string  `json:"l"`
-	Open        string  `json:"o"`
-	QuoteVolume string  `json:"sum"`
+	Time        float64    `json:"t"`
+	Volume      flexString `json:"v"`
+	Close       flexString `json:"c"`
+	High        flexString `json:"h"`
+	Low         flexString `json:"l"`
+	Open        flexString `json:"o"`
+	QuoteVolume flexString `json:"sum"`
+}
+
+type flexString string
+
+func (s *flexString) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = flexString(text)
+		return nil
+	}
+
+	var number float64
+	if err := json.Unmarshal(data, &number); err == nil {
+		*s = flexString(strconv.FormatFloat(number, 'f', -1, 64))
+		return nil
+	}
+
+	return fmt.Errorf("unexpected value for string field: %s", string(data))
+}
+
+func (s flexString) String() string {
+	return string(s)
 }
 
 func NewRESTClient(baseURL string, settle string, httpClient HTTPClient) *RESTClient {
@@ -109,12 +131,12 @@ func (c *RESTClient) klineFromREST(symbol string, interval string, raw restKline
 		Interval:    interval,
 		OpenTime:    openTime,
 		CloseTime:   openTime + intervalMillis - 1,
-		Open:        raw.Open,
-		High:        raw.High,
-		Low:         raw.Low,
-		Close:       raw.Close,
-		Volume:      raw.Volume,
-		QuoteVolume: raw.QuoteVolume,
+		Open:        raw.Open.String(),
+		High:        raw.High.String(),
+		Low:         raw.Low.String(),
+		Close:       raw.Close.String(),
+		Volume:      raw.Volume.String(),
+		QuoteVolume: raw.QuoteVolume.String(),
 		IsClosed:    true,
 	}, nil
 }

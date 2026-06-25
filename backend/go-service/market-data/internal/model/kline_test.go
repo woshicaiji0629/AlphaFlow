@@ -7,6 +7,7 @@ func TestIntervalMillis(t *testing.T) {
 		"1m":  60000,
 		"3m":  180000,
 		"5m":  300000,
+		"10m": 600000,
 		"15m": 900000,
 		"30m": 1800000,
 		"1h":  3600000,
@@ -26,8 +27,8 @@ func TestIntervalMillis(t *testing.T) {
 }
 
 func TestIntervalMillisRejectsUnsupportedInterval(t *testing.T) {
-	if _, err := IntervalMillis("10m"); err == nil {
-		t.Fatal("expected unsupported 10m interval")
+	if _, err := IntervalMillis("6m"); err == nil {
+		t.Fatal("expected unsupported 6m interval")
 	}
 }
 

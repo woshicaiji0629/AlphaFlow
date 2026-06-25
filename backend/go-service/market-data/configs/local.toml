@@ -1,28 +1,25 @@
 [binance]
 enabled = true
-rest_base = "https://fapi.binance.com"
-ws_base = "wss://fstream.binance.com"
 symbols = ["ETHUSDT"]
-
-[okx]
-enabled = false
-rest_base = "https://www.okx.com"
-ws_base = "wss://ws.okx.com:8443/ws/v5/public"
-symbols = ["ETH-USDT-SWAP"]
 
 [gate]
 enabled = true
-rest_base = "https://api.gateio.ws/api/v4"
-ws_base = "wss://fx-ws.gateio.ws/v4/ws/usdt"
-settle = "usdt"
 symbols = ["ETH_USDT"]
+
+[bitget]
+enabled = false
+symbols = ["ETHUSDT"]
+
+[bybit]
+enabled = false
+symbols = ["ETHUSDT"]
 
 [logging]
 service = "market-data"
 level = "info"
 format = "json"
-output = "stdout"
-dir = "logs"
+output = "file"
+dir = "../../logs/go-service"
 filename = "market-data.log"
 max_size_mb = 100
 max_backups = 10
@@ -31,9 +28,3 @@ compress = true
 
 [websocket]
 reconnect_delay = "5s"
-
-[retention]
-kline_limit = 1000
-liquidation_limit = 200
-latest_ttl = "24h"
-polling_ttl = "24h"
