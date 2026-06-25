@@ -17,6 +17,7 @@ func addMACDFeatures(values map[string]string, signals map[string]string, closes
 	signals["macd_cross"] = macdCross(series)
 	signals["macd_zone"] = macdZone(last)
 	signals["macd_momentum"] = macdMomentum(series)
+	signals["macd_divergence"] = macdDivergence(closes, series)
 }
 
 func macd(values []float64, fast int, slow int, signal int) (float64, float64, float64, bool) {
@@ -116,4 +117,86 @@ func macdMomentum(series []macdPoint) string {
 	default:
 		return "flat"
 	}
+}
+
+func macdDivergence(closes []float64, series []macdPoint) string {
+	if len(closes) < 30 || len(series) < 30 {
+		return "none"
+	}
+	offset := len(closes) - len(series)
+	priceWindow := closes[offset:]
+	priceHighs, priceLows := valuePivots(priceWindow, 2)
+	macdValues := make([]float64, len(series))
+	for index, point := range series {
+		macdValues[index] = point.hist
+	}
+	macdHighs, macdLows := valuePivots(macdValues, 2)
+	if len(priceHighs) >= 2 && len(macdHighs) >= 2 {
+		prevPrice, lastPrice := lastTwoSwings(priceHighs)
+		prevMACD, lastMACD := nearestLevels(macdHighs, prevPrice.recency, lastPrice.recency)
+		if lastPrice.price > prevPrice.price && lastMACD.price < prevMACD.price {
+			return "bearish"
+		}
+	}
+	if len(priceLows) >= 2 && len(macdLows) >= 2 {
+		prevPrice, lastPrice := lastTwoSwings(priceLows)
+		prevMACD, lastMACD := nearestLevels(macdLows, prevPrice.recency, lastPrice.recency)
+		if lastPrice.price < prevPrice.price && lastMACD.price > prevMACD.price {
+			return "bullish"
+		}
+	}
+	return "none"
+}
+
+func valuePivots(values []float64, width int) ([]priceLevel, []priceLevel) {
+	highs := []priceLevel{}
+	lows := []priceLevel{}
+	if width <= 0 || len(values) < width*2+1 {
+		return highs, lows
+	}
+	for index := width; index < len(values)-width; index++ {
+		isHigh := true
+		isLow := true
+		for offset := 1; offset <= width; offset++ {
+			if values[index] <= values[index-offset] || values[index] <= values[index+offset] {
+				isHigh = false
+			}
+			if values[index] >= values[index-offset] || values[index] >= values[index+offset] {
+				isLow = false
+			}
+		}
+		if isHigh {
+			highs = append(highs, priceLevel{price: values[index], recency: index, touches: 1})
+		}
+		if isLow {
+			lows = append(lows, priceLevel{price: values[index], recency: index, touches: 1})
+		}
+	}
+	return highs, lows
+}
+
+func nearestLevels(levels []priceLevel, firstRecency int, secondRecency int) (priceLevel, priceLevel) {
+	first := nearestLevel(levels, firstRecency)
+	second := nearestLevel(levels, secondRecency)
+	return first, second
+}
+
+func nearestLevel(levels []priceLevel, recency int) priceLevel {
+	best := levels[0]
+	bestDistance := absFloat(float64(levels[0].recency - recency))
+	for _, level := range levels[1:] {
+		distance := absFloat(float64(level.recency - recency))
+		if distance < bestDistance {
+			best = level
+			bestDistance = distance
+		}
+	}
+	return best
+}
+
+func absFloat(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
 }

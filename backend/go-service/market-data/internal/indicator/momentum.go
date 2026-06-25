@@ -11,6 +11,7 @@ func addRSIFeatures(values map[string]string, signals map[string]string, closes 
 	previous, okPrevious := rsi(closes[:len(closes)-3], period)
 	setValue(values, "rsi_slope3", value-previous, okPrevious)
 	signals["rsi_state"] = rsiState(value)
+	signals["rsi_divergence"] = rsiDivergence(closes, period)
 }
 
 func addOscillatorFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
@@ -87,6 +88,54 @@ func rsi(values []float64, period int) (float64, bool) {
 	}
 	rs := avgGain / avgLoss
 	return 100 - 100/(1+rs), true
+}
+
+func rsiSeries(values []float64, period int) ([]float64, bool) {
+	if period <= 0 || len(values) <= period {
+		return nil, false
+	}
+	series := make([]float64, 0, len(values)-period)
+	for end := period + 1; end <= len(values); end++ {
+		value, ok := rsi(values[:end], period)
+		if !ok {
+			continue
+		}
+		series = append(series, value)
+	}
+	return series, len(series) > 0
+}
+
+func rsiDivergence(closes []float64, period int) string {
+	series, ok := rsiSeries(closes, period)
+	if !ok || len(closes) < 30 || len(series) < 16 {
+		return "none"
+	}
+	return rsiDivergenceFromSeries(closes, series)
+}
+
+func rsiDivergenceFromSeries(closes []float64, series []float64) string {
+	if len(closes) < 30 || len(series) < 16 {
+		return "none"
+	}
+	offset := len(closes) - len(series)
+	priceWindow := closes[offset:]
+	priceHighs, priceLows := valuePivots(priceWindow, 2)
+	rsiHighs, rsiLows := valuePivots(series, 2)
+	if len(priceHighs) >= 2 && len(rsiHighs) >= 2 {
+		prevPrice, lastPrice := lastTwoSwings(priceHighs)
+		prevRSI, lastRSI := nearestLevels(rsiHighs, prevPrice.recency, lastPrice.recency)
+		if lastPrice.price > prevPrice.price && lastRSI.price < prevRSI.price {
+			return "bearish"
+		}
+	}
+	if len(priceLows) >= 2 && len(rsiLows) >= 2 {
+		prevPrice, lastPrice := lastTwoSwings(priceLows)
+		prevRSI, lastRSI := nearestLevels(rsiLows, prevPrice.recency, lastPrice.recency)
+		if lastPrice.price < prevPrice.price && lastRSI.price > prevRSI.price {
+			return "bullish"
+		}
+	}
+	return "none"
 }
 
 func rsiState(value float64) string {

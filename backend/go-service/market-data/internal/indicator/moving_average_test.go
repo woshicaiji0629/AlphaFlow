@@ -16,6 +16,11 @@ func TestMovingAverageFeatures(t *testing.T) {
 		"dema21",
 		"tema21",
 		"kama10",
+		"alligator_jaw",
+		"alligator_teeth",
+		"alligator_lips",
+		"alligator_spread_pct",
+		"ma_group_spread_pct",
 		"hma21_slope3_pct",
 		"ema_spread_pct",
 		"ma_trend_strength",
@@ -26,6 +31,17 @@ func TestMovingAverageFeatures(t *testing.T) {
 	}
 	if signals["ma_state"] != "bull" {
 		t.Fatalf("ma_state = %q, want bull", signals["ma_state"])
+	}
+	if signals["alligator_direction"] != "bull" {
+		t.Fatalf("alligator_direction = %q, want bull", signals["alligator_direction"])
+	}
+	if signals["alligator_state"] == "" {
+		t.Fatalf("missing alligator_state: %#v", signals)
+	}
+	for _, key := range []string{"ma_arrangement", "ma_cross", "ma_spread_state", "ma_compression", "ma_slope_state", "ma_breakout"} {
+		if signals[key] == "" {
+			t.Fatalf("missing %s in %#v", key, signals)
+		}
 	}
 }
 
@@ -51,5 +67,36 @@ func TestKAMAHandlesFlatSeries(t *testing.T) {
 	}
 	if got != 100 {
 		t.Fatalf("kama = %v, want 100", got)
+	}
+}
+
+func TestAlligatorHelpers(t *testing.T) {
+	jaw, teeth, lips, ok := alligator(linearValues(80, 100, 1))
+	if !ok {
+		t.Fatal("alligator returned false")
+	}
+	if got := alligatorDirection(jaw, teeth, lips); got != "bull" {
+		t.Fatalf("alligatorDirection = %q, want bull", got)
+	}
+	if got := alligatorState(0.1); got != "sleeping" {
+		t.Fatalf("alligatorState sleeping = %q", got)
+	}
+	if got := alligatorState(1); got != "eating" {
+		t.Fatalf("alligatorState eating = %q", got)
+	}
+}
+
+func TestMovingAverageStructureHelpers(t *testing.T) {
+	if got := movingAverageArrangement(3, 2, 1); got != "bull" {
+		t.Fatalf("movingAverageArrangement bull = %q", got)
+	}
+	if got := spreadState(12, 10); got != "expanding" {
+		t.Fatalf("spreadState expanding = %q", got)
+	}
+	if got := compressionState(0.1, 100); got != "compressed" {
+		t.Fatalf("compressionState compressed = %q", got)
+	}
+	if got := movingAverageBreakout(110, 100, 101, 102); got != "above_group" {
+		t.Fatalf("movingAverageBreakout = %q", got)
 	}
 }

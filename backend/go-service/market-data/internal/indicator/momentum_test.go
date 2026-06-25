@@ -26,6 +26,20 @@ func TestRSIFeatures(t *testing.T) {
 	if signals["rsi_state"] != "overbought" {
 		t.Fatalf("rsi_state = %q, want overbought", signals["rsi_state"])
 	}
+	if signals["rsi_divergence"] == "" {
+		t.Fatalf("missing rsi_divergence: %#v", signals)
+	}
+}
+
+func TestRSIDivergence(t *testing.T) {
+	closes := []float64{100, 101, 102, 103, 110, 104, 103, 102, 101, 102, 103, 104, 120, 105, 104, 103, 102, 103, 104, 105, 130, 106, 105, 104, 103, 104, 105, 106, 140, 107, 106, 105, 104, 105}
+	rsiValues := []float64{40, 41, 42, 43, 70, 43, 42, 41, 40, 41, 42, 43, 62, 43, 42, 41, 40, 41, 42, 43, 55, 43, 42, 41, 40, 41, 42, 43, 50, 42, 41, 40, 41, 42}
+	if got := rsiDivergenceFromSeries(closes, rsiValues); got != "bearish" {
+		t.Fatalf("rsiDivergenceFromSeries = %q, want bearish", got)
+	}
+	if got := rsiDivergence(closes[:20], 14); got != "none" {
+		t.Fatalf("short rsiDivergence = %q, want none", got)
+	}
 }
 
 func TestOscillatorFeatures(t *testing.T) {

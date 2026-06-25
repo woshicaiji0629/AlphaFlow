@@ -53,8 +53,36 @@ func TestAddMACDFeatures(t *testing.T) {
 	if values["macd_zero_distance"] == "" {
 		t.Fatalf("missing macd_zero_distance: %#v", values)
 	}
-	if signals["macd_cross"] == "" || signals["macd_zone"] == "" || signals["macd_momentum"] == "" {
+	if signals["macd_cross"] == "" || signals["macd_zone"] == "" || signals["macd_momentum"] == "" || signals["macd_divergence"] == "" {
 		t.Fatalf("missing macd signals: %#v", signals)
+	}
+}
+
+func TestMACDDivergence(t *testing.T) {
+	closes := []float64{100, 105, 102, 108, 104, 112, 106, 116, 110, 120}
+	series := []macdPoint{
+		{hist: 1},
+		{hist: 4},
+		{hist: 2},
+		{hist: 3},
+		{hist: 1},
+		{hist: 2},
+		{hist: 0.5},
+		{hist: 1},
+		{hist: 0.4},
+		{hist: 0.6},
+	}
+	if got := macdDivergence(closes, series); got != "none" {
+		t.Fatalf("short macdDivergence = %q, want none", got)
+	}
+	closes = []float64{100, 101, 102, 103, 110, 104, 103, 102, 101, 102, 103, 104, 120, 105, 104, 103, 102, 103, 104, 105, 130, 106, 105, 104, 103, 104, 105, 106, 140, 107, 106, 105, 104, 105}
+	series = make([]macdPoint, len(closes))
+	histValues := []float64{0, 1, 2, 3, 8, 3, 2, 1, 0, 1, 2, 3, 6, 3, 2, 1, 0, 1, 2, 3, 4, 3, 2, 1, 0, 1, 2, 3, 2, 1, 0, -1, 0, 1}
+	for index := range series {
+		series[index] = macdPoint{hist: histValues[index]}
+	}
+	if got := macdDivergence(closes, series); got != "bearish" {
+		t.Fatalf("macdDivergence = %q, want bearish", got)
 	}
 }
 
