@@ -21,10 +21,14 @@ help:
 	@echo "  make redis-down        Stop local Redis"
 	@echo "  make redis-logs        Tail Redis logs"
 	@echo "  make redis-cli         Open redis-cli in the Redis container"
+	@echo "  make clickhouse-up     Start local ClickHouse with Docker"
+	@echo "  make clickhouse-down   Stop local ClickHouse"
+	@echo "  make clickhouse-logs   Tail ClickHouse logs"
+	@echo "  make clickhouse-client Open clickhouse-client in the ClickHouse container"
 	@echo "  make market-data-up    Start market-data with Docker"
 	@echo "  make market-data-down  Stop market-data"
 	@echo "  make market-data-logs  Tail market-data logs"
-	@echo "  make stack-up          Start Redis and market-data"
+	@echo "  make stack-up          Start Redis, ClickHouse, and market-data"
 	@echo "  make check            Run all available checks"
 
 .PHONY: py-sync
@@ -89,6 +93,22 @@ redis-logs:
 redis-cli:
 	docker compose exec redis redis-cli -p 6380
 
+.PHONY: clickhouse-up
+clickhouse-up:
+	docker compose up -d clickhouse
+
+.PHONY: clickhouse-down
+clickhouse-down:
+	docker compose stop clickhouse
+
+.PHONY: clickhouse-logs
+clickhouse-logs:
+	docker compose logs -f clickhouse
+
+.PHONY: clickhouse-client
+clickhouse-client:
+	docker compose exec clickhouse clickhouse-client
+
 .PHONY: market-data-up
 market-data-up:
 	docker compose up -d --build market-data
@@ -103,7 +123,7 @@ market-data-logs:
 
 .PHONY: stack-up
 stack-up:
-	docker compose up -d --build redis market-data
+	docker compose up -d --build redis clickhouse market-data
 
 .PHONY: check
 check: py-check go-market-data-check

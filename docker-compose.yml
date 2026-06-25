@@ -9,6 +9,17 @@ services:
     command: ["redis-server", "--port", "6380", "--appendonly", "yes"]
     restart: unless-stopped
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.6-alpine
+    container_name: alphaflow-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./logs/clickhouse:/var/log/clickhouse-server
+    restart: unless-stopped
+
   market-data:
     build:
       context: ./backend/go-service
