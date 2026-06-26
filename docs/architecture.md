@@ -10,6 +10,7 @@ Implemented:
 
 - Go `market-data` service for exchange market data collection.
 - Redis cache and handoff layer.
+- ClickHouse history storage for closed K-lines and indicator snapshots.
 - Derived K-line aggregation for missing intervals such as `10m`.
 - Technical indicator calculation from closed K-lines.
 - Minimal Python `alphaflow-core` scaffold.
@@ -22,7 +23,6 @@ Not implemented as production modules yet:
 - Execution service.
 - Real-time risk service.
 - Frontend.
-- Durable long-term market data storage.
 
 ## Repository Structure
 
@@ -66,7 +66,7 @@ Go is intended for:
 ```text
 Exchange REST/WebSocket
   -> backend/go-service/market-data
-  -> Redis
+  -> Redis + ClickHouse
   -> future Python strategy/backtest/API workflows
 ```
 
@@ -75,7 +75,7 @@ The Go `market-data` service currently contains these internal responsibilities:
 - `collector`: exchange REST initialization, WebSocket sync, reconnect loop, polling data sync.
 - `aggregator`: derived K-line generation for intervals not provided natively by an exchange.
 - `indicator`: technical indicator calculation from closed K-lines.
-- `store`: Redis read/write boundary for K-lines, prices, open interest, liquidations, market status, and indicator snapshots.
+- `store`: Redis read/write boundary for real-time state, ClickHouse history writes for closed K-lines and indicators, and Redis-backed ClickHouse retry queues.
 - `exchange`: REST/WebSocket adapters for supported exchanges.
 
 For detailed service behavior, see [market-data.md](market-data.md).
@@ -101,7 +101,17 @@ Redis is currently used for:
 - Recent liquidation retention.
 - Latest indicator snapshot storage.
 
-Redis is not intended to be the final long-term historical market data store. Future long-term storage options can include ClickHouse, TimescaleDB, PostgreSQL, object storage, or another fit-for-purpose system.
+Redis is not intended to be the final long-term historical market data store. ClickHouse stores closed K-line and indicator history for analytical consumers.
+
+## ClickHouse Role
+
+ClickHouse is currently used for:
+
+- Closed K-line history.
+- Indicator snapshot history.
+- Analytical reads by future research, backtest, reporting, and API workflows.
+
+ClickHouse write failures are compensated through Redis pending and processing queues so temporary ClickHouse outages do not directly break the real-time Redis path.
 
 ## Future Go Services
 
@@ -138,21 +148,22 @@ backend/python-service/
 - Long-running Go services should accept context cancellation and exit gracefully on SIGINT/SIGTERM.
 - WebSocket collectors reconnect after `reconnect_delay`.
 - Collector startup and WebSocket reconnects should perform REST compensation before real-time sync.
+- WebSocket read and subscribe failures trigger reconnects; single-message dispatch failures are logged and skipped.
 - Polling task failures should be logged without stopping the whole service unless the failure makes the service unusable.
 
 ## Current Decisions
 
-- `market-data` writes stable internal market data models to Redis.
-- Strategy and API consumers should read from Redis for the current stage.
+- `market-data` writes real-time market data models to Redis.
+- `market-data` writes closed K-lines and indicator snapshots to ClickHouse when enabled.
+- Real-time strategy consumers should read from Redis; historical research/backtest/API consumers should read from ClickHouse.
 - Derived `10m` K-lines are generated inside Go from smaller source intervals.
 - Indicator calculation uses closed K-lines only.
-- Latest indicator snapshots are stored as Redis string JSON values.
+- Indicator calculation skips repeated work for the same closed K-line and emits basic data quality fields.
+- Latest indicator snapshots are stored as Redis string JSON values and retained historically in ClickHouse.
 
 ## Open Decisions
 
 - Whether derived `10m` K-lines should always use `5m`, or use `1m` for some exchanges and use cases.
-- Which durable store should hold long-term historical market data.
-- How much indicator history should be retained in Redis or durable storage.
 - Which service owns strategy signal generation.
 - When to introduce execution and real-time risk services.
 - Whether indicator parameters should become runtime config.

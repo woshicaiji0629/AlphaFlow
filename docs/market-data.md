@@ -27,14 +27,19 @@ The service currently handles:
 - Exchange REST initialization.
 - Exchange WebSocket market data sync.
 - WebSocket reconnect and REST compensation.
+- WebSocket reconnect with exponential backoff.
+- WebSocket stream sharding by code-level max streams per connection.
+- WebSocket handler event queue for store-write backpressure isolation.
+- WebSocket single-message decode/dispatch error isolation.
 - Latest price, mark price, book ticker, open interest, liquidation, and K-line writes to Redis.
+- Closed K-line and indicator history writes to ClickHouse.
+- ClickHouse retry compensation through Redis pending queues.
 - Derived K-line aggregation for selected missing intervals.
 - Technical indicator calculation from closed K-lines.
 - Market availability status tracking.
 
 It does not currently handle:
 
-- Long-term historical storage.
 - Trading strategy execution.
 - Order placement.
 - Real-time risk checks.
@@ -45,9 +50,9 @@ It does not currently handle:
 Local Docker Compose provides:
 
 - Redis for latest state, real-time cache, and low-latency service handoff.
-- ClickHouse for future K-line, indicator, and market event time-series history.
+- ClickHouse for closed K-line and indicator time-series history.
 
-ClickHouse is currently available as infrastructure only. The Go service still writes market data and indicator snapshots to Redis; ClickHouse table schema and write paths should be added in a separate change.
+The Go service writes real-time state to Redis first. When ClickHouse is enabled, closed K-lines and indicator snapshots are also written to ClickHouse. Failed ClickHouse writes are persisted to a Redis retry queue and retried by a background worker.
 
 ## Package Map
 
@@ -59,7 +64,7 @@ market-data/
   internal/collector/        # REST bootstrap, WebSocket sync, polling tasks
   internal/aggregator/       # Derived K-line aggregation
   internal/indicator/        # Technical indicator calculations and runner
-  internal/store/            # Redis persistence boundary
+  internal/store/            # Redis and ClickHouse persistence boundary
   internal/model/            # Internal data models and Redis key helpers
   internal/exchange/         # Exchange interfaces and adapters
 ```
@@ -74,7 +79,7 @@ backend/go-service/pkg/
 
 `internal/app` builds:
 
-- One Redis-backed store.
+- One Redis-backed store with optional ClickHouse history writes.
 - One collector per enabled exchange.
 - One K-line aggregator.
 - One indicator runner.
@@ -130,7 +135,36 @@ The current indicator set includes:
 - Price action and structure: candle patterns, Heikin Ashi, support/resistance, Fibonacci, pivot points, Ichimoku, smart money signals.
 - Derived candle features: change percent, amplitude percent, body ratio, shadow ratios, volume ratios.
 
-Indicator calculation currently uses closed K-lines only. Latest snapshots are stored in Redis and are not yet retained as historical series.
+Indicator calculation currently uses closed K-lines only. The runner tracks the latest calculated indicator open time per exchange, market, symbol, and interval, and skips repeated calculation for the same closed K-line.
+
+Each indicator snapshot includes basic data quality fields:
+
+- `values.sample_count`: number of closed K-lines used.
+- `values.required_count`: minimum sample count expected by the configured moving-average periods.
+- `signals.data_quality`: `ok`, `insufficient`, `gap`, `invalid_ohlc`, or `zero_volume`.
+- `signals.data_quality_reason`: optional detail for non-`ok` quality states.
+
+Latest snapshots are stored in Redis; when ClickHouse is enabled, each snapshot is also retained as historical series data.
+
+## ClickHouse Tables
+
+ClickHouse is used for durable analytical history, not for real-time state handoff.
+
+Current tables:
+
+- `market_klines`: closed K-line history keyed by exchange, market, symbol, interval, and open time.
+- `indicator_snapshots`: indicator snapshot history keyed by exchange, market, symbol, interval, and open time.
+
+Both tables use `ReplacingMergeTree(updated_at_ms)` so repeated writes for the same logical row can be deduplicated by ClickHouse merges. Price and volume fields are stored as strings to preserve exchange precision without forcing a decimal scale in the first implementation.
+
+ClickHouse write failures do not directly break the Redis real-time path. Failed records are written to Redis queues:
+
+```text
+market-data:clickhouse:pending
+market-data:clickhouse:processing
+```
+
+The background retry worker moves records from `pending` to `processing`, writes ClickHouse, and removes them after success. Records left in `processing` are recovered back to `pending` when the worker starts.
 
 ## Redis Keys
 
@@ -154,6 +188,8 @@ Common types:
 - `oi` = open interest
 - `liq` = liquidation sorted set
 - `ind` = latest indicator snapshot
+- `ind:last` = latest calculated indicator open time
+- `ws` = exchange WebSocket connection health
 
 Examples:
 
@@ -165,9 +201,22 @@ bn:um:bt:ETHUSDT
 bn:um:oi:ETHUSDT
 bn:um:liq:ETHUSDT
 bn:um:ind:ETHUSDT:1m
+bn:um:ind:last:ETHUSDT:1m
+bn:um:ws
 ```
 
-K-lines and liquidations use Redis sorted sets. The score is the event/open time in milliseconds. Latest state and indicator snapshots use Redis string JSON values.
+K-lines and liquidations use Redis sorted sets. The score is the event/open time in milliseconds. Latest state, indicator snapshots, indicator calculation cursors, and WebSocket health use Redis string values.
+
+WebSocket health records include connection state, last start/stop timestamps, last error, reconnect count, and consecutive failure count. They are operational state for monitoring and troubleshooting, not durable history.
+
+When stream sharding is enabled, each shard writes its own health key:
+
+```text
+bn:um:ws:0
+bn:um:ws:1
+```
+
+Each shard status includes `shard`, `stream_count`, and `connection_count`.
 
 ## Retention
 
@@ -179,6 +228,7 @@ Current code-level defaults:
 - Liquidation TTL is 24 hours.
 - Latest price, mark price, book ticker, and indicator TTL is 24 hours.
 - Polling state such as open interest TTL is 24 hours.
+- ClickHouse retry queue retains up to 100000 pending records by default.
 
 These values are not yet TOML-configurable.
 
@@ -232,14 +282,40 @@ Run Go tests:
 make go-market-data-test
 ```
 
+Run the collector event queue load test:
+
+```sh
+cd backend/go-service/market-data
+go run ./cmd/market-data-loadtest -symbols=50 -duration=30s -rate=5000 -store-latency=1ms
+```
+
+The load test does not connect to real exchanges, Redis, or ClickHouse. It drives collector handlers with simulated market events and a fake store latency so queue size, latest-event drops, and worker throughput can be checked before adding more live symbols.
+
+Run the indicator runner load test:
+
+```sh
+cd backend/go-service/market-data
+go run ./cmd/market-data-indicator-loadtest -symbols=500 -lookback=200 -runs=2
+```
+
+The indicator load test simulates four exchanges with the service's current interval sets and fake K-line/store data. It measures indicator runner throughput and simulated Redis/ClickHouse write counts without writing real storage.
+
 ## Configuration Notes
 
 `configs/local.toml` currently controls:
 
 - Enabled exchanges.
+- ClickHouse address, database, credentials, timeout, and retry settings.
 - Symbols.
 - Logging service name, level, format, output, file rotation.
-- WebSocket reconnect delay.
+
+WebSocket reconnect delay, stream shard size, event queue size, and event worker count are code-level operational defaults, not TOML configuration.
+
+WebSocket adapters use a shared 4 MiB read limit. Collector stream lists are split by a code-level max streams per connection; each shard runs its own connection and reconnect backoff. Connection read failures and subscription write failures still trigger reconnects; single-message decode or dispatch failures are logged with exchange and message size and then skipped.
+
+WebSocket handlers enqueue or coalesce validated events before returning. Background collector workers write queued events to Redis and optional ClickHouse-backed store paths. K-line and liquidation events wait for queue capacity when the queue is full. Latest-state events such as last price, mark price, book ticker, and open interest are coalesced by event type and symbol, then flushed periodically so Redis receives the newest state without being forced to write every intermediate update.
+
+Backfill only throttles actual REST K-line fetch requests. Local checks such as reading the latest Redis open time and skipping symbols without a closed window are not delayed. The throttle is code-level and per collector, so large symbol lists recover more slowly but avoid starting with a burst of thousands of exchange REST calls.
 
 Runtime values still defined in code include:
 
@@ -250,13 +326,11 @@ Runtime values still defined in code include:
 - Open interest polling interval.
 - Retention limits and TTLs.
 - Aggregation scan interval.
-- Indicator scan interval.
 - Indicator lookback periods.
 
 ## Current Limitations
 
 - Redis is not a durable historical data store.
-- Indicator snapshots only store the latest values.
 - Indicator parameters and groups are not yet runtime-configurable.
 - Indicators currently use K-line OHLCV data only; open interest, liquidation, mark price premium, and order book imbalance are not yet part of indicator calculation.
 - The service does not expose an HTTP API.

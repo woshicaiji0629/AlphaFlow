@@ -18,8 +18,6 @@ type WSClient struct {
 	productType string
 }
 
-const readLimit = 1 << 20
-
 type subscribeMessage struct {
 	Op   string    `json:"op"`
 	Args []channel `json:"args"`
@@ -75,7 +73,7 @@ func (c *WSClient) Run(
 	if err != nil {
 		return fmt.Errorf("connect websocket: %w", err)
 	}
-	conn.SetReadLimit(readLimit)
+	conn.SetReadLimit(exchange.WebSocketReadLimit)
 	defer conn.Close(websocket.StatusNormalClosure, "closing")
 
 	args := make([]channel, 0, len(streams))
@@ -117,7 +115,11 @@ func (c *WSClient) Run(
 			return fmt.Errorf("read websocket: %w", err)
 		}
 		if err := c.dispatch(ctx, raw, handler); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return nil
+			}
+			exchange.LogWebSocketDispatchError("bitget", raw, err)
+			continue
 		}
 	}
 }

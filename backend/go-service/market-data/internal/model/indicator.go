@@ -17,3 +17,7 @@ type IndicatorSnapshot struct {
 func IndicatorKey(exchange string, market string, symbol string, interval string) string {
 	return fmt.Sprintf("%s:%s:ind:%s:%s", exchangeCode(exchange), market, symbol, interval)
 }
+
+func IndicatorLastKey(exchange string, market string, symbol string, interval string) string {
+	return fmt.Sprintf("%s:%s:ind:last:%s:%s", exchangeCode(exchange), market, symbol, interval)
+}

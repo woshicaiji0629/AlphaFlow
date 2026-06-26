@@ -36,17 +36,23 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("connect redis: %w", err)
 	}
+	collectors, klineAggregator, indicatorRunner, marketStore, restartDelay, err := buildRuntime(ctx, cfg, redisManager)
+	if err != nil {
+		if closeErr := redisManager.Close(); closeErr != nil {
+			slog.Error("close redis failed", "error", closeErr)
+		}
+		return err
+	}
 	defer func() {
+		if err := marketStore.Close(); err != nil {
+			slog.Error("close market store failed", "error", err)
+		}
 		if err := redisManager.Close(); err != nil {
 			slog.Error("close redis failed", "error", err)
 		}
 	}()
 
-	collectors, klineAggregator, indicatorRunner, restartDelay, err := buildRuntime(cfg, redisManager)
-	if err != nil {
-		return err
-	}
-	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, restartDelay); err != nil {
+	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, marketStore, restartDelay); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("market-data stopped")
 			return nil
@@ -76,13 +82,11 @@ func setupLogger(cfg config.Config) error {
 }
 
 func buildRuntime(
+	ctx context.Context,
 	cfg config.Config,
 	redisManager *redisclient.Manager,
-) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, time.Duration, error) {
-	reconnectDelay, err := config.ReconnectDelay(cfg)
-	if err != nil {
-		return nil, nil, nil, 0, fmt.Errorf("load reconnect delay: %w", err)
-	}
+) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *store.MarketStore, time.Duration, error) {
+	reconnectDelay := collector.DefaultReconnectDelay()
 
 	redisStore := store.NewRedisStore(redisManager.Get(constants.RedisDefaultInstance), store.Retention{
 		KlineLimit:     config.KlineLimit(),
@@ -91,6 +95,10 @@ func buildRuntime(
 		LatestTTL:      config.LatestTTL(),
 		PollingTTL:     config.PollingTTL(),
 	})
+	marketStore, err := buildStore(ctx, cfg, redisStore)
+	if err != nil {
+		return nil, nil, nil, nil, 0, err
+	}
 	httpClient := httpclient.New()
 
 	collectors := []*collector.Collector{}
@@ -108,7 +116,7 @@ func buildRuntime(
 			},
 			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
 			binance.NewWSClient(config.BinanceWSBase()),
-			redisStore,
+			marketStore,
 		))
 	}
 	if cfg.Gate.Enabled {
@@ -126,7 +134,7 @@ func buildRuntime(
 			},
 			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
 			gate.NewWSClient(config.GateWSBase(), config.GateSettle(), gateIntervals[0]),
-			redisStore,
+			marketStore,
 		))
 	}
 	if cfg.Bitget.Enabled {
@@ -143,7 +151,7 @@ func buildRuntime(
 			},
 			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
 			bitget.NewWSClient(config.BitgetWSBase(), config.BitgetProductType()),
-			redisStore,
+			marketStore,
 		))
 	}
 	if cfg.Bybit.Enabled {
@@ -160,23 +168,60 @@ func buildRuntime(
 			},
 			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),
 			bybit.NewWSClient(config.BybitWSBase(), config.BybitCategory()),
-			redisStore,
+			marketStore,
 		))
 	}
 	if len(collectors) == 0 {
-		return nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
+		_ = marketStore.Close()
+		return nil, nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
 	}
-	klineAggregator := aggregator.New(redisStore, aggregator.Options{
+	klineAggregator := aggregator.New(marketStore, aggregator.Options{
 		Rules:           aggregationRules(cfg),
 		ScanInterval:    config.AggregationScanInterval(),
 		LookbackPeriods: config.KlineLimit(),
 	})
-	indicatorRunner := indicator.NewRunner(redisStore, indicator.RunnerOptions{
+	indicatorRunner := indicator.NewRunner(marketStore, indicator.RunnerOptions{
 		Rules:           indicatorRules(cfg),
 		ScanInterval:    config.IndicatorScanInterval(),
 		LookbackPeriods: config.IndicatorLookbackPeriods(),
 	})
-	return collectors, klineAggregator, indicatorRunner, reconnectDelay, nil
+	return collectors, klineAggregator, indicatorRunner, marketStore, reconnectDelay, nil
+}
+
+func buildStore(ctx context.Context, cfg config.Config, redisStore *store.RedisStore) (*store.MarketStore, error) {
+	if !cfg.ClickHouse.Enabled {
+		return store.NewMarketStore(redisStore, nil, store.MarketStoreOptions{}), nil
+	}
+
+	dialTimeout, err := config.ClickHouseDialTimeout(cfg)
+	if err != nil {
+		return nil, err
+	}
+	readTimeout, err := config.ClickHouseReadTimeout(cfg)
+	if err != nil {
+		return nil, err
+	}
+	retryInterval, err := config.ClickHouseRetryInterval(cfg)
+	if err != nil {
+		return nil, err
+	}
+	clickHouseStore, err := store.NewClickHouseStore(ctx, store.ClickHouseOptions{
+		Addr:        cfg.ClickHouse.Addr,
+		Database:    cfg.ClickHouse.Database,
+		Username:    cfg.ClickHouse.Username,
+		Password:    cfg.ClickHouse.Password,
+		DialTimeout: dialTimeout,
+		ReadTimeout: readTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect clickhouse: %w", err)
+	}
+
+	return store.NewMarketStore(redisStore, clickHouseStore, store.MarketStoreOptions{
+		RetryInterval: retryInterval,
+		RetryBatch:    cfg.ClickHouse.RetryBatch,
+		MaxPending:    cfg.ClickHouse.MaxPending,
+	}), nil
 }
 
 func runMarketData(
@@ -184,12 +229,13 @@ func runMarketData(
 	collectors []*collector.Collector,
 	klineAggregator *aggregator.Aggregator,
 	indicatorRunner *indicator.Runner,
+	marketStore *store.MarketStore,
 	restartDelay time.Duration,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 3)
 	var wg sync.WaitGroup
 	for _, c := range collectors {
 		wg.Add(1)
@@ -207,6 +253,11 @@ func runMarketData(
 	go func() {
 		defer wg.Done()
 		errCh <- indicatorRunner.Run(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- marketStore.RunClickHouseRetry(ctx)
 	}()
 
 	err := <-errCh

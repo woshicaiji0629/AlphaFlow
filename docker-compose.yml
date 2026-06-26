@@ -12,6 +12,10 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.6-alpine
     container_name: alphaflow-clickhouse
+    environment:
+      CLICKHOUSE_DB: alphaflow
+      CLICKHOUSE_USER: alphaflow
+      CLICKHOUSE_PASSWORD: alphaflow
     ports:
       - "8123:8123"
       - "9000:9000"
@@ -27,8 +31,12 @@ services:
     container_name: alphaflow-market-data
     depends_on:
       - redis
+      - clickhouse
     environment:
       ALPHAFLOW_REDIS_ADDR: redis:6380
+      ALPHAFLOW_CLICKHOUSE_ADDR: clickhouse:9000
+      ALPHAFLOW_CLICKHOUSE_USERNAME: alphaflow
+      ALPHAFLOW_CLICKHOUSE_PASSWORD: alphaflow
     volumes:
       - ./logs/go-service:/workspace/logs/go-service
     restart: unless-stopped

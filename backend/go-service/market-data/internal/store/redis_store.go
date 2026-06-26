@@ -184,6 +184,21 @@ func (s *RedisStore) SetMarketStatus(ctx context.Context, status model.MarketSta
 	return nil
 }
 
+func (s *RedisStore) SetWebSocketStatus(ctx context.Context, status model.WebSocketStatus) error {
+	key := model.WebSocketStatusKey(status.Exchange, status.Market)
+	if status.Shard != "" {
+		key = model.WebSocketShardStatusKey(status.Exchange, status.Market, status.Shard)
+	}
+	payload, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("marshal websocket status: %w", err)
+	}
+	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
+		return fmt.Errorf("set websocket status: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) IsMarketAvailable(ctx context.Context, exchange string, market string) (bool, error) {
 	key := model.MarketStatusKey(exchange, market)
 	value, err := s.client.Get(ctx, key).Result()
@@ -209,6 +224,37 @@ func (s *RedisStore) SetIndicator(ctx context.Context, snapshot model.IndicatorS
 	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set indicator: %w", err)
+	}
+	return nil
+}
+
+func (s *RedisStore) LastIndicatorOpenTime(
+	ctx context.Context,
+	exchange string,
+	market string,
+	symbol string,
+	interval string,
+) (int64, bool, error) {
+	key := model.IndicatorLastKey(exchange, market, symbol, interval)
+	value, err := s.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read last indicator open time: %w", err)
+	}
+	openTime, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse last indicator open time: %w", err)
+	}
+	return openTime, true, nil
+}
+
+func (s *RedisStore) MarkIndicatorOpenTime(ctx context.Context, snapshot model.IndicatorSnapshot) error {
+	key := model.IndicatorLastKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	value := strconv.FormatInt(snapshot.OpenTime, 10)
+	if err := s.client.Set(ctx, key, value, s.retention.LatestTTL).Err(); err != nil {
+		return fmt.Errorf("set last indicator open time: %w", err)
 	}
 	return nil
 }

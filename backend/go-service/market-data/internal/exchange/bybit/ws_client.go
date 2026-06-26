@@ -79,8 +79,6 @@ func NewWSClient(baseURL string, category string) *WSClient {
 	return &WSClient{baseURL: baseURL, category: category}
 }
 
-const readLimit = 1 << 20
-
 func (c *WSClient) Run(
 	ctx context.Context,
 	streams []exchange.Stream,
@@ -90,7 +88,7 @@ func (c *WSClient) Run(
 	if err != nil {
 		return fmt.Errorf("connect websocket: %w", err)
 	}
-	conn.SetReadLimit(readLimit)
+	conn.SetReadLimit(exchange.WebSocketReadLimit)
 	defer conn.Close(websocket.StatusNormalClosure, "closing")
 
 	args := make([]string, 0, len(streams))
@@ -122,7 +120,11 @@ func (c *WSClient) Run(
 			return fmt.Errorf("read websocket: %w", err)
 		}
 		if err := c.dispatch(ctx, raw, handler); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return nil
+			}
+			exchange.LogWebSocketDispatchError("bybit", raw, err)
+			continue
 		}
 	}
 }

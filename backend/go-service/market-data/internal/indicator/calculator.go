@@ -22,6 +22,14 @@ type Options struct {
 	WMAPeriods []int
 }
 
+const (
+	dataQualityOK           = "ok"
+	dataQualityInsufficient = "insufficient"
+	dataQualityGap          = "gap"
+	dataQualityInvalidOHLC  = "invalid_ohlc"
+	dataQualityZeroVolume   = "zero_volume"
+)
+
 func DefaultOptions() Options {
 	return Options{
 		SMAPeriods: []int{7, 25, 99},
@@ -31,7 +39,15 @@ func DefaultOptions() Options {
 }
 
 func Calculate(klines []model.Kline, options Options) (Result, error) {
-	closed := closedKlines(klines)
+	window := NewCalculationWindowFromKlines(klines, 0)
+	return CalculateWindow(window, options)
+}
+
+func CalculateWindow(window *CalculationWindow, options Options) (Result, error) {
+	if window == nil {
+		return Result{}, fmt.Errorf("nil calculation window")
+	}
+	closed := window.Klines()
 	if len(closed) == 0 {
 		return Result{}, fmt.Errorf("no closed klines")
 	}
@@ -41,7 +57,25 @@ func Calculate(klines []model.Kline, options Options) (Result, error) {
 
 	values := map[string]string{}
 	signals := map[string]string{}
-	opens, highs, lows, closes, volumes, err := priceSeries(closed)
+	requiredSamples := requiredSampleCount(options)
+	values["sample_count"] = strconv.Itoa(len(closed))
+	values["required_count"] = strconv.Itoa(requiredSamples)
+	quality, reason := assessDataQuality(closed, requiredSamples)
+	signals["data_quality"] = quality
+	if reason != "" {
+		signals["data_quality_reason"] = reason
+	}
+	last := closed[len(closed)-1]
+	if quality == dataQualityInvalidOHLC {
+		return Result{
+			OpenTime:  last.OpenTime,
+			CloseTime: last.CloseTime,
+			Values:    values,
+			Signals:   signals,
+		}, nil
+	}
+
+	opens, highs, lows, closes, volumes, err := window.Series()
 	if err != nil {
 		return Result{}, err
 	}
@@ -88,7 +122,6 @@ func Calculate(klines []model.Kline, options Options) (Result, error) {
 	addDerived(values, opens, highs, lows, closes, volumes)
 	addEnhanced(values, signals, opens, highs, lows, closes, volumes)
 
-	last := closed[len(closed)-1]
 	return Result{
 		OpenTime:  last.OpenTime,
 		CloseTime: last.CloseTime,
@@ -97,50 +130,76 @@ func Calculate(klines []model.Kline, options Options) (Result, error) {
 	}, nil
 }
 
-func closedKlines(klines []model.Kline) []model.Kline {
-	closed := make([]model.Kline, 0, len(klines))
-	for _, kline := range klines {
-		if kline.IsClosed {
-			closed = append(closed, kline)
+func requiredSampleCount(options Options) int {
+	required := 1
+	for _, period := range options.SMAPeriods {
+		if period > required {
+			required = period
 		}
 	}
-	return closed
+	for _, period := range options.EMAPeriods {
+		if period > required {
+			required = period
+		}
+	}
+	for _, period := range options.WMAPeriods {
+		if period > required {
+			required = period
+		}
+	}
+	return required
 }
 
-func priceSeries(klines []model.Kline) ([]float64, []float64, []float64, []float64, []float64, error) {
-	opens := make([]float64, 0, len(klines))
-	highs := make([]float64, 0, len(klines))
-	lows := make([]float64, 0, len(klines))
-	closes := make([]float64, 0, len(klines))
-	volumes := make([]float64, 0, len(klines))
-	for _, kline := range klines {
+func assessDataQuality(klines []model.Kline, requiredSamples int) (string, string) {
+	hasGap := false
+	hasZeroVolume := false
+	for index, kline := range klines {
 		open, err := parse(kline.Open)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("parse open: %w", err)
+			return dataQualityInvalidOHLC, "invalid_open"
 		}
 		high, err := parse(kline.High)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("parse high: %w", err)
+			return dataQualityInvalidOHLC, "invalid_high"
 		}
 		low, err := parse(kline.Low)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("parse low: %w", err)
+			return dataQualityInvalidOHLC, "invalid_low"
 		}
 		closeValue, err := parse(kline.Close)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("parse close: %w", err)
+			return dataQualityInvalidOHLC, "invalid_close"
 		}
 		volume, err := parse(kline.Volume)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("parse volume: %w", err)
+			return dataQualityInvalidOHLC, "invalid_volume"
 		}
-		opens = append(opens, open)
-		highs = append(highs, high)
-		lows = append(lows, low)
-		closes = append(closes, closeValue)
-		volumes = append(volumes, volume)
+		if high < low || open > high || open < low || closeValue > high || closeValue < low {
+			return dataQualityInvalidOHLC, "price_out_of_range"
+		}
+		if kline.CloseTime > 0 && kline.CloseTime < kline.OpenTime {
+			return dataQualityInvalidOHLC, "invalid_time_range"
+		}
+		if volume == 0 {
+			hasZeroVolume = true
+		}
+		if index > 0 {
+			previous := klines[index-1]
+			if previous.CloseTime > 0 && kline.OpenTime != previous.CloseTime+1 {
+				hasGap = true
+			}
+		}
 	}
-	return opens, highs, lows, closes, volumes, nil
+	switch {
+	case hasGap:
+		return dataQualityGap, "non_contiguous_klines"
+	case hasZeroVolume:
+		return dataQualityZeroVolume, "zero_volume"
+	case len(klines) < requiredSamples:
+		return dataQualityInsufficient, "insufficient_samples"
+	default:
+		return dataQualityOK, ""
+	}
 }
 
 func sma(values []float64, period int) (float64, bool) {

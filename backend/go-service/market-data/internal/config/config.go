@@ -10,12 +10,12 @@ import (
 )
 
 type Config struct {
-	Binance   BinanceConfig   `toml:"binance"`
-	Gate      GateConfig      `toml:"gate"`
-	Bitget    BitgetConfig    `toml:"bitget"`
-	Bybit     BybitConfig     `toml:"bybit"`
-	Logging   LoggingConfig   `toml:"logging"`
-	WebSocket WebSocketConfig `toml:"websocket"`
+	Binance    BinanceConfig    `toml:"binance"`
+	Gate       GateConfig       `toml:"gate"`
+	Bitget     BitgetConfig     `toml:"bitget"`
+	Bybit      BybitConfig      `toml:"bybit"`
+	ClickHouse ClickHouseConfig `toml:"clickhouse"`
+	Logging    LoggingConfig    `toml:"logging"`
 }
 
 type BinanceConfig struct {
@@ -38,6 +38,19 @@ type BybitConfig struct {
 	Symbols []string `toml:"symbols"`
 }
 
+type ClickHouseConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	Addr          string `toml:"addr"`
+	Database      string `toml:"database"`
+	Username      string `toml:"username"`
+	Password      string `toml:"password"`
+	DialTimeout   string `toml:"dial_timeout"`
+	ReadTimeout   string `toml:"read_timeout"`
+	RetryInterval string `toml:"retry_interval"`
+	RetryBatch    int    `toml:"retry_batch"`
+	MaxPending    int64  `toml:"max_pending"`
+}
+
 type LoggingConfig struct {
 	Service    string `toml:"service"`
 	Level      string `toml:"level"`
@@ -49,10 +62,6 @@ type LoggingConfig struct {
 	MaxBackups int    `toml:"max_backups"`
 	MaxAgeDays int    `toml:"max_age_days"`
 	Compress   bool   `toml:"compress"`
-}
-
-type WebSocketConfig struct {
-	ReconnectDelay string `toml:"reconnect_delay"`
 }
 
 func Load(configPath string) (Config, error) {
@@ -89,6 +98,18 @@ func defaultConfig() Config {
 			Enabled: false,
 			Symbols: []string{"ETHUSDT"},
 		},
+		ClickHouse: ClickHouseConfig{
+			Enabled:       false,
+			Addr:          "localhost:9000",
+			Database:      "alphaflow",
+			Username:      "default",
+			Password:      "",
+			DialTimeout:   "5s",
+			ReadTimeout:   "30s",
+			RetryInterval: "10s",
+			RetryBatch:    100,
+			MaxPending:    100000,
+		},
 		Logging: LoggingConfig{
 			Service:    "market-data",
 			Level:      "info",
@@ -100,9 +121,6 @@ func defaultConfig() Config {
 			MaxBackups: 10,
 			MaxAgeDays: 30,
 			Compress:   true,
-		},
-		WebSocket: WebSocketConfig{
-			ReconnectDelay: "5s",
 		},
 	}
 }
@@ -128,8 +146,22 @@ func validate(cfg Config) error {
 			return fmt.Errorf("bybit symbols cannot be empty when enabled")
 		}
 	}
-	if _, err := ReconnectDelay(cfg); err != nil {
-		return err
+	if cfg.ClickHouse.Enabled {
+		if strings.TrimSpace(cfg.ClickHouse.Addr) == "" {
+			return fmt.Errorf("clickhouse addr cannot be empty when enabled")
+		}
+		if strings.TrimSpace(cfg.ClickHouse.Database) == "" {
+			return fmt.Errorf("clickhouse database cannot be empty when enabled")
+		}
+		if _, err := ClickHouseDialTimeout(cfg); err != nil {
+			return err
+		}
+		if _, err := ClickHouseReadTimeout(cfg); err != nil {
+			return err
+		}
+		if _, err := ClickHouseRetryInterval(cfg); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -146,6 +178,11 @@ func resolvePath(configPath string) string {
 }
 
 func normalize(cfg *Config) {
+	cfg.ClickHouse.Addr = envOrValue("ALPHAFLOW_CLICKHOUSE_ADDR", cfg.ClickHouse.Addr)
+	cfg.ClickHouse.Database = envOrValue("ALPHAFLOW_CLICKHOUSE_DATABASE", cfg.ClickHouse.Database)
+	cfg.ClickHouse.Username = envOrValue("ALPHAFLOW_CLICKHOUSE_USERNAME", cfg.ClickHouse.Username)
+	cfg.ClickHouse.Password = envOrValue("ALPHAFLOW_CLICKHOUSE_PASSWORD", cfg.ClickHouse.Password)
+
 	for index, symbol := range cfg.Binance.Symbols {
 		cfg.Binance.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))
 	}
@@ -158,4 +195,12 @@ func normalize(cfg *Config) {
 	for index, symbol := range cfg.Bybit.Symbols {
 		cfg.Bybit.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))
 	}
+}
+
+func envOrValue(name string, value string) string {
+	envValue := strings.TrimSpace(os.Getenv(name))
+	if envValue != "" {
+		return envValue
+	}
+	return strings.TrimSpace(value)
 }

@@ -145,6 +145,15 @@ func TestCalculateCommonIndicators(t *testing.T) {
 	if result.OpenTime != 119000 {
 		t.Fatalf("open time = %d, want 119000", result.OpenTime)
 	}
+	if result.Signals["data_quality"] != "ok" {
+		t.Fatalf("data quality = %q, want ok", result.Signals["data_quality"])
+	}
+	if result.Values["sample_count"] != "120" {
+		t.Fatalf("sample count = %q, want 120", result.Values["sample_count"])
+	}
+	if result.Values["required_count"] != "99" {
+		t.Fatalf("required count = %q, want 99", result.Values["required_count"])
+	}
 }
 
 func TestCalculateIgnoresOpenKline(t *testing.T) {
@@ -163,6 +172,109 @@ func TestCalculateIgnoresOpenKline(t *testing.T) {
 	}
 	if result.Values["sma2"] != "101.5" {
 		t.Fatalf("sma2 = %q, want 101.5", result.Values["sma2"])
+	}
+}
+
+func TestCalculateReportsInsufficientSamples(t *testing.T) {
+	klines := []model.Kline{
+		testKline(1, 100, true),
+		testKline(2, 101, true),
+	}
+
+	result, err := Calculate(klines, Options{SMAPeriods: []int{3}})
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if result.Signals["data_quality"] != "insufficient" {
+		t.Fatalf("data quality = %q, want insufficient", result.Signals["data_quality"])
+	}
+	if result.Values["sample_count"] != "2" {
+		t.Fatalf("sample count = %q, want 2", result.Values["sample_count"])
+	}
+	if result.Values["required_count"] != "3" {
+		t.Fatalf("required count = %q, want 3", result.Values["required_count"])
+	}
+}
+
+func TestCalculateReportsGap(t *testing.T) {
+	klines := []model.Kline{
+		testKline(1, 100, true),
+		testKline(3, 101, true),
+	}
+
+	result, err := Calculate(klines, Options{SMAPeriods: []int{2}})
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if result.Signals["data_quality"] != "gap" {
+		t.Fatalf("data quality = %q, want gap", result.Signals["data_quality"])
+	}
+}
+
+func TestCalculateReportsInvalidOHLC(t *testing.T) {
+	klines := []model.Kline{
+		testKline(1, 100, true),
+	}
+	klines[0].High = "99"
+
+	result, err := Calculate(klines, Options{SMAPeriods: []int{1}})
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if result.Signals["data_quality"] != "invalid_ohlc" {
+		t.Fatalf("data quality = %q, want invalid_ohlc", result.Signals["data_quality"])
+	}
+	if result.Signals["data_quality_reason"] == "" {
+		t.Fatal("expected data quality reason")
+	}
+}
+
+func TestCalculationWindowAppendsAndTrims(t *testing.T) {
+	klines := make([]model.Kline, 0, 10)
+	for index := 0; index < 10; index++ {
+		klines = append(klines, testKline(int64(index), 100+float64(index), true))
+	}
+	window := NewCalculationWindowFromKlines(klines[:5], 5)
+	window.Append(klines[5:])
+
+	if got := len(window.Klines()); got != 5 {
+		t.Fatalf("window size = %d, want 5", got)
+	}
+	lastOpenTime, ok := window.LastOpenTime()
+	if !ok {
+		t.Fatal("missing last open time")
+	}
+	if want := klines[len(klines)-1].OpenTime; lastOpenTime != want {
+		t.Fatalf("last open time = %d, want %d", lastOpenTime, want)
+	}
+	if got := window.Klines()[0].OpenTime; got != klines[5].OpenTime {
+		t.Fatalf("first open time = %d, want %d", got, klines[5].OpenTime)
+	}
+}
+
+func TestCalculateWindowMatchesCalculate(t *testing.T) {
+	klines := make([]model.Kline, 0, 120)
+	for index := 0; index < 120; index++ {
+		klines = append(klines, testKline(int64(index), 100+float64(index), true))
+	}
+	window := NewCalculationWindowFromKlines(klines[:100], 120)
+	window.Append(klines[100:])
+
+	fromKlines, err := Calculate(klines, DefaultOptions())
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	fromWindow, err := CalculateWindow(window, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CalculateWindow: %v", err)
+	}
+	for _, key := range []string{"ema7", "ema25", "rsi14", "macd", "bb_upper", "sample_count"} {
+		if fromWindow.Values[key] != fromKlines.Values[key] {
+			t.Fatalf("%s = %q, want %q", key, fromWindow.Values[key], fromKlines.Values[key])
+		}
+	}
+	if fromWindow.Signals["data_quality"] != fromKlines.Signals["data_quality"] {
+		t.Fatalf("data quality = %q, want %q", fromWindow.Signals["data_quality"], fromKlines.Signals["data_quality"])
 	}
 }
 

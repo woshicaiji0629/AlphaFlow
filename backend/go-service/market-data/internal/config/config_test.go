@@ -39,9 +39,6 @@ max_backups = 3
 max_age_days = 7
 compress = true
 
-[websocket]
-reconnect_delay = "3s"
-
 `)
 
 	cfg, err := Load(path)
@@ -84,9 +81,6 @@ reconnect_delay = "3s"
 	}
 	if got := cfg.Logging.Filename; got != "test.log" {
 		t.Fatalf("log filename = %q, want test.log", got)
-	}
-	if got := cfg.WebSocket.ReconnectDelay; got != "3s" {
-		t.Fatalf("reconnect delay = %q, want 3s", got)
 	}
 }
 

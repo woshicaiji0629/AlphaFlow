@@ -1,11 +1,12 @@
 # AlphaFlow
 
-AlphaFlow is an intelligent trading system project. The current implementation focuses on real-time market data collection, derived K-line aggregation, technical indicator calculation, and Redis-based handoff to later strategy, backtest, and API workflows.
+AlphaFlow is an intelligent trading system project. The current implementation focuses on real-time market data collection, derived K-line aggregation, technical indicator calculation, Redis-based real-time handoff, and ClickHouse-based historical storage.
 
 ## Current Status
 
 - `backend/go-service/market-data` is the active service.
 - Redis is used as the current real-time data cache and service handoff layer.
+- ClickHouse stores closed K-line and indicator history for later research, backtest, reporting, and API workflows.
 - Binance and Gate are enabled in the local config by default. Bitget and Bybit adapters exist but are disabled by default.
 - Python currently contains a minimal `alphaflow-core` service scaffold managed by `uv`.
 - Frontend is reserved for a future React + TypeScript application.
@@ -48,7 +49,7 @@ Run the Go market-data service locally:
 make go-market-data-run
 ```
 
-Start Redis and market-data with Docker Compose:
+Start Redis, ClickHouse, and market-data with Docker Compose:
 
 ```sh
 make stack-up
@@ -58,6 +59,13 @@ Run Go tests:
 
 ```sh
 make go-market-data-test
+```
+
+Run the Go market-data collector load test:
+
+```sh
+cd backend/go-service/market-data
+go run ./cmd/market-data-loadtest -symbols=50 -duration=30s -rate=5000 -store-latency=1ms
 ```
 
 Run Python checks:
@@ -77,7 +85,7 @@ make check
 ```text
 Exchange REST/WebSocket
   -> Go market-data collector
-  -> Redis
+  -> Redis + ClickHouse
   -> Python strategy/backtest/API workflows
 ```
 
@@ -87,7 +95,7 @@ Inside `market-data`, K-lines can also flow through derived aggregation and indi
 Raw K-lines
   -> derived K-line aggregation
   -> indicator runner
-  -> latest indicator snapshot in Redis
+  -> latest indicator snapshot in Redis + history in ClickHouse
 ```
 
 ## Configuration
@@ -98,10 +106,10 @@ The local Go market-data config lives at:
 backend/go-service/market-data/configs/local.toml
 ```
 
-The config currently controls enabled exchanges, symbols, logging, and WebSocket reconnect delay. Several runtime values such as indicator scan interval, retention limits, and exchange interval lists are still code-level constants.
+The config currently controls enabled exchanges, symbols, ClickHouse connection and retry settings, and logging. Several runtime values such as WebSocket operational safeguards, indicator scan interval, retention limits, and exchange interval lists are still code-level constants.
 
 ## Important Notes
 
-- Redis is not intended to be the final long-term historical market data store.
+- Redis is for real-time state and short-window cache; ClickHouse is for closed K-line and indicator history.
 - Strategy, backtest, API, execution, risk, and frontend workflows are planned but not implemented as production modules yet.
 - Keep documentation aligned with actual implementation. Mark future ideas as planning items instead of current behavior.

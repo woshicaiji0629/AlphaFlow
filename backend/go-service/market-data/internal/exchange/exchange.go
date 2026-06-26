@@ -2,9 +2,12 @@ package exchange
 
 import (
 	"context"
+	"log/slog"
 
 	"alphaflow/go-service/market-data/internal/model"
 )
+
+const WebSocketReadLimit = 4 << 20
 
 type Stream struct {
 	Symbol   string
@@ -46,4 +49,13 @@ type RESTClient interface {
 
 type WSClient interface {
 	Run(ctx context.Context, streams []Stream, handler Handler) error
+}
+
+func LogWebSocketDispatchError(exchange string, raw []byte, err error) {
+	slog.Warn(
+		"websocket dispatch failed",
+		"exchange", exchange,
+		"message_size", len(raw),
+		"error", err,
+	)
 }
