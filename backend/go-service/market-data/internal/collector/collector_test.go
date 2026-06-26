@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -30,8 +31,14 @@ type fakeREST struct {
 	fetchKlinesErrBySymbol map[string]error
 	fetchKlines            int
 	fetchTimes             []time.Time
+	fetchRequests          []backfillRequest
 	openInterestSymbols    []string
 	openInterestErr        error
+}
+
+type backfillRequest struct {
+	symbol   string
+	interval string
 }
 
 type fakeWS struct {
@@ -51,12 +58,13 @@ func (fakeREST) Market() string {
 func (r *fakeREST) FetchKlines(
 	_ context.Context,
 	symbol string,
-	_ string,
+	interval string,
 	_ int,
 	_ int64,
 ) ([]model.Kline, error) {
 	r.fetchKlines++
 	r.fetchTimes = append(r.fetchTimes, time.Now())
+	r.fetchRequests = append(r.fetchRequests, backfillRequest{symbol: symbol, interval: interval})
 	if err := r.fetchKlinesErrBySymbol[symbol]; err != nil {
 		return nil, err
 	}
@@ -336,6 +344,40 @@ func TestBackfillThrottlesFetchRequests(t *testing.T) {
 	}
 }
 
+func TestBackfillUsesIntervalPriority(t *testing.T) {
+	rest := &fakeREST{}
+	c := New(Options{
+		Symbols:              []string{"ETHUSDT", "BTCUSDT"},
+		Intervals:            []string{"1h", "1m", "5m"},
+		RESTLimit:            200,
+		ReconnectDelay:       time.Second,
+		LiquidationLimit:     200,
+		PollOpenInterest:     false,
+		OpenInterestInterval: time.Minute,
+		MarkPriceInterval:    "1s",
+	}, rest, nil, &fakeStore{})
+
+	if err := c.Backfill(context.Background()); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	got := make([]string, 0, len(rest.fetchRequests))
+	for _, request := range rest.fetchRequests {
+		got = append(got, request.symbol+":"+request.interval)
+	}
+	want := []string{
+		"ETHUSDT:1m",
+		"BTCUSDT:1m",
+		"ETHUSDT:5m",
+		"BTCUSDT:5m",
+		"ETHUSDT:1h",
+		"BTCUSDT:1h",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fetch order = %#v, want %#v", got, want)
+	}
+}
+
 func TestBackfillThrottleWaitCanBeCanceled(t *testing.T) {
 	rest := &fakeREST{}
 	c := New(Options{
@@ -417,7 +459,7 @@ func TestShardStreams(t *testing.T) {
 	}
 }
 
-func TestRunWebSocketLoopBackfillsOnceForShards(t *testing.T) {
+func TestRunWebSocketLoopStartsShardsWithoutBackfill(t *testing.T) {
 	rest := &fakeREST{}
 	store := &fakeStore{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -441,8 +483,8 @@ func TestRunWebSocketLoopBackfillsOnceForShards(t *testing.T) {
 		t.Fatalf("runWebSocketLoop: %v", err)
 	}
 
-	if rest.fetchKlines != 3 {
-		t.Fatalf("FetchKlines calls = %d, want 3", rest.fetchKlines)
+	if rest.fetchKlines != 0 {
+		t.Fatalf("FetchKlines calls = %d, want 0", rest.fetchKlines)
 	}
 	if len(ws.runs) != 1 {
 		t.Fatalf("websocket runs = %d, want 1", len(ws.runs))

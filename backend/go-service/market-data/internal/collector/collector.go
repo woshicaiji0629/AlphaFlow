@@ -48,6 +48,8 @@ const (
 	maxOpenInterestSymbols   = 100
 )
 
+var backfillIntervalPriority = []string{"1m", "5m", "3m", "15m", "30m", "1h", "2h", "4h"}
+
 type Collector struct {
 	options             Options
 	rest                exchange.RESTClient
@@ -184,7 +186,7 @@ func (c *Collector) Run(ctx context.Context) error {
 	c.startEventWorkers(ctx, &eventWorkerWG)
 	c.startLatestEventFlusher(ctx, &eventWorkerWG)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	go func() {
 		errCh <- c.runWebSocketLoop(ctx)
@@ -192,6 +194,10 @@ func (c *Collector) Run(ctx context.Context) error {
 
 	go func() {
 		errCh <- c.runPollingLoop(ctx)
+	}()
+
+	go func() {
+		errCh <- c.runBackfillLoop(ctx)
 	}()
 
 	err := <-errCh
@@ -441,14 +447,13 @@ func (event collectorEvent) interval() string {
 }
 
 func (c *Collector) runWebSocketLoop(ctx context.Context) error {
+	if c.ws == nil {
+		return errors.New("nil websocket client")
+	}
 	streams := c.streams()
 	shards := shardStreams(streams, defaultMaxStreams)
 	if len(shards) == 0 {
 		return errors.New("no websocket streams")
-	}
-	if err := c.Backfill(ctx); err != nil {
-		c.setWebSocketDisconnected(ctx, "", err, 0, 0, len(streams), len(shards))
-		return err
 	}
 
 	var wg sync.WaitGroup
@@ -462,6 +467,17 @@ func (c *Collector) runWebSocketLoop(ctx context.Context) error {
 
 	<-ctx.Done()
 	wg.Wait()
+	return nil
+}
+
+func (c *Collector) runBackfillLoop(ctx context.Context) error {
+	if err := c.Backfill(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	<-ctx.Done()
 	return nil
 }
 
@@ -627,8 +643,8 @@ func (c *Collector) Backfill(ctx context.Context) error {
 	var attempts int
 	var successes int
 	var failures int
-	for _, symbol := range c.options.Symbols {
-		for _, interval := range c.options.Intervals {
+	for _, interval := range c.backfillIntervals() {
+		for _, symbol := range c.options.Symbols {
 			startTime, err := c.nextStartTime(ctx, symbol, interval)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -685,6 +701,30 @@ func (c *Collector) Backfill(ctx context.Context) error {
 		return fmt.Errorf("all backfill attempts failed: attempts=%d failures=%d", attempts, failures)
 	}
 	return nil
+}
+
+func (c *Collector) backfillIntervals() []string {
+	seen := make(map[string]struct{}, len(c.options.Intervals))
+	for _, interval := range c.options.Intervals {
+		seen[interval] = struct{}{}
+	}
+
+	result := make([]string, 0, len(c.options.Intervals))
+	for _, interval := range backfillIntervalPriority {
+		if _, ok := seen[interval]; !ok {
+			continue
+		}
+		result = append(result, interval)
+		delete(seen, interval)
+	}
+	for _, interval := range c.options.Intervals {
+		if _, ok := seen[interval]; !ok {
+			continue
+		}
+		result = append(result, interval)
+		delete(seen, interval)
+	}
+	return result
 }
 
 func (c *Collector) waitBackfillRequest(ctx context.Context) error {
