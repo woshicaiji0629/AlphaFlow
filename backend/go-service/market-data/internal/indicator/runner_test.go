@@ -22,6 +22,7 @@ type fakeStore struct {
 	rangeCalls               int
 	rangeRequests            [][2]int64
 	snapshots                []model.IndicatorSnapshot
+	latestSnapshots          []model.IndicatorSnapshot
 	rangeDelay               time.Duration
 	activeRangeCalls         atomic.Int64
 	maxActiveRangeCalls      atomic.Int64
@@ -76,6 +77,13 @@ func (s *fakeStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snapshots = append(s.snapshots, snapshot)
+	return nil
+}
+
+func (s *fakeStore) SetLatestIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latestSnapshots = append(s.latestSnapshots, snapshot)
 	return nil
 }
 
@@ -239,6 +247,92 @@ func TestRunnerAppendsNewKlineToCachedWindow(t *testing.T) {
 	}
 	if got := store.snapshots[len(store.snapshots)-1].OpenTime; got != next.OpenTime {
 		t.Fatalf("latest snapshot open time = %d, want %d", got, next.OpenTime)
+	}
+}
+
+func TestRunnerHandlesClosedKlineFromCachedWindowWithoutRangeRead(t *testing.T) {
+	klines := minuteKlines(10)
+	store := &fakeStore{
+		available:    true,
+		hasLast:      true,
+		lastOpenTime: klines[len(klines)-1].OpenTime,
+		klines:       klines,
+	}
+	runner := NewRunner(store, RunnerOptions{
+		Rules: []Rule{{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   []string{"ETHUSDT"},
+			Intervals: []string{"1m"},
+		}},
+		LookbackPeriods: 5,
+	})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	store.mu.Lock()
+	store.rangeCalls = 0
+	store.rangeRequests = nil
+	store.snapshots = nil
+	store.mu.Unlock()
+
+	next := minuteKline(int64(len(klines)), 110)
+	if err := runner.HandleKline(context.Background(), next); err != nil {
+		t.Fatalf("HandleKline: %v", err)
+	}
+	if store.rangeCalls != 0 {
+		t.Fatalf("range calls = %d, want 0", store.rangeCalls)
+	}
+	if len(store.snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(store.snapshots))
+	}
+	if got := store.snapshots[0].OpenTime; got != next.OpenTime {
+		t.Fatalf("snapshot open time = %d, want %d", got, next.OpenTime)
+	}
+}
+
+func TestRunnerSkipsOpenKlineFromHandler(t *testing.T) {
+	klines := minuteKlines(10)
+	store := &fakeStore{
+		available:    true,
+		hasLast:      true,
+		lastOpenTime: klines[len(klines)-1].OpenTime,
+		klines:       klines,
+	}
+	runner := NewRunner(store, RunnerOptions{
+		Rules: []Rule{{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   []string{"ETHUSDT"},
+			Intervals: []string{"1m"},
+		}},
+		LookbackPeriods: 5,
+	})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	store.mu.Lock()
+	store.rangeCalls = 0
+	store.rangeRequests = nil
+	store.snapshots = nil
+	store.latestSnapshots = nil
+	store.mu.Unlock()
+
+	open := minuteKline(int64(len(klines)), 110)
+	open.IsClosed = false
+	if err := runner.HandleKline(context.Background(), open); err != nil {
+		t.Fatalf("HandleKline: %v", err)
+	}
+	if store.rangeCalls != 0 {
+		t.Fatalf("range calls = %d, want 0", store.rangeCalls)
+	}
+	if len(store.snapshots) != 0 {
+		t.Fatalf("closed snapshots = %d, want 0", len(store.snapshots))
+	}
+	if len(store.latestSnapshots) != 0 {
+		t.Fatalf("latest snapshots = %d, want 0", len(store.latestSnapshots))
 	}
 }
 

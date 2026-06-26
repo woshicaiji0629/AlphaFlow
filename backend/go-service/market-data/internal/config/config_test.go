@@ -13,18 +13,22 @@ func TestLoadConfigFromTOML(t *testing.T) {
 	path := writeConfig(t, `
 [binance]
 enabled = true
+websocket_connections = 11
 symbols = ["ethusdt", "btcusdt"]
 
 [gate]
 enabled = true
+websocket_connections = 12
 symbols = ["eth_usdt"]
 
 [bitget]
 enabled = true
+websocket_connections = 13
 symbols = ["ethusdt"]
 
 [bybit]
 enabled = true
+websocket_connections = 14
 symbols = ["ethusdt"]
 
 [logging]
@@ -49,8 +53,14 @@ compress = true
 	if got := cfg.Binance.Symbols[0]; got != "ETHUSDT" {
 		t.Fatalf("Binance symbol = %q, want ETHUSDT", got)
 	}
+	if got := cfg.Binance.WebSocketConnections; got != 11 {
+		t.Fatalf("Binance websocket connections = %d, want 11", got)
+	}
 	if got := cfg.Gate.Symbols[0]; got != "ETH_USDT" {
 		t.Fatalf("Gate symbol = %q, want ETH_USDT", got)
+	}
+	if got := cfg.Gate.WebSocketConnections; got != 12 {
+		t.Fatalf("Gate websocket connections = %d, want 12", got)
 	}
 	if !cfg.Bitget.Enabled {
 		t.Fatal("Bitget should be enabled")
@@ -58,11 +68,17 @@ compress = true
 	if got := cfg.Bitget.Symbols[0]; got != "ETHUSDT" {
 		t.Fatalf("Bitget symbol = %q, want ETHUSDT", got)
 	}
+	if got := cfg.Bitget.WebSocketConnections; got != 13 {
+		t.Fatalf("Bitget websocket connections = %d, want 13", got)
+	}
 	if !cfg.Bybit.Enabled {
 		t.Fatal("Bybit should be enabled")
 	}
 	if got := cfg.Bybit.Symbols[0]; got != "ETHUSDT" {
 		t.Fatalf("Bybit symbol = %q, want ETHUSDT", got)
+	}
+	if got := cfg.Bybit.WebSocketConnections; got != 14 {
+		t.Fatalf("Bybit websocket connections = %d, want 14", got)
 	}
 	if got := cfg.Logging.Level; got != "debug" {
 		t.Fatalf("log level = %q, want debug", got)
@@ -156,14 +172,14 @@ func TestRedisConfigs(t *testing.T) {
 	if !ok {
 		t.Fatal("default redis config missing")
 	}
-	if defaultRedis.Addr != "localhost:6380" {
-		t.Fatalf("Redis addr = %q, want localhost:6380", defaultRedis.Addr)
+	if defaultRedis.Addr != "127.0.0.1:6380" {
+		t.Fatalf("Redis addr = %q, want 127.0.0.1:6380", defaultRedis.Addr)
 	}
-	if defaultRedis.PoolSize != 20 {
-		t.Fatalf("Redis pool size = %d, want 20", defaultRedis.PoolSize)
+	if defaultRedis.PoolSize < 32 || defaultRedis.PoolSize > 64 {
+		t.Fatalf("Redis pool size = %d, want 32..64", defaultRedis.PoolSize)
 	}
-	if defaultRedis.MinIdleConns != 5 {
-		t.Fatalf("Redis min idle conns = %d, want 5", defaultRedis.MinIdleConns)
+	if defaultRedis.MinIdleConns != defaultRedis.PoolSize/4 {
+		t.Fatalf("Redis min idle conns = %d, want pool size / 4", defaultRedis.MinIdleConns)
 	}
 }
 

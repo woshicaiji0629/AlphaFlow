@@ -68,6 +68,13 @@ func (s *loadStore) UpsertKline(context.Context, model.Kline) error {
 	return nil
 }
 
+func (s *loadStore) UpsertKlines(_ context.Context, klines []model.Kline) error {
+	for range klines {
+		s.write()
+	}
+	return nil
+}
+
 func (s *loadStore) SetLastPrice(context.Context, model.LastPrice) error {
 	s.write()
 	return nil

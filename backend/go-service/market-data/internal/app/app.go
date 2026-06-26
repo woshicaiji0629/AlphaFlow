@@ -113,6 +113,7 @@ func buildRuntime(
 				PollOpenInterest:     true,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
+				WebSocketConnections: cfg.Binance.WebSocketConnections,
 			},
 			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
 			binance.NewWSClient(config.BinanceWSBase()),
@@ -131,6 +132,7 @@ func buildRuntime(
 				PollOpenInterest:     false,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
+				WebSocketConnections: cfg.Gate.WebSocketConnections,
 			},
 			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
 			gate.NewWSClient(config.GateWSBase(), config.GateSettle(), gateIntervals[0]),
@@ -148,6 +150,7 @@ func buildRuntime(
 				PollOpenInterest:     false,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
+				WebSocketConnections: cfg.Bitget.WebSocketConnections,
 			},
 			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
 			bitget.NewWSClient(config.BitgetWSBase(), config.BitgetProductType()),
@@ -165,6 +168,7 @@ func buildRuntime(
 				PollOpenInterest:     false,
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
+				WebSocketConnections: cfg.Bybit.WebSocketConnections,
 			},
 			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),
 			bybit.NewWSClient(config.BybitWSBase(), config.BybitCategory()),
@@ -185,6 +189,7 @@ func buildRuntime(
 		ScanInterval:    config.IndicatorScanInterval(),
 		LookbackPeriods: config.IndicatorLookbackPeriods(),
 	})
+	marketStore.AddKlineHandler(indicatorRunner.HandleKline)
 	return collectors, klineAggregator, indicatorRunner, marketStore, reconnectDelay, nil
 }
 

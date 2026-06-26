@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
@@ -63,9 +64,46 @@ func (s *ClickHouseStore) Close() error {
 }
 
 func (s *ClickHouseStore) WriteKline(ctx context.Context, kline model.Kline) error {
+	return s.WriteKlines(ctx, []model.Kline{kline})
+}
+
+func (s *ClickHouseStore) WriteKlines(ctx context.Context, klines []model.Kline) error {
 	if s == nil {
 		return nil
 	}
+	if len(klines) == 0 {
+		return nil
+	}
+
+	rows := make([]string, 0, len(klines))
+	args := make([]any, 0, len(klines)*20)
+	updatedAt := time.Now().UnixMilli()
+	for _, kline := range klines {
+		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			kline.Exchange,
+			kline.Market,
+			kline.Symbol,
+			kline.Interval,
+			kline.OpenTime,
+			kline.CloseTime,
+			kline.Open,
+			kline.High,
+			kline.Low,
+			kline.Close,
+			kline.Volume,
+			kline.QuoteVolume,
+			kline.TradeCount,
+			kline.TakerBuyVolume,
+			kline.TakerBuyQuoteVolume,
+			kline.EventTime,
+			kline.FirstTradeID,
+			kline.LastTradeID,
+			kline.IsClosed,
+			updatedAt,
+		)
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO market_klines (
 			exchange, market, symbol, interval,
@@ -75,29 +113,7 @@ func (s *ClickHouseStore) WriteKline(ctx context.Context, kline model.Kline) err
 			taker_buy_volume, taker_buy_quote_volume,
 			event_time_ms, first_trade_id, last_trade_id,
 			is_closed, updated_at_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		kline.Exchange,
-		kline.Market,
-		kline.Symbol,
-		kline.Interval,
-		kline.OpenTime,
-		kline.CloseTime,
-		kline.Open,
-		kline.High,
-		kline.Low,
-		kline.Close,
-		kline.Volume,
-		kline.QuoteVolume,
-		kline.TradeCount,
-		kline.TakerBuyVolume,
-		kline.TakerBuyQuoteVolume,
-		kline.EventTime,
-		kline.FirstTradeID,
-		kline.LastTradeID,
-		kline.IsClosed,
-		time.Now().UnixMilli(),
-	)
+		) VALUES `+strings.Join(rows, ", "), args...)
 	if err != nil {
 		return fmt.Errorf("insert clickhouse kline: %w", err)
 	}
@@ -105,34 +121,48 @@ func (s *ClickHouseStore) WriteKline(ctx context.Context, kline model.Kline) err
 }
 
 func (s *ClickHouseStore) WriteIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
+	return s.WriteIndicators(ctx, []model.IndicatorSnapshot{snapshot})
+}
+
+func (s *ClickHouseStore) WriteIndicators(ctx context.Context, snapshots []model.IndicatorSnapshot) error {
 	if s == nil {
 		return nil
 	}
-	valuesJSON, err := json.Marshal(snapshot.Values)
-	if err != nil {
-		return fmt.Errorf("marshal indicator values: %w", err)
+	if len(snapshots) == 0 {
+		return nil
 	}
-	signalsJSON, err := json.Marshal(snapshot.Signals)
-	if err != nil {
-		return fmt.Errorf("marshal indicator signals: %w", err)
+
+	rows := make([]string, 0, len(snapshots))
+	args := make([]any, 0, len(snapshots)*9)
+	for _, snapshot := range snapshots {
+		valuesJSON, err := json.Marshal(snapshot.Values)
+		if err != nil {
+			return fmt.Errorf("marshal indicator values: %w", err)
+		}
+		signalsJSON, err := json.Marshal(snapshot.Signals)
+		if err != nil {
+			return fmt.Errorf("marshal indicator signals: %w", err)
+		}
+		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			snapshot.Exchange,
+			snapshot.Market,
+			snapshot.Symbol,
+			snapshot.Interval,
+			snapshot.OpenTime,
+			snapshot.CloseTime,
+			string(valuesJSON),
+			string(signalsJSON),
+			snapshot.UpdatedAt,
+		)
 	}
-	_, err = s.db.ExecContext(ctx, `
+
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO indicator_snapshots (
 			exchange, market, symbol, interval,
 			open_time_ms, close_time_ms,
 			values_json, signals_json, updated_at_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		snapshot.Exchange,
-		snapshot.Market,
-		snapshot.Symbol,
-		snapshot.Interval,
-		snapshot.OpenTime,
-		snapshot.CloseTime,
-		string(valuesJSON),
-		string(signalsJSON),
-		snapshot.UpdatedAt,
-	)
+		) VALUES `+strings.Join(rows, ", "), args...)
 	if err != nil {
 		return fmt.Errorf("insert clickhouse indicator: %w", err)
 	}

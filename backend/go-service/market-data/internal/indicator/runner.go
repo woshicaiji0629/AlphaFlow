@@ -40,6 +40,7 @@ type Store interface {
 		interval string,
 	) (int64, bool, error)
 	SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
+	SetLatestIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
 }
 
 type Rule struct {
@@ -183,6 +184,56 @@ func (r *Runner) runOnceWithLogging(ctx context.Context) {
 	}
 }
 
+func (r *Runner) HandleKline(ctx context.Context, kline model.Kline) error {
+	if !kline.IsClosed {
+		return nil
+	}
+	var errs []error
+	for _, rule := range r.options.Rules {
+		if !ruleMatchesKline(rule, kline) {
+			continue
+		}
+		if err := r.calculateKline(ctx, rule, kline); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Kline) error {
+	intervalMillis, err := model.IntervalMillis(kline.Interval)
+	if err != nil {
+		return err
+	}
+	window, err := r.windowForKline(ctx, rule, kline, intervalMillis)
+	if err != nil {
+		return err
+	}
+	calcWindow := window
+	if !kline.IsClosed {
+		calcWindow = windowWithTemporaryKline(window, kline, int(r.options.LookbackPeriods))
+	}
+	result, err := CalculateWindow(calcWindow, r.options.CalculateOptions)
+	if err != nil {
+		return err
+	}
+	snapshot := model.IndicatorSnapshot{
+		Exchange:  rule.Exchange,
+		Market:    rule.Market,
+		Symbol:    kline.Symbol,
+		Interval:  kline.Interval,
+		OpenTime:  result.OpenTime,
+		CloseTime: result.CloseTime,
+		Values:    result.Values,
+		Signals:   result.Signals,
+		UpdatedAt: r.now().UnixMilli(),
+	}
+	if kline.IsClosed {
+		return r.store.SetIndicator(ctx, snapshot)
+	}
+	return r.store.SetLatestIndicator(ctx, snapshot)
+}
+
 func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol string, interval string) error {
 	lastOpenTime, ok, err := r.store.LastOpenTime(ctx, rule.Exchange, rule.Market, symbol, interval)
 	if err != nil {
@@ -250,6 +301,41 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	return nil
 }
 
+func (r *Runner) windowForKline(
+	ctx context.Context,
+	rule Rule,
+	kline model.Kline,
+	intervalMillis int64,
+) (*CalculationWindow, error) {
+	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
+	r.mu.Lock()
+	cached := r.windows[key]
+	var cachedLast model.Kline
+	hasCached := false
+	if cached != nil && len(cached.Klines()) > 0 {
+		cachedLast = cached.Klines()[len(cached.Klines())-1]
+		hasCached = true
+	}
+	if cached != nil && hasCached {
+		if kline.OpenTime <= cachedLast.OpenTime {
+			window := cached.Clone()
+			r.mu.Unlock()
+			return window, nil
+		}
+		if isContiguous(cachedLast, kline, intervalMillis) {
+			if kline.IsClosed {
+				cached.Append([]model.Kline{kline})
+			}
+			window := cached.Clone()
+			r.mu.Unlock()
+			return window, nil
+		}
+	}
+	r.mu.Unlock()
+
+	return r.updateWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
+}
+
 func (r *Runner) updateWindow(
 	ctx context.Context,
 	rule Rule,
@@ -266,13 +352,16 @@ func (r *Runner) updateWindow(
 	if cached != nil {
 		cachedLastOpenTime, hasCached = cached.LastOpenTime()
 	}
+	if cached != nil && hasCached {
+		if lastOpenTime <= cachedLastOpenTime {
+			window := cached.Clone()
+			r.mu.Unlock()
+			return window, nil
+		}
+	}
 	r.mu.Unlock()
 
 	if cached != nil && hasCached {
-		if lastOpenTime <= cachedLastOpenTime {
-			return cached, nil
-		}
-
 		klines, err := r.store.RangeKlines(
 			ctx,
 			rule.Exchange,
@@ -285,12 +374,18 @@ func (r *Runner) updateWindow(
 		if err != nil {
 			return nil, err
 		}
-		if len(klines) > 0 && isContiguous(cached.Klines()[len(cached.Klines())-1], klines[0], intervalMillis) {
-			r.mu.Lock()
+		r.mu.Lock()
+		cached = r.windows[key]
+		if len(klines) > 0 &&
+			cached != nil &&
+			len(cached.Klines()) > 0 &&
+			isContiguous(cached.Klines()[len(cached.Klines())-1], klines[0], intervalMillis) {
 			cached.Append(klines)
+			window := cached.Clone()
 			r.mu.Unlock()
-			return cached, nil
+			return window, nil
 		}
+		r.mu.Unlock()
 		slog.Warn(
 			"indicator window gap detected, reload full window",
 			"exchange", rule.Exchange,
@@ -308,10 +403,22 @@ func (r *Runner) updateWindow(
 		return nil, err
 	}
 	window := NewCalculationWindowFromKlines(klines, int(r.options.LookbackPeriods))
+	return r.rememberWindow(key, window), nil
+}
+
+func (r *Runner) rememberWindow(key string, window *CalculationWindow) *CalculationWindow {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if existing := r.windows[key]; existing != nil {
+		existingLastOpenTime, existingOK := existing.LastOpenTime()
+		windowLastOpenTime, windowOK := window.LastOpenTime()
+		if existingOK && (!windowOK || existingLastOpenTime > windowLastOpenTime) {
+			return existing.Clone()
+		}
+	}
 	r.windows[key] = window
-	r.mu.Unlock()
-	return window, nil
+	return window.Clone()
 }
 
 func workerCount(jobCount int) int {
@@ -323,6 +430,37 @@ func workerCount(jobCount int) int {
 
 func windowKey(exchange string, market string, symbol string, interval string) string {
 	return strings.Join([]string{exchange, market, symbol, interval}, "\x00")
+}
+
+func ruleMatchesKline(rule Rule, kline model.Kline) bool {
+	if rule.Exchange != kline.Exchange || rule.Market != kline.Market {
+		return false
+	}
+	if !contains(rule.Symbols, kline.Symbol) {
+		return false
+	}
+	return contains(rule.Intervals, kline.Interval)
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func windowWithTemporaryKline(window *CalculationWindow, kline model.Kline, limit int) *CalculationWindow {
+	klines := append([]model.Kline(nil), window.Klines()...)
+	temporary := kline
+	temporary.IsClosed = true
+	if len(klines) > 0 && klines[len(klines)-1].OpenTime == temporary.OpenTime {
+		klines[len(klines)-1] = temporary
+	} else {
+		klines = append(klines, temporary)
+	}
+	return NewCalculationWindowFromKlines(klines, limit)
 }
 
 func isContiguous(previous model.Kline, next model.Kline, intervalMillis int64) bool {

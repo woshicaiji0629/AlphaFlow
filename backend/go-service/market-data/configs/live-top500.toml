@@ -1,5 +1,6 @@
 [binance]
 enabled = true
+websocket_connections = 20
 symbols = [
   "BTCUSDT",
   "ETHUSDT",
@@ -505,6 +506,7 @@ symbols = [
 
 [gate]
 enabled = true
+websocket_connections = 18
 symbols = [
   "BTC_USDT",
   "ETH_USDT",
@@ -1010,6 +1012,7 @@ symbols = [
 
 [bitget]
 enabled = true
+websocket_connections = 18
 symbols = [
   "BTCUSDT",
   "ETHUSDT",
@@ -1515,6 +1518,7 @@ symbols = [
 
 [bybit]
 enabled = true
+websocket_connections = 20
 symbols = [
   "BTCUSDT",
   "ETHUSDT",
@@ -2027,7 +2031,7 @@ password = "alphaflow"
 dial_timeout = "5s"
 read_timeout = "30s"
 retry_interval = "10s"
-retry_batch = 100
+retry_batch = 1000
 max_pending = 100000
 
 [logging]

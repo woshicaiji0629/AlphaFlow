@@ -23,6 +23,7 @@ type Store interface {
 		interval string,
 	) (int64, bool, error)
 	UpsertKline(ctx context.Context, kline model.Kline) error
+	UpsertKlines(ctx context.Context, klines []model.Kline) error
 	SetLastPrice(ctx context.Context, price model.LastPrice) error
 	SetMarkPrice(ctx context.Context, price model.MarkPrice) error
 	SetBookTicker(ctx context.Context, ticker model.BookTicker) error
@@ -42,7 +43,7 @@ const (
 	defaultEventWorkers      = 4
 	maxEventWorkers          = 16
 	latestEventEnqueueTTL    = 50 * time.Millisecond
-	latestFlushInterval      = 100 * time.Millisecond
+	latestFlushInterval      = 500 * time.Millisecond
 	backfillRequestInterval  = 100 * time.Millisecond
 	openInterestStartupDelay = 2 * time.Minute
 	maxOpenInterestSymbols   = 100
@@ -93,6 +94,7 @@ type Options struct {
 	PollOpenInterest     bool
 	OpenInterestInterval time.Duration
 	MarkPriceInterval    string
+	WebSocketConnections int
 }
 
 type collectorEventType string
@@ -401,10 +403,14 @@ func (c *Collector) recordQueueLen() {
 }
 
 func (event collectorEvent) isCritical() bool {
-	return event.eventType == collectorEventKline || event.eventType == collectorEventLiquidation
+	return (event.eventType == collectorEventKline && event.kline.IsClosed) ||
+		event.eventType == collectorEventLiquidation
 }
 
 func (event collectorEvent) isLatest() bool {
+	if event.eventType == collectorEventKline {
+		return !event.kline.IsClosed
+	}
 	switch event.eventType {
 	case collectorEventLastPrice,
 		collectorEventMarkPrice,
@@ -417,6 +423,9 @@ func (event collectorEvent) isLatest() bool {
 }
 
 func (event collectorEvent) latestKey() string {
+	if event.eventType == collectorEventKline {
+		return string(event.eventType) + ":" + event.kline.Symbol + ":" + event.kline.Interval
+	}
 	return string(event.eventType) + ":" + event.symbol()
 }
 
@@ -451,7 +460,7 @@ func (c *Collector) runWebSocketLoop(ctx context.Context) error {
 		return errors.New("nil websocket client")
 	}
 	streams := c.streams()
-	shards := shardStreams(streams, defaultMaxStreams)
+	shards := distributeStreams(streams, c.webSocketConnections(len(streams)))
 	if len(shards) == 0 {
 		return errors.New("no websocket streams")
 	}
@@ -526,21 +535,46 @@ func (c *Collector) runWebSocketShardLoop(
 	}
 }
 
-func shardStreams(streams []exchange.Stream, maxStreams int) [][]exchange.Stream {
+func (c *Collector) webSocketConnections(streamCount int) int {
+	return webSocketConnections(c.options, streamCount)
+}
+
+func webSocketConnections(options Options, streamCount int) int {
+	if streamCount <= 0 {
+		return 0
+	}
+	if options.WebSocketConnections > 0 {
+		if options.WebSocketConnections > streamCount {
+			return streamCount
+		}
+		return options.WebSocketConnections
+	}
+	return (streamCount + defaultMaxStreams - 1) / defaultMaxStreams
+}
+
+func distributeStreams(streams []exchange.Stream, connections int) [][]exchange.Stream {
 	if len(streams) == 0 {
 		return nil
 	}
-	if maxStreams <= 0 {
-		maxStreams = defaultMaxStreams
+	if connections <= 0 {
+		connections = 1
+	}
+	if connections > len(streams) {
+		connections = len(streams)
 	}
 
-	shards := make([][]exchange.Stream, 0, (len(streams)+maxStreams-1)/maxStreams)
-	for start := 0; start < len(streams); start += maxStreams {
-		end := start + maxStreams
-		if end > len(streams) {
-			end = len(streams)
+	shards := make([][]exchange.Stream, 0, connections)
+	baseSize := len(streams) / connections
+	remainder := len(streams) % connections
+	start := 0
+	for index := 0; index < connections; index++ {
+		size := baseSize
+		if index < remainder {
+			size++
 		}
+		end := start + size
 		shards = append(shards, streams[start:end])
+		start = end
 	}
 	return shards
 }
@@ -678,19 +712,15 @@ func (c *Collector) Backfill(ctx context.Context) error {
 				slog.Warn("backfill klines failed", "symbol", symbol, "interval", interval, "error", err)
 				continue
 			}
-			stored := 0
-			for _, kline := range klines {
-				if err := c.store.UpsertKline(ctx, kline); err != nil {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					failures++
-					slog.Warn("store backfill kline failed", "symbol", symbol, "interval", interval, "open_time", kline.OpenTime, "error", err)
-					continue
+			if err := c.store.UpsertKlines(ctx, klines); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
-				stored++
+				failures++
+				slog.Warn("store backfill klines failed", "symbol", symbol, "interval", interval, "count", len(klines), "error", err)
+				continue
 			}
-			if stored > 0 {
+			if len(klines) > 0 {
 				successes++
 				c.setMarketAvailable(ctx)
 			}

@@ -23,6 +23,22 @@ func NewCalculationWindowFromKlines(klines []model.Kline, limit int) *Calculatio
 	return window
 }
 
+func (w *CalculationWindow) Clone() *CalculationWindow {
+	if w == nil {
+		return nil
+	}
+	return &CalculationWindow{
+		limit:    w.limit,
+		klines:   append([]model.Kline(nil), w.klines...),
+		opens:    append([]float64(nil), w.opens...),
+		highs:    append([]float64(nil), w.highs...),
+		lows:     append([]float64(nil), w.lows...),
+		closes:   append([]float64(nil), w.closes...),
+		volumes:  append([]float64(nil), w.volumes...),
+		parseErr: w.parseErr,
+	}
+}
+
 func (w *CalculationWindow) Reset(klines []model.Kline) {
 	w.klines = w.klines[:0]
 	for _, kline := range klines {

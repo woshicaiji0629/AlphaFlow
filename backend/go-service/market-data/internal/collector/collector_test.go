@@ -120,6 +120,11 @@ func (s *fakeStore) UpsertKline(context.Context, model.Kline) error {
 	return nil
 }
 
+func (s *fakeStore) UpsertKlines(_ context.Context, klines []model.Kline) error {
+	atomic.AddInt64(&s.klines, int64(len(klines)))
+	return nil
+}
+
 func (s *fakeStore) SetOpenInterest(context.Context, model.OpenInterest) error {
 	return nil
 }
@@ -378,6 +383,45 @@ func TestBackfillUsesIntervalPriority(t *testing.T) {
 	}
 }
 
+func TestOpenKlineIsCoalescedLatestEvent(t *testing.T) {
+	event := collectorEvent{
+		eventType: collectorEventKline,
+		kline: model.Kline{
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			IsClosed: false,
+		},
+	}
+
+	if !event.isLatest() {
+		t.Fatal("open kline should be treated as latest event")
+	}
+	if event.isCritical() {
+		t.Fatal("open kline should not be treated as critical event")
+	}
+	if got, want := event.latestKey(), "kline:ETHUSDT:1m"; got != want {
+		t.Fatalf("latest key = %q, want %q", got, want)
+	}
+}
+
+func TestClosedKlineIsCriticalEvent(t *testing.T) {
+	event := collectorEvent{
+		eventType: collectorEventKline,
+		kline: model.Kline{
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			IsClosed: true,
+		},
+	}
+
+	if event.isLatest() {
+		t.Fatal("closed kline should not be treated as latest event")
+	}
+	if !event.isCritical() {
+		t.Fatal("closed kline should be treated as critical event")
+	}
+}
+
 func TestBackfillThrottleWaitCanBeCanceled(t *testing.T) {
 	rest := &fakeREST{}
 	c := New(Options{
@@ -449,13 +493,54 @@ func TestShardStreams(t *testing.T) {
 		streams = append(streams, exchange.Stream{Symbol: "ETHUSDT"})
 	}
 
-	shards := shardStreams(streams, 5)
+	shards := distributeStreams(streams, 3)
 
 	if len(shards) != 3 {
 		t.Fatalf("shards = %d, want 3", len(shards))
 	}
-	if len(shards[0]) != 5 || len(shards[1]) != 5 || len(shards[2]) != 1 {
-		t.Fatalf("shard sizes = %d,%d,%d; want 5,5,1", len(shards[0]), len(shards[1]), len(shards[2]))
+	if len(shards[0]) != 4 || len(shards[1]) != 4 || len(shards[2]) != 3 {
+		t.Fatalf("shard sizes = %d,%d,%d; want 4,4,3", len(shards[0]), len(shards[1]), len(shards[2]))
+	}
+}
+
+func TestWebSocketConnections(t *testing.T) {
+	tests := []struct {
+		name        string
+		options     Options
+		streamCount int
+		want        int
+	}{
+		{
+			name:        "no streams",
+			streamCount: 0,
+			want:        0,
+		},
+		{
+			name:        "default uses stream density",
+			streamCount: 201,
+			want:        3,
+		},
+		{
+			name:        "configured connection count",
+			options:     Options{WebSocketConnections: 8},
+			streamCount: 201,
+			want:        8,
+		},
+		{
+			name:        "configured count is capped by streams",
+			options:     Options{WebSocketConnections: 8},
+			streamCount: 3,
+			want:        3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := webSocketConnections(tt.options, tt.streamCount)
+			if got != tt.want {
+				t.Fatalf("webSocketConnections = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -491,6 +576,46 @@ func TestRunWebSocketLoopStartsShardsWithoutBackfill(t *testing.T) {
 	}
 	if got := len(<-ws.runs); got != 15 {
 		t.Fatalf("shard streams = %d, want 15", got)
+	}
+}
+
+func TestRunWebSocketLoopDistributesStreamsAcrossConfiguredConnections(t *testing.T) {
+	rest := &fakeREST{}
+	store := &fakeStore{}
+	ctx, cancel := context.WithCancel(context.Background())
+	ws := &fakeWS{
+		runs:      make(chan []exchange.Stream, 3),
+		remaining: 3,
+		cancel:    cancel,
+	}
+	c := New(Options{
+		Symbols:              []string{"ETHUSDT", "BTCUSDT", "SOLUSDT"},
+		Intervals:            []string{"1m"},
+		RESTLimit:            200,
+		ReconnectDelay:       time.Millisecond,
+		LiquidationLimit:     200,
+		PollOpenInterest:     false,
+		OpenInterestInterval: time.Minute,
+		MarkPriceInterval:    "1s",
+		WebSocketConnections: 3,
+	}, rest, ws, store)
+
+	if err := c.runWebSocketLoop(ctx); err != nil {
+		t.Fatalf("runWebSocketLoop: %v", err)
+	}
+
+	total := 0
+	sizes := make([]int, 0, 3)
+	for len(ws.runs) > 0 {
+		size := len(<-ws.runs)
+		total += size
+		sizes = append(sizes, size)
+	}
+	if total != 15 {
+		t.Fatalf("total shard streams = %d, want 15", total)
+	}
+	if !reflect.DeepEqual(sizes, []int{5, 5, 5}) {
+		t.Fatalf("shard sizes = %v, want [5 5 5]", sizes)
 	}
 }
 
@@ -536,6 +661,7 @@ func TestEventWorkerProcessesQueuedCriticalEvent(t *testing.T) {
 		Market:   "um",
 		Symbol:   "ETHUSDT",
 		Interval: "1m",
+		IsClosed: true,
 	})
 	if err != nil {
 		t.Fatalf("HandleKline: %v", err)
@@ -662,6 +788,7 @@ func TestCriticalEventWaitsWhenQueueIsFull(t *testing.T) {
 			Market:   "um",
 			Symbol:   "ETHUSDT",
 			Interval: "1m",
+			IsClosed: true,
 		})
 	}()
 

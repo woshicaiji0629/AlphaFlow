@@ -63,6 +63,14 @@ func (s *loadStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 	return nil
 }
 
+func (s *loadStore) SetLatestIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
+	if s.redisLatency > 0 {
+		time.Sleep(s.redisLatency)
+	}
+	s.redisWrites.Add(1)
+	return nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 

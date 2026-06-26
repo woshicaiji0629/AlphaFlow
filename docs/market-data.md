@@ -181,7 +181,7 @@ Known exchange code:
 
 Common types:
 
-- `k` = K-line sorted set
+- `k` = K-line namespace
 - `lp` = latest price
 - `mp` = mark price
 - `bt` = book ticker
@@ -205,7 +205,14 @@ bn:um:ind:last:ETHUSDT:1m
 bn:um:ws
 ```
 
-K-lines and liquidations use Redis sorted sets. The score is the event/open time in milliseconds. Latest state, indicator snapshots, indicator calculation cursors, and WebSocket health use Redis string values.
+K-lines use a Redis hash plus a sorted-set index:
+
+```text
+{base}:data   # hash field = open time in milliseconds, value = K-line JSON
+{base}:idx    # sorted set member/score = open time in milliseconds
+```
+
+Liquidations use Redis sorted sets. The score is the event time in milliseconds. Latest state, indicator snapshots, indicator calculation cursors, and WebSocket health use Redis string values.
 
 WebSocket health records include connection state, last start/stop timestamps, last error, reconnect count, and consecutive failure count. They are operational state for monitoring and troubleshooting, not durable history.
 
@@ -217,6 +224,19 @@ bn:um:ws:1
 ```
 
 Each shard status includes `shard`, `stream_count`, and `connection_count`.
+
+## Redis Write Reduction
+
+The Redis path is optimized to reduce repeated maintenance and latest-state writes under large symbol sets.
+
+- K-line data is written as `HASH + ZSET index` so updating an existing open time replaces one hash field instead of rewriting a full sorted-set member payload.
+- K-line trim and TTL maintenance are guarded by an in-memory `lcache.FreqCall`, so each K-line namespace performs trim/expire work at a low frequency instead of on every write.
+- Liquidation trim and TTL maintenance also use `lcache.FreqCall`; liquidation events are still appended immediately, but list maintenance is not repeated for every event.
+- WebSocket status writes skip identical JSON payloads for a short local TTL. This keeps Redis status keys fresh while avoiding repeated identical `SET` calls during stable connections.
+- Latest last price, mark price, book ticker, open interest, and latest indicator snapshots skip identical JSON payloads for a short local TTL. This only suppresses repeated Redis latest-state writes; it does not change ClickHouse historical writes.
+- Indicator open-time cursor writes are intentionally not de-duplicated by the latest-payload cache because they participate in indicator idempotency.
+
+These caches are process-local. After a restart, Redis is repopulated by live exchange data and normal backfill/retry flows.
 
 ## Retention
 
@@ -299,6 +319,54 @@ go run ./cmd/market-data-indicator-loadtest -symbols=500 -lookback=200 -runs=2
 ```
 
 The indicator load test simulates four exchanges with the service's current interval sets and fake K-line/store data. It measures indicator runner throughput and simulated Redis/ClickHouse write counts without writing real storage.
+
+Run a live full-chain pressure test:
+
+```sh
+docker compose exec redis redis-cli -p 6380 FLUSHDB
+docker compose exec redis redis-cli -p 6380 CONFIG RESETSTAT
+docker compose exec clickhouse clickhouse-client --query "TRUNCATE TABLE IF EXISTS alphaflow.market_klines"
+docker compose exec clickhouse clickhouse-client --query "TRUNCATE TABLE IF EXISTS alphaflow.indicator_snapshots"
+
+cd backend/go-service
+GO111MODULE=on go run ./market-data/cmd/market-data -config market-data/configs/live-top500.toml
+```
+
+Collect Redis pressure metrics:
+
+```sh
+docker compose exec redis redis-cli -p 6380 DBSIZE
+docker compose exec redis redis-cli -p 6380 INFO stats
+docker compose exec redis redis-cli -p 6380 INFO commandstats
+docker compose exec redis redis-cli -p 6380 INFO memory
+docker compose exec redis redis-cli -p 6380 LATENCY LATEST
+docker compose exec redis redis-cli -p 6380 LLEN market-data:clickhouse:pending
+docker compose exec redis redis-cli -p 6380 LLEN market-data:clickhouse:processing
+```
+
+Collect ClickHouse write metrics:
+
+```sh
+docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM alphaflow.market_klines"
+docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM alphaflow.indicator_snapshots"
+docker compose exec clickhouse clickhouse-client --query "SELECT table, sum(rows) FROM system.parts WHERE database = 'alphaflow' AND active GROUP BY table ORDER BY table"
+```
+
+Recent observed live run with `live-top500.toml` over a roughly five-minute window:
+
+- Redis keys: 34233.
+- ClickHouse `market_klines`: 44634.
+- ClickHouse `indicator_snapshots`: 13537.
+- ClickHouse pending queue: 0.
+- ClickHouse processing queue: 0.
+- Redis total commands after `CONFIG RESETSTAT`: 552168.
+- Redis mid-run ops: about 4102 ops/s.
+- Redis rejected connections: 0.
+- Redis evicted keys: 0.
+- Redis `LATENCY LATEST`: no events.
+- Redis memory after the run: about 38 MiB.
+
+These numbers are a recent local observation, not a capacity guarantee. They depend on enabled exchanges, symbol count, exchange message rate, local machine resources, and current WebSocket connection settings.
 
 ## Configuration Notes
 

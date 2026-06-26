@@ -19,23 +19,27 @@ type Config struct {
 }
 
 type BinanceConfig struct {
-	Enabled bool     `toml:"enabled"`
-	Symbols []string `toml:"symbols"`
+	Enabled              bool     `toml:"enabled"`
+	WebSocketConnections int      `toml:"websocket_connections"`
+	Symbols              []string `toml:"symbols"`
 }
 
 type GateConfig struct {
-	Enabled bool     `toml:"enabled"`
-	Symbols []string `toml:"symbols"`
+	Enabled              bool     `toml:"enabled"`
+	WebSocketConnections int      `toml:"websocket_connections"`
+	Symbols              []string `toml:"symbols"`
 }
 
 type BitgetConfig struct {
-	Enabled bool     `toml:"enabled"`
-	Symbols []string `toml:"symbols"`
+	Enabled              bool     `toml:"enabled"`
+	WebSocketConnections int      `toml:"websocket_connections"`
+	Symbols              []string `toml:"symbols"`
 }
 
 type BybitConfig struct {
-	Enabled bool     `toml:"enabled"`
-	Symbols []string `toml:"symbols"`
+	Enabled              bool     `toml:"enabled"`
+	WebSocketConnections int      `toml:"websocket_connections"`
+	Symbols              []string `toml:"symbols"`
 }
 
 type ClickHouseConfig struct {
