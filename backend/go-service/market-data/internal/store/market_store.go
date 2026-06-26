@@ -226,6 +226,10 @@ func (s *MarketStore) LastIndicatorOpenTime(
 	return s.redis.LastIndicatorOpenTime(ctx, exchange, market, symbol, interval)
 }
 
+func (s *MarketStore) SetDataHealth(ctx context.Context, health model.DataHealth) error {
+	return s.redis.SetDataHealth(ctx, health)
+}
+
 func (s *MarketStore) RunClickHouseRetry(ctx context.Context) error {
 	if s == nil {
 		<-ctx.Done()

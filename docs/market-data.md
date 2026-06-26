@@ -36,6 +36,7 @@ The service currently handles:
 - ClickHouse retry compensation through Redis pending queues.
 - Derived K-line aggregation for selected missing intervals.
 - Technical indicator calculation from closed K-lines.
+- Market data health checks for K-line freshness, recent K-line gaps, and indicator lag.
 - Market availability status tracking.
 
 It does not currently handle:
@@ -64,6 +65,7 @@ market-data/
   internal/collector/        # REST bootstrap, WebSocket sync, polling tasks
   internal/aggregator/       # Derived K-line aggregation
   internal/indicator/        # Technical indicator calculations and runner
+  internal/health/           # K-line and indicator health checks
   internal/store/            # Redis and ClickHouse persistence boundary
   internal/model/            # Internal data models and Redis key helpers
   internal/exchange/         # Exchange interfaces and adapters
@@ -83,6 +85,7 @@ backend/go-service/pkg/
 - One collector per enabled exchange.
 - One K-line aggregator.
 - One indicator runner.
+- One market data health runner.
 
 Collectors run in restart loops. The aggregator and indicator runner run on fixed scan intervals. Context cancellation stops all long-running loops.
 
@@ -146,6 +149,26 @@ Each indicator snapshot includes basic data quality fields:
 
 Latest snapshots are stored in Redis; when ClickHouse is enabled, each snapshot is also retained as historical series data.
 
+## Market Data Health
+
+The health runner periodically checks each configured exchange, market, symbol, and interval. It writes the latest health snapshot to Redis only; health snapshots are operational state and are not stored in ClickHouse.
+
+Current checks:
+
+- K-line status is `missing` when no closed K-line exists.
+- K-line status is `stale` when the latest closed K-line is older than two interval lengths by open time.
+- K-line status is `gap` when the recent closed K-line window is incomplete or non-contiguous.
+- K-line status is `ok` when the latest closed K-line is fresh and the recent window is contiguous.
+- Indicator status is `missing` when no indicator cursor exists.
+- Indicator status is `stale` when the latest indicator open time is behind the latest closed K-line open time.
+- Indicator status is `ok` when the indicator cursor has caught up.
+- Both statuses are `skipped` when the market is marked unavailable.
+
+Current code-level defaults:
+
+- Health scan interval is 10 seconds.
+- Recent K-line gap lookback is 5 closed K-lines.
+
 ## ClickHouse Tables
 
 ClickHouse is used for durable analytical history, not for real-time state handoff.
@@ -189,6 +212,7 @@ Common types:
 - `liq` = liquidation sorted set
 - `ind` = latest indicator snapshot
 - `ind:last` = latest calculated indicator open time
+- `health` = latest K-line and indicator health snapshot
 - `ws` = exchange WebSocket connection health
 
 Examples:
@@ -202,6 +226,7 @@ bn:um:oi:ETHUSDT
 bn:um:liq:ETHUSDT
 bn:um:ind:ETHUSDT:1m
 bn:um:ind:last:ETHUSDT:1m
+bn:um:health:ETHUSDT:1m
 bn:um:ws
 ```
 
@@ -213,6 +238,8 @@ K-lines use a Redis hash plus a sorted-set index:
 ```
 
 Liquidations use Redis sorted sets. The score is the event time in milliseconds. Latest state, indicator snapshots, indicator calculation cursors, and WebSocket health use Redis string values.
+
+Health snapshots also use Redis string JSON values with latest-state TTL.
 
 WebSocket health records include connection state, last start/stop timestamps, last error, reconnect count, and consecutive failure count. They are operational state for monitoring and troubleshooting, not durable history.
 
@@ -247,6 +274,7 @@ Current code-level defaults:
 - Liquidations retain 200 entries per key.
 - Liquidation TTL is 24 hours.
 - Latest price, mark price, book ticker, and indicator TTL is 24 hours.
+- Market data health TTL is 24 hours.
 - Polling state such as open interest TTL is 24 hours.
 - ClickHouse retry queue retains up to 100000 pending records by default.
 

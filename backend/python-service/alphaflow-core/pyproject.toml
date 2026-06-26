@@ -3,7 +3,9 @@ name = "alphaflow-backend"
 version = "0.1.0"
 description = "Python backend for AlphaFlow."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "redis>=8.0.1",
+]
 
 [dependency-groups]
 dev = [

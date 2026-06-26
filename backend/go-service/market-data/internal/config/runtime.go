@@ -37,6 +37,14 @@ func IndicatorScanInterval() time.Duration {
 	return 10 * time.Second
 }
 
+func HealthScanInterval() time.Duration {
+	return 10 * time.Second
+}
+
+func HealthGapLookback() int64 {
+	return 5
+}
+
 func IndicatorLookbackPeriods() int64 {
 	return 200
 }

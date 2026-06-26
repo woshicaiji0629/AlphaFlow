@@ -601,6 +601,27 @@ func (s *RedisStore) SetIndicatorWithOpenTime(ctx context.Context, snapshot mode
 	return nil
 }
 
+func (s *RedisStore) SetDataHealth(ctx context.Context, health model.DataHealth) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	key := model.DataHealthKey(health.Exchange, health.Market, health.Symbol, health.Interval)
+	payload, err := json.Marshal(health)
+	if err != nil {
+		return fmt.Errorf("marshal data health: %w", err)
+	}
+	if s.shouldSkipLatestWrite(key, payload) {
+		return nil
+	}
+	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
+		return fmt.Errorf("set data health: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) LastIndicatorOpenTime(
 	ctx context.Context,
 	exchange string,

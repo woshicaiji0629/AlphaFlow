@@ -15,6 +15,7 @@ import (
 	"alphaflow/go-service/market-data/internal/exchange/bitget"
 	"alphaflow/go-service/market-data/internal/exchange/bybit"
 	"alphaflow/go-service/market-data/internal/exchange/gate"
+	"alphaflow/go-service/market-data/internal/health"
 	"alphaflow/go-service/market-data/internal/indicator"
 	"alphaflow/go-service/market-data/internal/store"
 	"alphaflow/go-service/pkg/constants"
@@ -36,7 +37,7 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("connect redis: %w", err)
 	}
-	collectors, klineAggregator, indicatorRunner, marketStore, restartDelay, err := buildRuntime(ctx, cfg, redisManager)
+	collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, restartDelay, err := buildRuntime(ctx, cfg, redisManager)
 	if err != nil {
 		if closeErr := redisManager.Close(); closeErr != nil {
 			slog.Error("close redis failed", "error", closeErr)
@@ -52,7 +53,7 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}()
 
-	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, marketStore, restartDelay); err != nil {
+	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, restartDelay); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("market-data stopped")
 			return nil
@@ -85,7 +86,7 @@ func buildRuntime(
 	ctx context.Context,
 	cfg config.Config,
 	redisManager *redisclient.Manager,
-) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *store.MarketStore, time.Duration, error) {
+) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *health.Runner, *store.MarketStore, time.Duration, error) {
 	reconnectDelay := collector.DefaultReconnectDelay()
 
 	redisStore := store.NewRedisStore(redisManager.Get(constants.RedisDefaultInstance), store.Retention{
@@ -97,7 +98,7 @@ func buildRuntime(
 	})
 	marketStore, err := buildStore(ctx, cfg, redisStore)
 	if err != nil {
-		return nil, nil, nil, nil, 0, err
+		return nil, nil, nil, nil, nil, 0, err
 	}
 	httpClient := httpclient.New()
 
@@ -177,7 +178,7 @@ func buildRuntime(
 	}
 	if len(collectors) == 0 {
 		_ = marketStore.Close()
-		return nil, nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
+		return nil, nil, nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
 	}
 	klineAggregator := aggregator.New(marketStore, aggregator.Options{
 		Rules:           aggregationRules(cfg),
@@ -189,8 +190,13 @@ func buildRuntime(
 		ScanInterval:    config.IndicatorScanInterval(),
 		LookbackPeriods: config.IndicatorLookbackPeriods(),
 	})
+	healthRunner := health.NewRunner(marketStore, health.Options{
+		Rules:        healthRules(cfg),
+		ScanInterval: config.HealthScanInterval(),
+		GapLookback:  config.HealthGapLookback(),
+	})
 	marketStore.AddKlineHandler(indicatorRunner.HandleKline)
-	return collectors, klineAggregator, indicatorRunner, marketStore, reconnectDelay, nil
+	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, reconnectDelay, nil
 }
 
 func buildStore(ctx context.Context, cfg config.Config, redisStore *store.RedisStore) (*store.MarketStore, error) {
@@ -234,13 +240,14 @@ func runMarketData(
 	collectors []*collector.Collector,
 	klineAggregator *aggregator.Aggregator,
 	indicatorRunner *indicator.Runner,
+	healthRunner *health.Runner,
 	marketStore *store.MarketStore,
 	restartDelay time.Duration,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	var wg sync.WaitGroup
 	for _, c := range collectors {
 		wg.Add(1)
@@ -258,6 +265,11 @@ func runMarketData(
 	go func() {
 		defer wg.Done()
 		errCh <- indicatorRunner.Run(ctx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- healthRunner.Run(ctx)
 	}()
 	wg.Add(1)
 	go func() {
@@ -349,6 +361,43 @@ func indicatorRules(cfg config.Config) []indicator.Rule {
 	}
 	if cfg.Bybit.Enabled {
 		rules = append(rules, indicator.Rule{
+			Exchange:  "bybit",
+			Market:    config.BybitCategory(),
+			Symbols:   cfg.Bybit.Symbols,
+			Intervals: withExtraIntervals(config.BybitIntervals(), "10m"),
+		})
+	}
+	return rules
+}
+
+func healthRules(cfg config.Config) []health.Rule {
+	rules := []health.Rule{}
+	if cfg.Binance.Enabled {
+		rules = append(rules, health.Rule{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   cfg.Binance.Symbols,
+			Intervals: withExtraIntervals(config.BinanceIntervals(), "10m"),
+		})
+	}
+	if cfg.Gate.Enabled {
+		rules = append(rules, health.Rule{
+			Exchange:  "gate",
+			Market:    config.GateSettle(),
+			Symbols:   cfg.Gate.Symbols,
+			Intervals: withExtraIntervals(config.GateIntervals(), "3m", "10m", "2h"),
+		})
+	}
+	if cfg.Bitget.Enabled {
+		rules = append(rules, health.Rule{
+			Exchange:  "bitget",
+			Market:    strings.ToLower(config.BitgetProductType()),
+			Symbols:   cfg.Bitget.Symbols,
+			Intervals: withExtraIntervals(config.BitgetIntervals(), "3m", "10m", "2h"),
+		})
+	}
+	if cfg.Bybit.Enabled {
+		rules = append(rules, health.Rule{
 			Exchange:  "bybit",
 			Market:    config.BybitCategory(),
 			Symbols:   cfg.Bybit.Symbols,
