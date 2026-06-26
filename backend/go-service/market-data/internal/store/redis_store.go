@@ -136,6 +136,47 @@ func (s *RedisStore) SetBookTicker(ctx context.Context, ticker model.BookTicker)
 	return nil
 }
 
+func (s *RedisStore) SetLatestBatch(
+	ctx context.Context,
+	lastPrices []model.LastPrice,
+	markPrices []model.MarkPrice,
+	bookTickers []model.BookTicker,
+) error {
+	if len(lastPrices) == 0 && len(markPrices) == 0 && len(bookTickers) == 0 {
+		return nil
+	}
+
+	pipe := s.client.Pipeline()
+	for _, price := range lastPrices {
+		payload, err := json.Marshal(price)
+		if err != nil {
+			return fmt.Errorf("marshal last price: %w", err)
+		}
+		key := model.LastPriceKey(price.Exchange, price.Market, price.Symbol)
+		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
+	}
+	for _, price := range markPrices {
+		payload, err := json.Marshal(price)
+		if err != nil {
+			return fmt.Errorf("marshal mark price: %w", err)
+		}
+		key := model.MarkPriceKey(price.Exchange, price.Market, price.Symbol)
+		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
+	}
+	for _, ticker := range bookTickers {
+		payload, err := json.Marshal(ticker)
+		if err != nil {
+			return fmt.Errorf("marshal book ticker: %w", err)
+		}
+		key := model.BookTickerKey(ticker.Exchange, ticker.Market, ticker.Symbol)
+		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set latest batch: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) SetOpenInterest(ctx context.Context, interest model.OpenInterest) error {
 	key := model.OpenInterestKey(interest.Exchange, interest.Market, interest.Symbol)
 	payload, err := json.Marshal(interest)

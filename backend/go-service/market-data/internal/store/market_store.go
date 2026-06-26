@@ -4,15 +4,25 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
 )
 
+const (
+	latestFlushInterval = 250 * time.Millisecond
+	latestFlushTimeout  = 2 * time.Second
+)
+
 type MarketStore struct {
-	redis      *RedisStore
-	clickhouse *ClickHouseStore
-	pending    *ClickHousePendingWriter
+	redis       *RedisStore
+	clickhouse  *ClickHouseStore
+	pending     *ClickHousePendingWriter
+	latestMu    sync.Mutex
+	lastPrices  map[string]model.LastPrice
+	markPrices  map[string]model.MarkPrice
+	bookTickers map[string]model.BookTicker
 }
 
 type MarketStoreOptions struct {
@@ -23,8 +33,11 @@ type MarketStoreOptions struct {
 
 func NewMarketStore(redisStore *RedisStore, clickHouseStore *ClickHouseStore, options MarketStoreOptions) *MarketStore {
 	marketStore := &MarketStore{
-		redis:      redisStore,
-		clickhouse: clickHouseStore,
+		redis:       redisStore,
+		clickhouse:  clickHouseStore,
+		lastPrices:  map[string]model.LastPrice{},
+		markPrices:  map[string]model.MarkPrice{},
+		bookTickers: map[string]model.BookTicker{},
 	}
 	if clickHouseStore != nil {
 		marketStore.pending = NewClickHousePendingWriter(redisStore.client, clickHouseStore, PendingWriterOptions{
@@ -82,15 +95,24 @@ func (s *MarketStore) UpsertKline(ctx context.Context, kline model.Kline) error 
 }
 
 func (s *MarketStore) SetLastPrice(ctx context.Context, price model.LastPrice) error {
-	return s.redis.SetLastPrice(ctx, price)
+	s.latestMu.Lock()
+	s.lastPrices[model.LastPriceKey(price.Exchange, price.Market, price.Symbol)] = price
+	s.latestMu.Unlock()
+	return nil
 }
 
 func (s *MarketStore) SetMarkPrice(ctx context.Context, price model.MarkPrice) error {
-	return s.redis.SetMarkPrice(ctx, price)
+	s.latestMu.Lock()
+	s.markPrices[model.MarkPriceKey(price.Exchange, price.Market, price.Symbol)] = price
+	s.latestMu.Unlock()
+	return nil
 }
 
 func (s *MarketStore) SetBookTicker(ctx context.Context, ticker model.BookTicker) error {
-	return s.redis.SetBookTicker(ctx, ticker)
+	s.latestMu.Lock()
+	s.bookTickers[model.BookTickerKey(ticker.Exchange, ticker.Market, ticker.Symbol)] = ticker
+	s.latestMu.Unlock()
+	return nil
 }
 
 func (s *MarketStore) SetOpenInterest(ctx context.Context, interest model.OpenInterest) error {
@@ -150,11 +172,29 @@ func (s *MarketStore) LastIndicatorOpenTime(
 }
 
 func (s *MarketStore) RunClickHouseRetry(ctx context.Context) error {
-	if s == nil || s.pending == nil {
+	if s == nil {
 		<-ctx.Done()
 		return nil
 	}
-	return s.pending.Run(ctx)
+
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- s.runLatestFlush(ctx)
+	}()
+	go func() {
+		if s.pending == nil {
+			<-ctx.Done()
+			errCh <- nil
+			return
+		}
+		errCh <- s.pending.Run(ctx)
+	}()
+
+	err := <-errCh
+	if err != nil && ctx.Err() == nil {
+		return err
+	}
+	return nil
 }
 
 func (s *MarketStore) Close() error {
@@ -162,4 +202,92 @@ func (s *MarketStore) Close() error {
 		return nil
 	}
 	return s.clickhouse.Close()
+}
+
+type latestBatch struct {
+	lastPrices  []model.LastPrice
+	markPrices  []model.MarkPrice
+	bookTickers []model.BookTicker
+}
+
+func (s *MarketStore) runLatestFlush(ctx context.Context) error {
+	ticker := time.NewTicker(latestFlushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			flushCtx, cancel := context.WithTimeout(context.Background(), latestFlushTimeout)
+			if err := s.flushLatest(flushCtx); err != nil {
+				slog.Error("flush latest market data failed during shutdown", "error", err)
+			}
+			cancel()
+			return nil
+		case <-ticker.C:
+			if err := s.flushLatest(ctx); err != nil {
+				slog.Error("flush latest market data failed", "error", err)
+			}
+		}
+	}
+}
+
+func (s *MarketStore) flushLatest(ctx context.Context) error {
+	batch := s.drainLatest()
+	if len(batch.lastPrices) == 0 && len(batch.markPrices) == 0 && len(batch.bookTickers) == 0 {
+		return nil
+	}
+	if err := s.redis.SetLatestBatch(ctx, batch.lastPrices, batch.markPrices, batch.bookTickers); err != nil {
+		s.requeueLatest(batch)
+		return err
+	}
+	return nil
+}
+
+func (s *MarketStore) drainLatest() latestBatch {
+	s.latestMu.Lock()
+	defer s.latestMu.Unlock()
+
+	batch := latestBatch{
+		lastPrices:  make([]model.LastPrice, 0, len(s.lastPrices)),
+		markPrices:  make([]model.MarkPrice, 0, len(s.markPrices)),
+		bookTickers: make([]model.BookTicker, 0, len(s.bookTickers)),
+	}
+	for _, price := range s.lastPrices {
+		batch.lastPrices = append(batch.lastPrices, price)
+	}
+	for _, price := range s.markPrices {
+		batch.markPrices = append(batch.markPrices, price)
+	}
+	for _, ticker := range s.bookTickers {
+		batch.bookTickers = append(batch.bookTickers, ticker)
+	}
+
+	clear(s.lastPrices)
+	clear(s.markPrices)
+	clear(s.bookTickers)
+	return batch
+}
+
+func (s *MarketStore) requeueLatest(batch latestBatch) {
+	s.latestMu.Lock()
+	defer s.latestMu.Unlock()
+
+	for _, price := range batch.lastPrices {
+		key := model.LastPriceKey(price.Exchange, price.Market, price.Symbol)
+		if _, ok := s.lastPrices[key]; !ok {
+			s.lastPrices[key] = price
+		}
+	}
+	for _, price := range batch.markPrices {
+		key := model.MarkPriceKey(price.Exchange, price.Market, price.Symbol)
+		if _, ok := s.markPrices[key]; !ok {
+			s.markPrices[key] = price
+		}
+	}
+	for _, ticker := range batch.bookTickers {
+		key := model.BookTickerKey(ticker.Exchange, ticker.Market, ticker.Symbol)
+		if _, ok := s.bookTickers[key]; !ok {
+			s.bookTickers[key] = ticker
+		}
+	}
 }
