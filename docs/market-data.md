@@ -269,7 +269,7 @@ These caches are process-local. After a restart, Redis is repopulated by live ex
 
 Current code-level defaults:
 
-- K-lines retain 500 entries per key.
+- K-lines retain 250 entries per key.
 - K-line TTL is 7 days.
 - Liquidations retain 200 entries per key.
 - Liquidation TTL is 24 hours.
@@ -356,8 +356,7 @@ docker compose exec redis redis-cli -p 6380 CONFIG RESETSTAT
 docker compose exec clickhouse clickhouse-client --query "TRUNCATE TABLE IF EXISTS alphaflow.market_klines"
 docker compose exec clickhouse clickhouse-client --query "TRUNCATE TABLE IF EXISTS alphaflow.indicator_snapshots"
 
-cd backend/go-service
-GO111MODULE=on go run ./market-data/cmd/market-data -config market-data/configs/live-top500.toml
+docker compose up -d --build market-data
 ```
 
 Collect Redis pressure metrics:

@@ -90,21 +90,6 @@ func TestRedisStoreSkipsUnchangedWebSocketStatusPayload(t *testing.T) {
 	}
 }
 
-func TestRedisStoreSkipsUnchangedLatestPayload(t *testing.T) {
-	store := &RedisStore{latestPayloadCache: lcache.MustNew(10)}
-	key := model.LastPriceKey("binance", "um", "ETHUSDT")
-
-	if store.shouldSkipLatestWrite(key, []byte(`{"price":"100"}`)) {
-		t.Fatal("first payload write was skipped")
-	}
-	if !store.shouldSkipLatestWrite(key, []byte(`{"price":"100"}`)) {
-		t.Fatal("unchanged payload write was not skipped")
-	}
-	if store.shouldSkipLatestWrite(key, []byte(`{"price":"101"}`)) {
-		t.Fatal("changed payload write was skipped")
-	}
-}
-
 func TestRedisStoreMaintainLiquidationKeyUsesFreqCall(t *testing.T) {
 	store := &RedisStore{liquidationMaintenance: lcache.MustNew(10)}
 	calls := 0

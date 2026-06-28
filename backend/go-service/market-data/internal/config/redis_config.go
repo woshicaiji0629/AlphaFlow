@@ -12,20 +12,20 @@ import (
 const defaultRedisAddr = "127.0.0.1:6380"
 
 func defaultRedisPoolSize() int {
-	size := runtime.NumCPU() * 4
-	if size < 32 {
-		return 32
-	}
-	if size > 64 {
+	size := runtime.NumCPU() * 8
+	if size < 64 {
 		return 64
+	}
+	if size > 128 {
+		return 128
 	}
 	return size
 }
 
 func defaultRedisMinIdleConns() int {
-	size := defaultRedisPoolSize() / 4
-	if size < 8 {
-		return 8
+	size := defaultRedisPoolSize() / 2
+	if size < 32 {
+		return 32
 	}
 	return size
 }

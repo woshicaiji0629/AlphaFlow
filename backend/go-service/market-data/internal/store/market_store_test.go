@@ -411,6 +411,63 @@ func TestLatestClosedKlinesKeepsNewestPerKey(t *testing.T) {
 	}
 }
 
+func TestMarketStoreLastOpenTimeUsesMemoryCache(t *testing.T) {
+	s := NewMarketStore(&RedisStore{}, nil, MarketStoreOptions{})
+	s.rememberLastOpenTime(model.RedisKey("binance", "um", "ETHUSDT", "1m"), 2000)
+
+	lastOpenTime, ok, err := s.LastOpenTime(context.Background(), "binance", "um", "ETHUSDT", "1m")
+	if err != nil {
+		t.Fatalf("LastOpenTime: %v", err)
+	}
+	if !ok {
+		t.Fatal("LastOpenTime ok = false, want true")
+	}
+	if lastOpenTime != 2000 {
+		t.Fatalf("LastOpenTime = %d, want 2000", lastOpenTime)
+	}
+}
+
+func TestMarketStoreRememberLastOpenTimesKeepsLatestClosedKline(t *testing.T) {
+	s := NewMarketStore(&RedisStore{}, nil, MarketStoreOptions{})
+	s.rememberLastOpenTimes([]model.Kline{
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 2000,
+			IsClosed: true,
+		},
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			IsClosed: true,
+		},
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 3000,
+			IsClosed: false,
+		},
+	})
+
+	lastOpenTime, ok, err := s.LastOpenTime(context.Background(), "binance", "um", "ETHUSDT", "1m")
+	if err != nil {
+		t.Fatalf("LastOpenTime: %v", err)
+	}
+	if !ok {
+		t.Fatal("LastOpenTime ok = false, want true")
+	}
+	if lastOpenTime != 2000 {
+		t.Fatalf("LastOpenTime = %d, want 2000", lastOpenTime)
+	}
+}
+
 func TestMarketStoreMarketStatusDedupesAfterSuccessfulWrite(t *testing.T) {
 	s := NewMarketStore(&RedisStore{}, nil, MarketStoreOptions{})
 	status := model.MarketStatus{

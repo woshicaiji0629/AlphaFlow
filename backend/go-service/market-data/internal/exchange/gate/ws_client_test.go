@@ -179,6 +179,32 @@ func TestDispatchContractStats(t *testing.T) {
 	}
 }
 
+func TestDispatchSingleObjectContractStats(t *testing.T) {
+	raw := json.RawMessage(`{
+		"time_ms": 1541659086123,
+		"channel": "futures.contract_stats",
+		"event": "update",
+		"result": {
+			"time": 1603865400,
+			"contract": "ETH_USDT",
+			"mark_price": "8865",
+			"open_interest": "124724"
+		}
+	}`)
+
+	handler := &fakeHandler{}
+	client := NewWSClient("wss://example.test", "usdt", "1m")
+	if err := client.dispatch(context.Background(), raw, handler); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if handler.markPrice.MarkPrice != "8865" {
+		t.Fatalf("mark price = %q, want 8865", handler.markPrice.MarkPrice)
+	}
+	if handler.openInterest.OpenInterest != "124724" {
+		t.Fatalf("open interest = %q, want 124724", handler.openInterest.OpenInterest)
+	}
+}
+
 func TestDispatchLiquidation(t *testing.T) {
 	raw := json.RawMessage(`{
 		"time_ms": 1541505434123,

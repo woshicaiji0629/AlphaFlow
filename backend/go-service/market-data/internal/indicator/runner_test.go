@@ -18,6 +18,7 @@ type fakeStore struct {
 	hasLastIndicator         bool
 	lastIndicatorOpenTime    int64
 	lastIndicatorOpenTimeErr error
+	lastIndicatorCalls       int
 	klines                   []model.Kline
 	rangeCalls               int
 	rangeRequests            [][2]int64
@@ -70,6 +71,7 @@ func (s *fakeStore) IsMarketAvailable(context.Context, string, string) (bool, er
 func (s *fakeStore) LastIndicatorOpenTime(context.Context, string, string, string, string) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastIndicatorCalls++
 	return s.lastIndicatorOpenTime, s.hasLastIndicator, s.lastIndicatorOpenTimeErr
 }
 
@@ -283,6 +285,57 @@ func TestRunnerHandlesClosedKlineFromCachedWindowWithoutRangeRead(t *testing.T) 
 	}
 	if store.rangeCalls != 0 {
 		t.Fatalf("range calls = %d, want 0", store.rangeCalls)
+	}
+	if len(store.snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(store.snapshots))
+	}
+	if got := store.snapshots[0].OpenTime; got != next.OpenTime {
+		t.Fatalf("snapshot open time = %d, want %d", got, next.OpenTime)
+	}
+}
+
+func TestRunnerSkipsScanAfterHandledClosedKline(t *testing.T) {
+	klines := minuteKlines(10)
+	store := &fakeStore{
+		available:    true,
+		hasLast:      true,
+		lastOpenTime: klines[len(klines)-1].OpenTime,
+		klines:       klines,
+	}
+	runner := NewRunner(store, RunnerOptions{
+		Rules: []Rule{{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   []string{"ETHUSDT"},
+			Intervals: []string{"1m"},
+		}},
+		LookbackPeriods: 5,
+	})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	next := minuteKline(int64(len(klines)), 110)
+	store.mu.Lock()
+	store.klines = append(store.klines, next)
+	store.lastOpenTime = next.OpenTime
+	store.rangeCalls = 0
+	store.rangeRequests = nil
+	store.snapshots = nil
+	store.lastIndicatorCalls = 0
+	store.mu.Unlock()
+
+	if err := runner.HandleKline(context.Background(), next); err != nil {
+		t.Fatalf("HandleKline: %v", err)
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce after HandleKline: %v", err)
+	}
+	if store.rangeCalls != 0 {
+		t.Fatalf("range calls = %d, want 0", store.rangeCalls)
+	}
+	if store.lastIndicatorCalls != 0 {
+		t.Fatalf("last indicator calls = %d, want 0", store.lastIndicatorCalls)
 	}
 	if len(store.snapshots) != 1 {
 		t.Fatalf("snapshots = %d, want 1", len(store.snapshots))

@@ -13,6 +13,6 @@ FROM alpine:3.21
 WORKDIR /workspace/backend/go-service
 
 COPY --from=builder /out/market-data /usr/local/bin/market-data
-COPY market-data/configs/local.toml market-data/configs/local.toml
+COPY market-data/configs/ market-data/configs/
 
 CMD ["market-data", "-config", "market-data/configs/local.toml"]

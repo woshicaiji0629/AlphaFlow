@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -22,6 +23,13 @@ type Manager struct {
 	clients map[string]*redis.Client
 }
 
+const (
+	defaultDialTimeout  = 10 * time.Second
+	defaultReadTimeout  = 10 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+	defaultPoolTimeout  = 10 * time.Second
+)
+
 func New(ctx context.Context, cfg Config) (*redis.Client, error) {
 	options := &redis.Options{
 		Addr:         cfg.Addr,
@@ -29,6 +37,10 @@ func New(ctx context.Context, cfg Config) (*redis.Client, error) {
 		DB:           cfg.DB,
 		PoolSize:     positiveOrDefault(cfg.PoolSize, 20),
 		MinIdleConns: positiveOrDefault(cfg.MinIdleConns, 5),
+		DialTimeout:  defaultDialTimeout,
+		ReadTimeout:  defaultReadTimeout,
+		WriteTimeout: defaultWriteTimeout,
+		PoolTimeout:  defaultPoolTimeout,
 	}
 
 	client := redis.NewClient(options)

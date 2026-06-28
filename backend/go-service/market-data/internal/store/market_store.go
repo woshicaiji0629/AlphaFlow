@@ -41,6 +41,7 @@ type MarketStore struct {
 	openInterests  map[string]model.OpenInterest
 	openKlines     map[string]model.Kline
 	indicators     map[string]model.IndicatorSnapshot
+	lastOpenTimes  map[string]int64
 	statusMu       sync.Mutex
 	marketStatuses map[string]model.MarketStatus
 
@@ -66,6 +67,7 @@ func NewMarketStore(redisStore *RedisStore, clickHouseStore *ClickHouseStore, op
 		openInterests:        map[string]model.OpenInterest{},
 		openKlines:           map[string]model.Kline{},
 		indicators:           map[string]model.IndicatorSnapshot{},
+		lastOpenTimes:        map[string]int64{},
 		marketStatuses:       map[string]model.MarketStatus{},
 		clickHouseFlushReady: make(chan struct{}, 1),
 	}
@@ -88,6 +90,28 @@ func (s *MarketStore) AddKlineHandler(handler KlineHandler) {
 	s.latestMu.Unlock()
 }
 
+func (s *MarketStore) rememberLastOpenTime(key string, openTime int64) {
+	s.latestMu.Lock()
+	if current, ok := s.lastOpenTimes[key]; !ok || openTime > current {
+		s.lastOpenTimes[key] = openTime
+	}
+	s.latestMu.Unlock()
+}
+
+func (s *MarketStore) rememberLastOpenTimes(klines []model.Kline) {
+	s.latestMu.Lock()
+	for _, kline := range klines {
+		if !kline.IsClosed {
+			continue
+		}
+		key := model.RedisKey(kline.Exchange, kline.Market, kline.Symbol, kline.Interval)
+		if current, ok := s.lastOpenTimes[key]; !ok || kline.OpenTime > current {
+			s.lastOpenTimes[key] = kline.OpenTime
+		}
+	}
+	s.latestMu.Unlock()
+}
+
 func (s *MarketStore) LastOpenTime(
 	ctx context.Context,
 	exchange string,
@@ -95,7 +119,20 @@ func (s *MarketStore) LastOpenTime(
 	symbol string,
 	interval string,
 ) (int64, bool, error) {
-	return s.redis.LastOpenTime(ctx, exchange, market, symbol, interval)
+	key := model.RedisKey(exchange, market, symbol, interval)
+	s.latestMu.Lock()
+	lastOpenTime, ok := s.lastOpenTimes[key]
+	s.latestMu.Unlock()
+	if ok {
+		return lastOpenTime, true, nil
+	}
+
+	lastOpenTime, ok, err := s.redis.LastOpenTime(ctx, exchange, market, symbol, interval)
+	if err != nil || !ok {
+		return lastOpenTime, ok, err
+	}
+	s.rememberLastOpenTime(key, lastOpenTime)
+	return lastOpenTime, true, nil
 }
 
 func (s *MarketStore) RangeKlines(
@@ -135,6 +172,7 @@ func (s *MarketStore) UpsertKlines(ctx context.Context, klines []model.Kline) er
 	if err := s.redis.UpsertKlines(ctx, closed); err != nil {
 		return err
 	}
+	s.rememberLastOpenTimes(closed)
 	for _, kline := range latestClosedKlines(closed) {
 		s.notifyKlineHandlers(ctx, kline)
 	}

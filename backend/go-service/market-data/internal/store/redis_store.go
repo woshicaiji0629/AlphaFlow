@@ -20,7 +20,6 @@ type RedisStore struct {
 	klineMaintenance       *lcache.Cache
 	liquidationMaintenance *lcache.Cache
 	webSocketStatusCache   *lcache.Cache
-	latestPayloadCache     *lcache.Cache
 }
 
 type klineHashUpdate struct {
@@ -37,8 +36,6 @@ const (
 	liquidationMaintenanceMaxKeys  = 20000
 	webSocketStatusCacheMaxKeys    = 5000
 	webSocketStatusCacheTTL        = 30 * time.Second
-	latestPayloadCacheMaxKeys      = 50000
-	latestPayloadCacheTTL          = 5 * time.Second
 )
 
 const trimKlineHashScript = `
@@ -71,17 +68,16 @@ func NewRedisStore(client *redis.Client, retention Retention) *RedisStore {
 		klineMaintenance:       lcache.MustNew(klineMaintenanceMaxKeys),
 		liquidationMaintenance: lcache.MustNew(liquidationMaintenanceMaxKeys),
 		webSocketStatusCache:   lcache.MustNew(webSocketStatusCacheMaxKeys),
-		latestPayloadCache:     lcache.MustNew(latestPayloadCacheMaxKeys),
 	}
 }
 
 func redisOperationLimit() int {
-	limit := runtime.NumCPU() * 2
-	if limit < 8 {
-		return 8
-	}
-	if limit > 32 {
+	limit := runtime.NumCPU() * 4
+	if limit < 32 {
 		return 32
+	}
+	if limit > 96 {
+		return 96
 	}
 	return limit
 }
@@ -260,9 +256,6 @@ func (s *RedisStore) SetLastPrice(ctx context.Context, price model.LastPrice) er
 	if err != nil {
 		return fmt.Errorf("marshal last price: %w", err)
 	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
-	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set last price: %w", err)
 	}
@@ -281,9 +274,6 @@ func (s *RedisStore) SetMarkPrice(ctx context.Context, price model.MarkPrice) er
 	if err != nil {
 		return fmt.Errorf("marshal mark price: %w", err)
 	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
-	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set mark price: %w", err)
 	}
@@ -301,9 +291,6 @@ func (s *RedisStore) SetBookTicker(ctx context.Context, ticker model.BookTicker)
 	payload, err := json.Marshal(ticker)
 	if err != nil {
 		return fmt.Errorf("marshal book ticker: %w", err)
-	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
 	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set book ticker: %w", err)
@@ -342,9 +329,6 @@ func (s *RedisStore) SetLatestBatch(
 			return fmt.Errorf("marshal last price: %w", err)
 		}
 		key := model.LastPriceKey(price.Exchange, price.Market, price.Symbol)
-		if s.shouldSkipLatestWrite(key, payload) {
-			continue
-		}
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
 		hasWrites = true
 	}
@@ -354,9 +338,6 @@ func (s *RedisStore) SetLatestBatch(
 			return fmt.Errorf("marshal mark price: %w", err)
 		}
 		key := model.MarkPriceKey(price.Exchange, price.Market, price.Symbol)
-		if s.shouldSkipLatestWrite(key, payload) {
-			continue
-		}
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
 		hasWrites = true
 	}
@@ -366,9 +347,6 @@ func (s *RedisStore) SetLatestBatch(
 			return fmt.Errorf("marshal book ticker: %w", err)
 		}
 		key := model.BookTickerKey(ticker.Exchange, ticker.Market, ticker.Symbol)
-		if s.shouldSkipLatestWrite(key, payload) {
-			continue
-		}
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
 		hasWrites = true
 	}
@@ -378,9 +356,6 @@ func (s *RedisStore) SetLatestBatch(
 			return fmt.Errorf("marshal open interest: %w", err)
 		}
 		key := model.OpenInterestKey(interest.Exchange, interest.Market, interest.Symbol)
-		if s.shouldSkipLatestWrite(key, payload) {
-			continue
-		}
 		pipe.Set(ctx, key, payload, s.retention.PollingTTL)
 		hasWrites = true
 	}
@@ -405,9 +380,6 @@ func (s *RedisStore) SetLatestBatch(
 			return fmt.Errorf("marshal indicator: %w", err)
 		}
 		key := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
-		if s.shouldSkipLatestWrite(key, payload) {
-			continue
-		}
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
 		hasWrites = true
 	}
@@ -451,9 +423,6 @@ func (s *RedisStore) SetOpenInterest(ctx context.Context, interest model.OpenInt
 	payload, err := json.Marshal(interest)
 	if err != nil {
 		return fmt.Errorf("marshal open interest: %w", err)
-	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
 	}
 	if err := s.client.Set(ctx, key, payload, s.retention.PollingTTL).Err(); err != nil {
 		return fmt.Errorf("set open interest: %w", err)
@@ -570,9 +539,6 @@ func (s *RedisStore) SetIndicator(ctx context.Context, snapshot model.IndicatorS
 	if err != nil {
 		return fmt.Errorf("marshal indicator: %w", err)
 	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
-	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set indicator: %w", err)
 	}
@@ -612,9 +578,6 @@ func (s *RedisStore) SetDataHealth(ctx context.Context, health model.DataHealth)
 	payload, err := json.Marshal(health)
 	if err != nil {
 		return fmt.Errorf("marshal data health: %w", err)
-	}
-	if s.shouldSkipLatestWrite(key, payload) {
-		return nil
 	}
 	if err := s.client.Set(ctx, key, payload, s.retention.LatestTTL).Err(); err != nil {
 		return fmt.Errorf("set data health: %w", err)
@@ -675,10 +638,6 @@ func (s *RedisStore) maintainLiquidationKey(key string, fn func()) {
 
 func (s *RedisStore) shouldSkipWebSocketStatusWrite(key string, payload []byte) bool {
 	return shouldSkipCachedPayloadWrite(s.webSocketStatusCache, key, payload, webSocketStatusCacheTTL)
-}
-
-func (s *RedisStore) shouldSkipLatestWrite(key string, payload []byte) bool {
-	return shouldSkipCachedPayloadWrite(s.latestPayloadCache, key, payload, latestPayloadCacheTTL)
 }
 
 func shouldSkipCachedPayloadWrite(cache *lcache.Cache, key string, payload []byte, exp time.Duration) bool {

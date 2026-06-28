@@ -251,8 +251,8 @@ func (c *WSClient) dispatchContractStats(
 	msg messageEnvelope,
 	handler exchange.Handler,
 ) error {
-	var result []wsContractStat
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
+	result, err := decodeContractStats(msg.Result)
+	if err != nil {
 		return fmt.Errorf("decode contract stats result: %w", err)
 	}
 	for _, item := range result {
@@ -268,6 +268,19 @@ func (c *WSClient) dispatchContractStats(
 		}
 	}
 	return nil
+}
+
+func decodeContractStats(raw json.RawMessage) ([]wsContractStat, error) {
+	var items []wsContractStat
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return items, nil
+	}
+
+	var item wsContractStat
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return nil, err
+	}
+	return []wsContractStat{item}, nil
 }
 
 func (c *WSClient) dispatchLiquidations(

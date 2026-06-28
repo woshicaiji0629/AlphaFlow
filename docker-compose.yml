@@ -39,4 +39,5 @@ services:
       ALPHAFLOW_CLICKHOUSE_PASSWORD: alphaflow
     volumes:
       - ./logs/go-service:/workspace/logs/go-service
+    command: ["market-data", "-config", "market-data/configs/live-top500.toml"]
     restart: unless-stopped

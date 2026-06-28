@@ -58,11 +58,12 @@ type RunnerOptions struct {
 }
 
 type Runner struct {
-	store   Store
-	options RunnerOptions
-	mu      sync.Mutex
-	windows map[string]*CalculationWindow
-	now     func() time.Time
+	store                   Store
+	options                 RunnerOptions
+	mu                      sync.Mutex
+	windows                 map[string]*CalculationWindow
+	lastCalculatedOpenTimes map[string]int64
+	now                     func() time.Time
 }
 
 type indicatorJob struct {
@@ -84,10 +85,11 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 		options.CalculateOptions = DefaultOptions()
 	}
 	return &Runner{
-		store:   store,
-		options: options,
-		windows: map[string]*CalculationWindow{},
-		now:     time.Now,
+		store:                   store,
+		options:                 options,
+		windows:                 map[string]*CalculationWindow{},
+		lastCalculatedOpenTimes: map[string]int64{},
+		now:                     time.Now,
 	}
 }
 
@@ -229,7 +231,11 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		UpdatedAt: r.now().UnixMilli(),
 	}
 	if kline.IsClosed {
-		return r.store.SetIndicator(ctx, snapshot)
+		if err := r.store.SetIndicator(ctx, snapshot); err != nil {
+			return err
+		}
+		r.rememberCalculatedOpenTime(windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval), snapshot.OpenTime)
+		return nil
 	}
 	return r.store.SetLatestIndicator(ctx, snapshot)
 }
@@ -246,6 +252,18 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err != nil {
 		return err
 	}
+	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
+	if r.calculatedThrough(key, lastOpenTime) {
+		slog.Debug(
+			"skip unchanged indicator",
+			"exchange", rule.Exchange,
+			"market", rule.Market,
+			"symbol", symbol,
+			"interval", interval,
+			"open_time", lastOpenTime,
+		)
+		return nil
+	}
 	lastIndicatorOpenTime, hasLastIndicator, err := r.store.LastIndicatorOpenTime(
 		ctx,
 		rule.Exchange,
@@ -257,6 +275,7 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		return err
 	}
 	if hasLastIndicator && lastIndicatorOpenTime >= lastOpenTime {
+		r.rememberCalculatedOpenTime(key, lastIndicatorOpenTime)
 		slog.Debug(
 			"skip unchanged indicator",
 			"exchange", rule.Exchange,
@@ -289,6 +308,7 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err := r.store.SetIndicator(ctx, snapshot); err != nil {
 		return err
 	}
+	r.rememberCalculatedOpenTime(key, snapshot.OpenTime)
 	slog.Debug(
 		"calculated indicators",
 		"exchange", rule.Exchange,
@@ -299,6 +319,21 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		"values", len(result.Values),
 	)
 	return nil
+}
+
+func (r *Runner) calculatedThrough(key string, openTime int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lastCalculatedOpenTime, ok := r.lastCalculatedOpenTimes[key]
+	return ok && lastCalculatedOpenTime >= openTime
+}
+
+func (r *Runner) rememberCalculatedOpenTime(key string, openTime int64) {
+	r.mu.Lock()
+	if current, ok := r.lastCalculatedOpenTimes[key]; !ok || openTime > current {
+		r.lastCalculatedOpenTimes[key] = openTime
+	}
+	r.mu.Unlock()
 }
 
 func (r *Runner) windowForKline(

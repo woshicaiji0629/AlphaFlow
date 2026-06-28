@@ -122,8 +122,8 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	if MarkPriceInterval() != "1s" {
 		t.Fatalf("MarkPriceInterval = %q, want 1s", MarkPriceInterval())
 	}
-	if KlineLimit() != 500 {
-		t.Fatalf("KlineLimit = %d, want 500", KlineLimit())
+	if KlineLimit() != 250 {
+		t.Fatalf("KlineLimit = %d, want 250", KlineLimit())
 	}
 	if KlineTTL() != 7*24*time.Hour {
 		t.Fatalf("KlineTTL = %s, want 168h", KlineTTL())
@@ -175,11 +175,11 @@ func TestRedisConfigs(t *testing.T) {
 	if defaultRedis.Addr != "127.0.0.1:6380" {
 		t.Fatalf("Redis addr = %q, want 127.0.0.1:6380", defaultRedis.Addr)
 	}
-	if defaultRedis.PoolSize < 32 || defaultRedis.PoolSize > 64 {
-		t.Fatalf("Redis pool size = %d, want 32..64", defaultRedis.PoolSize)
+	if defaultRedis.PoolSize < 64 || defaultRedis.PoolSize > 128 {
+		t.Fatalf("Redis pool size = %d, want 64..128", defaultRedis.PoolSize)
 	}
-	if defaultRedis.MinIdleConns != defaultRedis.PoolSize/4 {
-		t.Fatalf("Redis min idle conns = %d, want pool size / 4", defaultRedis.MinIdleConns)
+	if defaultRedis.MinIdleConns != defaultRedis.PoolSize/2 {
+		t.Fatalf("Redis min idle conns = %d, want pool size / 2", defaultRedis.MinIdleConns)
 	}
 }
 
