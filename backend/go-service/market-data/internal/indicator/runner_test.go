@@ -252,6 +252,66 @@ func TestRunnerAppendsNewKlineToCachedWindow(t *testing.T) {
 	}
 }
 
+func TestRunnerNormalizesIncrementalKlinesBeforeAppending(t *testing.T) {
+	klines := minuteKlines(10)
+	store := &fakeStore{
+		available:    true,
+		hasLast:      true,
+		lastOpenTime: klines[len(klines)-1].OpenTime,
+		klines:       klines,
+	}
+	runner := NewRunner(store, RunnerOptions{
+		Rules: []Rule{{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   []string{"ETHUSDT"},
+			Intervals: []string{"1m"},
+		}},
+		LookbackPeriods: 5,
+	})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce first: %v", err)
+	}
+	currentLast := klines[len(klines)-1]
+	next := minuteKline(int64(len(klines)), 110)
+	replacementNext := next
+	replacementNext.Close = "111"
+	afterNext := minuteKline(int64(len(klines)+1), 111)
+	store.klines = []model.Kline{
+		afterNext,
+		currentLast,
+		next,
+		replacementNext,
+	}
+	store.lastOpenTime = afterNext.OpenTime
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce second: %v", err)
+	}
+
+	if store.rangeCalls != 2 {
+		t.Fatalf("range calls = %d, want 2", store.rangeCalls)
+	}
+	if got := store.snapshots[len(store.snapshots)-1].OpenTime; got != afterNext.OpenTime {
+		t.Fatalf("latest snapshot open time = %d, want %d", got, afterNext.OpenTime)
+	}
+	key := windowKey("binance", "um", "ETHUSDT", "1m")
+	runner.mu.Lock()
+	window := runner.windows[key].Clone()
+	runner.mu.Unlock()
+	windowKlines := window.Klines()
+	if len(windowKlines) != 5 {
+		t.Fatalf("window length = %d, want 5", len(windowKlines))
+	}
+	if got := windowKlines[len(windowKlines)-2].Close; got != "111" {
+		t.Fatalf("deduped kline close = %q, want 111", got)
+	}
+	if got := windowKlines[len(windowKlines)-1].OpenTime; got != afterNext.OpenTime {
+		t.Fatalf("window last open time = %d, want %d", got, afterNext.OpenTime)
+	}
+}
+
 func TestRunnerHandlesClosedKlineFromCachedWindowWithoutRangeRead(t *testing.T) {
 	klines := minuteKlines(10)
 	store := &fakeStore{

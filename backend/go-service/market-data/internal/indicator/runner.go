@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -411,6 +412,20 @@ func (r *Runner) updateWindow(
 		}
 		r.mu.Lock()
 		cached = r.windows[key]
+		if cached != nil && len(cached.Klines()) > 0 {
+			currentLastOpenTime, currentHasLast := cached.LastOpenTime()
+			if currentHasLast && lastOpenTime <= currentLastOpenTime {
+				window := cached.Clone()
+				r.mu.Unlock()
+				return window, nil
+			}
+			klines = normalizeIncrementalKlines(klines, currentLastOpenTime)
+		}
+		if len(klines) == 0 && cached != nil {
+			window := cached.Clone()
+			r.mu.Unlock()
+			return window, nil
+		}
 		if len(klines) > 0 &&
 			cached != nil &&
 			len(cached.Klines()) > 0 &&
@@ -439,6 +454,31 @@ func (r *Runner) updateWindow(
 	}
 	window := NewCalculationWindowFromKlines(klines, int(r.options.LookbackPeriods))
 	return r.rememberWindow(key, window), nil
+}
+
+func normalizeIncrementalKlines(klines []model.Kline, afterOpenTime int64) []model.Kline {
+	if len(klines) == 0 {
+		return nil
+	}
+	sort.SliceStable(klines, func(i int, j int) bool {
+		return klines[i].OpenTime < klines[j].OpenTime
+	})
+	normalized := klines[:0]
+	var lastOpenTime int64
+	hasLast := false
+	for _, kline := range klines {
+		if kline.OpenTime <= afterOpenTime {
+			continue
+		}
+		if hasLast && kline.OpenTime == lastOpenTime {
+			normalized[len(normalized)-1] = kline
+			continue
+		}
+		normalized = append(normalized, kline)
+		lastOpenTime = kline.OpenTime
+		hasLast = true
+	}
+	return normalized
 }
 
 func (r *Runner) rememberWindow(key string, window *CalculationWindow) *CalculationWindow {
