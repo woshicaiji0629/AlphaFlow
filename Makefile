@@ -25,10 +25,14 @@ help:
 	@echo "  make clickhouse-down   Stop local ClickHouse"
 	@echo "  make clickhouse-logs   Tail ClickHouse logs"
 	@echo "  make clickhouse-client Open clickhouse-client in the ClickHouse container"
+	@echo "  make postgres-up       Start local PostgreSQL with Docker"
+	@echo "  make postgres-down     Stop local PostgreSQL"
+	@echo "  make postgres-logs     Tail PostgreSQL logs"
+	@echo "  make postgres-shell    Open psql in the PostgreSQL container"
 	@echo "  make market-data-up    Start market-data with Docker"
 	@echo "  make market-data-down  Stop market-data"
 	@echo "  make market-data-logs  Tail market-data logs"
-	@echo "  make stack-up          Start Redis, ClickHouse, and market-data"
+	@echo "  make stack-up          Start Redis, ClickHouse, PostgreSQL, and market-data"
 	@echo "  make check            Run all available checks"
 
 .PHONY: py-sync
@@ -109,6 +113,22 @@ clickhouse-logs:
 clickhouse-client:
 	docker compose exec clickhouse clickhouse-client
 
+.PHONY: postgres-up
+postgres-up:
+	docker compose up -d postgres
+
+.PHONY: postgres-down
+postgres-down:
+	docker compose stop postgres
+
+.PHONY: postgres-logs
+postgres-logs:
+	docker compose logs -f postgres
+
+.PHONY: postgres-shell
+postgres-shell:
+	docker compose exec postgres psql -U alphaflow -d alphaflow
+
 .PHONY: market-data-up
 market-data-up:
 	docker compose up -d --build market-data
@@ -123,7 +143,7 @@ market-data-logs:
 
 .PHONY: stack-up
 stack-up:
-	docker compose up -d --build redis clickhouse market-data
+	docker compose up -d --build redis clickhouse postgres market-data
 
 .PHONY: check
 check: py-check go-market-data-check

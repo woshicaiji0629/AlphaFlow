@@ -1,221 +1,233 @@
-# Market Data Service
+# 行情数据服务
 
-This document summarizes the current Go `market-data` service so future readers can understand the implementation without scanning every package first.
+本文档总结当前 Go `market-data` 服务，便于后续阅读者不必先扫完整包结构也能理解实现。
 
-## Location
+## 位置
 
 ```text
 backend/go-service/market-data/
 ```
 
-Entry point:
+入口：
 
 ```text
 backend/go-service/market-data/cmd/market-data/main.go
 ```
 
-Local config:
+本地配置：
 
 ```text
 backend/go-service/market-data/configs/local.toml
 ```
 
-## Responsibilities
+## 职责
 
-The service currently handles:
+该服务当前负责：
 
-- Exchange REST initialization.
-- Exchange WebSocket market data sync.
-- WebSocket reconnect and REST compensation.
-- WebSocket reconnect with exponential backoff.
-- WebSocket stream sharding by code-level max streams per connection.
-- WebSocket handler event queue for store-write backpressure isolation.
-- WebSocket single-message decode/dispatch error isolation.
-- Latest price, mark price, book ticker, open interest, liquidation, and K-line writes to Redis.
-- Closed K-line and indicator history writes to ClickHouse.
-- ClickHouse retry compensation through Redis pending queues.
-- Derived K-line aggregation for selected missing intervals.
-- Technical indicator calculation from closed K-lines.
-- Market data health checks for K-line freshness, recent K-line gaps, and indicator lag.
-- Market availability status tracking.
+- 交易所 REST 初始化。
+- 交易所 WebSocket 行情同步。
+- WebSocket 重连和 REST 补偿。
+- WebSocket 指数退避重连。
+- 按代码级最大 stream 数对 WebSocket stream 分片。
+- 使用 WebSocket handler 事件队列隔离 store 写入背压。
+- 隔离 WebSocket 单条消息解码和派发错误。
+- 将最新成交价、标记价格、盘口 ticker、持仓量、爆仓数据和 K 线写入 Redis。
+- 将已闭合 K 线和指标历史写入 ClickHouse。
+- 通过 Redis pending 队列补偿 ClickHouse 写入失败。
+- 为部分缺失周期生成派生 K 线。
+- 基于已闭合 K 线计算技术指标。
+- 对 K 线新鲜度、最近 K 线缺口和指标滞后进行行情健康检查。
+- 跟踪市场可用状态。
 
-It does not currently handle:
+它当前不负责：
 
-- Trading strategy execution.
-- Order placement.
-- Real-time risk checks.
-- Public API serving.
+- 交易策略执行。
+- 订单下发。
+- 实时风控检查。
+- 对外 API 服务。
 
-## Local Storage Services
+Python `alphaflow-core` 服务会消费该服务写入 Redis 和 ClickHouse 的数据，用于策略决策和仓位管理。
 
-Local Docker Compose provides:
+## 本地存储服务
 
-- Redis for latest state, real-time cache, and low-latency service handoff.
-- ClickHouse for closed K-line and indicator time-series history.
+本地 Docker Compose 提供：
 
-The Go service writes real-time state to Redis first. When ClickHouse is enabled, closed K-lines and indicator snapshots are also written to ClickHouse. Failed ClickHouse writes are persisted to a Redis retry queue and retried by a background worker.
+- Redis：最新状态、实时缓存、低延迟服务交接。
+- ClickHouse：已闭合 K 线和指标时间序列历史。
+- PostgreSQL：由 Python 策略服务写入的已平仓策略仓位历史。
 
-## Package Map
+Go 服务会先将实时状态写入 Redis。启用 ClickHouse 后，已闭合 K 线和指标快照也会写入 ClickHouse。ClickHouse 写入失败的记录会持久化到 Redis 重试队列，并由后台 worker 重试。
+
+## 包结构
 
 ```text
 market-data/
-  cmd/market-data/           # Process entry point
-  configs/                   # Local TOML config
-  internal/app/              # Runtime assembly and goroutine orchestration
-  internal/collector/        # REST bootstrap, WebSocket sync, polling tasks
-  internal/aggregator/       # Derived K-line aggregation
-  internal/indicator/        # Technical indicator calculations and runner
-  internal/health/           # K-line and indicator health checks
-  internal/store/            # Redis and ClickHouse persistence boundary
-  internal/model/            # Internal data models and Redis key helpers
-  internal/exchange/         # Exchange interfaces and adapters
+  cmd/market-data/           # 进程入口
+  configs/                   # 本地 TOML 配置
+  internal/app/              # 运行时组装和 goroutine 编排
+  internal/collector/        # REST 启动、WebSocket 同步、轮询任务
+  internal/aggregator/       # 派生 K 线聚合
+  internal/indicator/        # 技术指标计算和 runner
+  internal/health/           # K 线和指标健康检查
+  internal/store/            # Redis 和 ClickHouse 持久化边界
+  internal/model/            # 内部数据模型和 Redis key 工具
+  internal/exchange/         # 交易所接口和适配器
 ```
 
-Shared Go packages live under:
+共享 Go 包位于：
 
 ```text
 backend/go-service/pkg/
 ```
 
-## Runtime Assembly
+## 运行时组装
 
-`internal/app` builds:
+`internal/app` 会构建：
 
-- One Redis-backed store with optional ClickHouse history writes.
-- One collector per enabled exchange.
-- One K-line aggregator.
-- One indicator runner.
-- One market data health runner.
+- 一个 Redis-backed store，并可选启用 ClickHouse 历史写入。
+- 每个已启用交易所一个 collector。
+- 一个 K 线聚合器。
+- 一个指标 runner。
+- 一个行情健康检查 runner。
 
-Collectors run in restart loops. The aggregator and indicator runner run on fixed scan intervals. Context cancellation stops all long-running loops.
+Collector 运行在重启循环中。聚合器和指标 runner 按固定扫描间隔运行。Context cancellation 会停止所有长时间运行的循环。
 
-## Exchanges
+## 交易所
 
-Adapter packages currently exist for:
+当前已存在适配器包：
 
 - `binance`
 - `gate`
 - `bitget`
 - `bybit`
 
-Default local config:
+默认本地配置：
 
-- Binance enabled with `ETHUSDT`.
-- Gate enabled with `ETH_USDT`.
-- Bitget disabled.
-- Bybit disabled.
+- Binance 启用，交易对 `ETHUSDT`。
+- Gate 启用，交易对 `ETH_USDT`。
+- Bitget 关闭。
+- Bybit 关闭。
 
-Supported interval lists are currently code-level constants:
+支持的周期列表当前是代码级常量：
 
-- Binance: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`
-- Gate: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`
-- Bitget: `1m`, `5m`, `15m`, `30m`, `1h`, `4h`
-- Bybit: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`
+- Binance：`1m`、`3m`、`5m`、`15m`、`30m`、`1h`、`2h`、`4h`
+- Gate：`1m`、`5m`、`15m`、`30m`、`1h`、`4h`
+- Bitget：`1m`、`5m`、`15m`、`30m`、`1h`、`4h`
+- Bybit：`1m`、`3m`、`5m`、`15m`、`30m`、`1h`、`2h`、`4h`
 
-## Derived K-Lines
+## 派生 K 线
 
-The aggregator creates missing intervals from existing smaller intervals.
+聚合器会从已有小周期生成缺失的大周期。
 
-Current rules:
+当前规则：
 
-- Binance: `5m -> 10m`
-- Bybit: `5m -> 10m`
-- Gate: `1m -> 3m`, `5m -> 10m`, `1h -> 2h`
-- Bitget: `1m -> 3m`, `5m -> 10m`, `1h -> 2h`
+- Binance：`5m -> 10m`
+- Bybit：`5m -> 10m`
+- Gate：`1m -> 3m`、`5m -> 10m`、`1h -> 2h`
+- Bitget：`1m -> 3m`、`5m -> 10m`、`1h -> 2h`
 
-Aggregation only writes a derived K-line when all required source K-lines are present, closed, and contiguous.
+只有当所有源 K 线都存在、已闭合且连续时，聚合器才会写入派生 K 线。
 
-## Indicators
+## 指标
 
-The indicator runner reads recent closed K-lines and writes the latest indicator snapshot per exchange, market, symbol, and interval.
+指标 runner 读取最近已闭合 K 线，并按交易所、市场、交易对和周期写入最新指标快照。
 
-The current indicator set includes:
+当前指标集合包括：
 
-- Moving averages: SMA, EMA, WMA, HMA, VWMA, DEMA, TEMA, KAMA, Alligator.
-- Momentum and oscillators: RSI, MACD, KDJ, Stochastic, Stoch RSI, SKDJ, CCI, Williams %R, ROC.
-- Volatility and trend: ATR, NATR, ADX, DI, Bollinger Bands, Donchian, Supertrend, AlphaTrend, PSAR.
-- Volume and money flow: volume moving averages, OBV, VWAP, rolling VWAP, MFI, CMF, accumulation/distribution, PVT.
-- Price action and structure: candle patterns, Heikin Ashi, support/resistance, Fibonacci, pivot points, Ichimoku, smart money signals.
-- Derived candle features: change percent, amplitude percent, body ratio, shadow ratios, volume ratios.
+- 均线类：SMA、EMA、WMA、HMA、VWMA、DEMA、TEMA、KAMA、Alligator。
+- 动量和震荡类：RSI、MACD、KDJ、Stochastic、Stoch RSI、SKDJ、CCI、Williams %R、ROC。
+- 波动率和趋势类：ATR、NATR、ADX、DI、Bollinger Bands、Donchian、Supertrend、AlphaTrend、PSAR。
+- 成交量和资金流类：成交量均线、OBV、VWAP、滚动 VWAP、MFI、CMF、accumulation/distribution、PVT。
+- 价格行为和结构类：K 线形态、Heikin Ashi、支撑阻力、Fibonacci、pivot points、Ichimoku、smart money signals。
+- 派生 K 线特征：涨跌幅、振幅、实体比例、影线比例、成交量比例。
 
-Indicator calculation currently uses closed K-lines only. The runner tracks the latest calculated indicator open time per exchange, market, symbol, and interval, and skips repeated calculation for the same closed K-line.
+指标计算当前只使用已闭合 K 线。Runner 会记录每个交易所、市场、交易对和周期最近已计算指标的 open time，并跳过同一个已闭合 K 线的重复计算。
 
-Each indicator snapshot includes basic data quality fields:
+每个指标快照包含基础数据质量字段：
 
-- `values.sample_count`: number of closed K-lines used.
-- `values.required_count`: minimum sample count expected by the configured moving-average periods.
-- `signals.data_quality`: `ok`, `insufficient`, `gap`, `invalid_ohlc`, or `zero_volume`.
-- `signals.data_quality_reason`: optional detail for non-`ok` quality states.
+- `values.sample_count`：参与计算的已闭合 K 线数量。
+- `values.required_count`：当前均线周期配置期望的最小样本数。
+- `signals.data_quality`：`ok`、`insufficient`、`gap`、`invalid_ohlc` 或 `zero_volume`。
+- `signals.data_quality_reason`：当质量状态不是 `ok` 时的可选细节。
 
-Latest snapshots are stored in Redis; when ClickHouse is enabled, each snapshot is also retained as historical series data.
+最新快照存储在 Redis；启用 ClickHouse 后，每个快照也会作为历史序列数据保留。
 
-## Market Data Health
+Python 策略框架以两种方式使用指标：
 
-The health runner periodically checks each configured exchange, market, symbol, and interval. It writes the latest health snapshot to Redis only; health snapshots are operational state and are not stored in ClickHouse.
+- 从 Redis 读取最新指标快照，作为当前决策点。
+- 从 ClickHouse 读取最近指标快照，做窗口分析。
 
-Current checks:
+指标窗口分析当前会为每个指标计算方向、斜率、最新值、前一个值、变化量、连续上升或下降次数，以及区间位置。这让策略可以判断类似 “MACD 柱子持续降低” 的模式，而不是只看最新 MACD 值。
 
-- K-line status is `missing` when no closed K-line exists.
-- K-line status is `stale` when the latest closed K-line is older than two interval lengths by open time.
-- K-line status is `gap` when the recent closed K-line window is incomplete or non-contiguous.
-- K-line status is `ok` when the latest closed K-line is fresh and the recent window is contiguous.
-- Indicator status is `missing` when no indicator cursor exists.
-- Indicator status is `stale` when the latest indicator open time is behind the latest closed K-line open time.
-- Indicator status is `ok` when the indicator cursor has caught up.
-- Both statuses are `skipped` when the market is marked unavailable.
+K 线窗口分析也会基于 Redis 中最近已闭合 K 线执行。Python reader 默认对 K 线上下文和 ClickHouse 指标历史都使用 200 条 lookback。
 
-Current code-level defaults:
+## 行情健康检查
 
-- Health scan interval is 10 seconds.
-- Recent K-line gap lookback is 5 closed K-lines.
+健康检查 runner 会定期检查每个已配置交易所、市场、交易对和周期。它只把最新健康快照写入 Redis；健康快照是运行状态，不写入 ClickHouse。
 
-## ClickHouse Tables
+当前检查：
 
-ClickHouse is used for durable analytical history, not for real-time state handoff.
+- 没有已闭合 K 线时，K 线状态为 `missing`。
+- 最新已闭合 K 线的 open time 早于两个周期长度时，K 线状态为 `stale`。
+- 最近已闭合 K 线窗口不完整或不连续时，K 线状态为 `gap`。
+- 最新已闭合 K 线新鲜且最近窗口连续时，K 线状态为 `ok`。
+- 没有指标 cursor 时，指标状态为 `missing`。
+- 最新指标 open time 落后于最新已闭合 K 线 open time 时，指标状态为 `stale`。
+- 指标 cursor 已追上最新已闭合 K 线时，指标状态为 `ok`。
+- 当市场被标记为不可用时，两类状态都为 `skipped`。
 
-Current tables:
+当前代码级默认值：
 
-- `market_klines`: closed K-line history keyed by exchange, market, symbol, interval, and open time.
-- `indicator_snapshots`: indicator snapshot history keyed by exchange, market, symbol, interval, and open time.
+- 健康检查间隔为 10 秒。
+- 最近 K 线缺口检查 lookback 为 5 根已闭合 K 线。
 
-Both tables use `ReplacingMergeTree(updated_at_ms)` so repeated writes for the same logical row can be deduplicated by ClickHouse merges. Price and volume fields are stored as strings to preserve exchange precision without forcing a decimal scale in the first implementation.
+## ClickHouse 表
 
-ClickHouse write failures do not directly break the Redis real-time path. Failed records are written to Redis queues:
+ClickHouse 用于持久化分析历史，不用于实时状态交接。
+
+当前表：
+
+- `market_klines`：已闭合 K 线历史，以交易所、市场、交易对、周期和 open time 作为逻辑键。
+- `indicator_snapshots`：指标快照历史，以交易所、市场、交易对、周期和 open time 作为逻辑键。
+
+两个表都使用 `ReplacingMergeTree(updated_at_ms)`，让 ClickHouse merge 时可以对同一逻辑行的重复写入去重。价格和成交量字段以字符串存储，以便第一版实现不强制 decimal scale，同时保留交易所原始精度。
+
+ClickHouse 写入失败不会直接破坏 Redis 实时路径。失败记录会写入 Redis 队列：
 
 ```text
 market-data:clickhouse:pending
 market-data:clickhouse:processing
 ```
 
-The background retry worker moves records from `pending` to `processing`, writes ClickHouse, and removes them after success. Records left in `processing` are recovered back to `pending` when the worker starts.
+后台重试 worker 会将记录从 `pending` 移到 `processing`，写入 ClickHouse，成功后删除。Worker 启动时会把遗留在 `processing` 中的记录恢复回 `pending`。
 
 ## Redis Keys
 
-Redis key shape:
+Redis key 形态：
 
 ```text
 {exchange_code}:{market}:{type}:{symbol}:{extra}
 ```
 
-Known exchange code:
+已知交易所 code：
 
 - `bn` = Binance
-- Other exchange names currently use their raw exchange name unless a specific mapping is added.
+- 其他交易所目前使用原始 exchange 名称，除非后续添加特定映射。
 
-Common types:
+常见类型：
 
-- `k` = K-line namespace
-- `lp` = latest price
-- `mp` = mark price
+- `k` = K 线命名空间
+- `lp` = 最新成交价
+- `mp` = 标记价格
 - `bt` = book ticker
 - `oi` = open interest
-- `liq` = liquidation sorted set
-- `ind` = latest indicator snapshot
-- `ind:last` = latest calculated indicator open time
-- `health` = latest K-line and indicator health snapshot
-- `ws` = exchange WebSocket connection health
+- `liq` = 爆仓 sorted set
+- `ind` = 最新指标快照
+- `ind:last` = 最新已计算指标 open time
+- `health` = 最新 K 线和指标健康快照
+- `ws` = 交易所 WebSocket 连接健康状态
 
-Examples:
+示例：
 
 ```text
 bn:um:k:ETHUSDT:1m
@@ -228,127 +240,163 @@ bn:um:ind:ETHUSDT:1m
 bn:um:ind:last:ETHUSDT:1m
 bn:um:health:ETHUSDT:1m
 bn:um:ws
+strategy:position:binance:um:ETHUSDT:rule
 ```
 
-K-lines use a Redis hash plus a sorted-set index:
+K 线使用 Redis hash 加 sorted-set index：
 
 ```text
-{base}:data   # hash field = open time in milliseconds, value = K-line JSON
-{base}:idx    # sorted set member/score = open time in milliseconds
+{base}:data   # hash field = 毫秒级 open time，value = K-line JSON
+{base}:idx    # sorted set member/score = 毫秒级 open time
 ```
 
-Liquidations use Redis sorted sets. The score is the event time in milliseconds. Latest state, indicator snapshots, indicator calculation cursors, and WebSocket health use Redis string values.
+爆仓数据使用 Redis sorted set。Score 是毫秒级 event time。最新状态、指标快照、指标计算 cursor 和 WebSocket 健康状态使用 Redis string。
 
-Health snapshots also use Redis string JSON values with latest-state TTL.
+健康快照也使用带最新状态 TTL 的 Redis string JSON。
 
-WebSocket health records include connection state, last start/stop timestamps, last error, reconnect count, and consecutive failure count. They are operational state for monitoring and troubleshooting, not durable history.
+Python 策略活跃仓位也使用 Redis string JSON。当前 key 形态：
 
-When stream sharding is enabled, each shard writes its own health key:
+```text
+strategy:position:{exchange}:{market}:{symbol}:{strategy_name}
+```
+
+这些 key 由 Python 策略服务负责，不属于 Go market-data 服务。
+
+WebSocket 健康记录包括连接状态、最近启动和停止时间、最近错误、重连次数、连续失败次数。它们用于监控和排障，不是持久化历史。
+
+启用 stream 分片后，每个 shard 会写入自己的健康 key：
 
 ```text
 bn:um:ws:0
 bn:um:ws:1
 ```
 
-Each shard status includes `shard`, `stream_count`, and `connection_count`.
+每个 shard 状态包含 `shard`、`stream_count` 和 `connection_count`。
 
-## Redis Write Reduction
+## Redis 写入削减
 
-The Redis path is optimized to reduce repeated maintenance and latest-state writes under large symbol sets.
+Redis 路径经过优化，减少大交易对数量下的重复维护和最新状态写入。
 
-- K-line data is written as `HASH + ZSET index` so updating an existing open time replaces one hash field instead of rewriting a full sorted-set member payload.
-- K-line trim and TTL maintenance are guarded by an in-memory `lcache.FreqCall`, so each K-line namespace performs trim/expire work at a low frequency instead of on every write.
-- Liquidation trim and TTL maintenance also use `lcache.FreqCall`; liquidation events are still appended immediately, but list maintenance is not repeated for every event.
-- WebSocket status writes skip identical JSON payloads for a short local TTL. This keeps Redis status keys fresh while avoiding repeated identical `SET` calls during stable connections.
-- Latest last price, mark price, book ticker, open interest, and latest indicator snapshots skip identical JSON payloads for a short local TTL. This only suppresses repeated Redis latest-state writes; it does not change ClickHouse historical writes.
-- Indicator open-time cursor writes are intentionally not de-duplicated by the latest-payload cache because they participate in indicator idempotency.
+- K 线数据以 `HASH + ZSET index` 写入，因此更新同一个 open time 只会替换一个 hash field，而不是重写完整 sorted-set member payload。
+- K 线 trim 和 TTL 维护由进程内 `lcache.FreqCall` 控制，因此每个 K 线命名空间只会低频执行 trim/expire，而不是每次写入都执行。
+- 爆仓 trim 和 TTL 维护也使用 `lcache.FreqCall`；爆仓事件仍立即追加，但列表维护不会每条事件重复执行。
+- WebSocket 状态写入会在短本地 TTL 内跳过相同 JSON payload。这既保持 Redis 状态 key 新鲜，也避免稳定连接期间重复 `SET`。
+- 最新成交价、标记价格、book ticker、open interest 和最新指标快照会在短本地 TTL 内跳过相同 JSON payload。这只抑制 Redis 最新状态重复写入，不改变 ClickHouse 历史写入。
+- 指标 open-time cursor 写入故意不使用 latest-payload 缓存，因为它参与指标幂等控制。
 
-These caches are process-local. After a restart, Redis is repopulated by live exchange data and normal backfill/retry flows.
+这些缓存都是进程内缓存。进程重启后，Redis 会通过实时交易所数据、正常回填和重试流程重新填充。
 
-## Retention
+## 保留策略
 
-Current code-level defaults:
+当前代码级默认值：
 
-- K-lines retain 250 entries per key.
-- K-line TTL is 7 days.
-- Liquidations retain 200 entries per key.
-- Liquidation TTL is 24 hours.
-- Latest price, mark price, book ticker, and indicator TTL is 24 hours.
-- Market data health TTL is 24 hours.
-- Polling state such as open interest TTL is 24 hours.
-- ClickHouse retry queue retains up to 100000 pending records by default.
+- 每个 K 线 key 保留 250 条。
+- K 线 TTL 为 7 天。
+- 每个爆仓 key 保留 200 条。
+- 爆仓 TTL 为 24 小时。
+- 最新成交价、标记价格、book ticker 和指标 TTL 为 24 小时。
+- 行情健康状态 TTL 为 24 小时。
+- 轮询状态，例如 open interest，TTL 为 24 小时。
+- ClickHouse 重试队列默认最多保留 100000 条 pending 记录。
 
-These values are not yet TOML-configurable.
+这些值暂未支持 TOML 配置。
 
-## Local Runbook
+## 本地运行手册
 
-Start Redis:
+启动 Redis：
 
 ```sh
 make redis-up
 ```
 
-Start ClickHouse:
+启动 ClickHouse：
 
 ```sh
 make clickhouse-up
 ```
 
-Run market-data locally:
+启动用于策略仓位历史的 PostgreSQL：
+
+```sh
+make postgres-up
+```
+
+本地运行 market-data：
 
 ```sh
 make go-market-data-run
 ```
 
-Start Redis, ClickHouse, and market-data with Docker Compose:
+使用 Docker Compose 启动 Redis、ClickHouse、PostgreSQL 和 market-data：
 
 ```sh
 make stack-up
 ```
 
-Tail market-data Docker logs:
+运行 Python 策略服务：
+
+```sh
+make py-run
+```
+
+常用 Python 策略环境变量：
+
+```text
+ALPHAFLOW_REDIS_URL=redis://localhost:6380/0
+ALPHAFLOW_POSTGRES_DSN=postgresql://alphaflow:alphaflow@localhost:5432/alphaflow
+ALPHAFLOW_CLICKHOUSE_HTTP_URL=http://localhost:8123
+ALPHAFLOW_CLICKHOUSE_USERNAME=alphaflow
+ALPHAFLOW_CLICKHOUSE_PASSWORD=alphaflow
+ALPHAFLOW_STRATEGY_EXCHANGE=binance
+ALPHAFLOW_STRATEGY_MARKET=um
+ALPHAFLOW_STRATEGY_SYMBOL=ETHUSDT
+ALPHAFLOW_STRATEGY_KLINE_INTERVAL=1m
+ALPHAFLOW_STRATEGY_INTERVAL_SECONDS=10
+```
+
+查看 market-data Docker 日志：
 
 ```sh
 make market-data-logs
 ```
 
-Open Redis CLI:
+打开 Redis CLI：
 
 ```sh
 make redis-cli
 ```
 
-Open ClickHouse client:
+打开 ClickHouse client：
 
 ```sh
 make clickhouse-client
 ```
 
-Run Go tests:
+运行 Go 测试：
 
 ```sh
 make go-market-data-test
 ```
 
-Run the collector event queue load test:
+运行 collector 事件队列负载测试：
 
 ```sh
 cd backend/go-service/market-data
 go run ./cmd/market-data-loadtest -symbols=50 -duration=30s -rate=5000 -store-latency=1ms
 ```
 
-The load test does not connect to real exchanges, Redis, or ClickHouse. It drives collector handlers with simulated market events and a fake store latency so queue size, latest-event drops, and worker throughput can be checked before adding more live symbols.
+该负载测试不会连接真实交易所、Redis 或 ClickHouse。它会用模拟行情事件和假的 store 延迟驱动 collector handler，以便在增加更多真实交易对前检查队列长度、latest-event 丢弃和 worker 吞吐。
 
-Run the indicator runner load test:
+运行指标 runner 负载测试：
 
 ```sh
 cd backend/go-service/market-data
 go run ./cmd/market-data-indicator-loadtest -symbols=500 -lookback=200 -runs=2
 ```
 
-The indicator load test simulates four exchanges with the service's current interval sets and fake K-line/store data. It measures indicator runner throughput and simulated Redis/ClickHouse write counts without writing real storage.
+指标负载测试会使用服务当前周期集合和假的 K 线/store 数据模拟四个交易所。它会衡量指标 runner 吞吐，以及模拟的 Redis/ClickHouse 写入次数，不会写入真实存储。
 
-Run a live full-chain pressure test:
+运行实时全链路压力测试：
 
 ```sh
 docker compose exec redis redis-cli -p 6380 FLUSHDB
@@ -359,7 +407,7 @@ docker compose exec clickhouse clickhouse-client --query "TRUNCATE TABLE IF EXIS
 docker compose up -d --build market-data
 ```
 
-Collect Redis pressure metrics:
+采集 Redis 压力指标：
 
 ```sh
 docker compose exec redis redis-cli -p 6380 DBSIZE
@@ -371,7 +419,7 @@ docker compose exec redis redis-cli -p 6380 LLEN market-data:clickhouse:pending
 docker compose exec redis redis-cli -p 6380 LLEN market-data:clickhouse:processing
 ```
 
-Collect ClickHouse write metrics:
+采集 ClickHouse 写入指标：
 
 ```sh
 docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM alphaflow.market_klines"
@@ -379,62 +427,62 @@ docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM al
 docker compose exec clickhouse clickhouse-client --query "SELECT table, sum(rows) FROM system.parts WHERE database = 'alphaflow' AND active GROUP BY table ORDER BY table"
 ```
 
-Recent observed live run with `live-top500.toml` over a roughly five-minute window:
+最近一次使用 `live-top500.toml` 的本地实时运行观测，大约五分钟窗口：
 
-- Redis keys: 34233.
-- ClickHouse `market_klines`: 44634.
-- ClickHouse `indicator_snapshots`: 13537.
-- ClickHouse pending queue: 0.
-- ClickHouse processing queue: 0.
-- Redis total commands after `CONFIG RESETSTAT`: 552168.
-- Redis mid-run ops: about 4102 ops/s.
-- Redis rejected connections: 0.
-- Redis evicted keys: 0.
-- Redis `LATENCY LATEST`: no events.
-- Redis memory after the run: about 38 MiB.
+- Redis keys：34233。
+- ClickHouse `market_klines`：44634。
+- ClickHouse `indicator_snapshots`：13537。
+- ClickHouse pending queue：0。
+- ClickHouse processing queue：0。
+- `CONFIG RESETSTAT` 后 Redis 总命令数：552168。
+- Redis 运行中 ops：约 4102 ops/s。
+- Redis rejected connections：0。
+- Redis evicted keys：0。
+- Redis `LATENCY LATEST`：无事件。
+- 运行后 Redis 内存：约 38 MiB。
 
-These numbers are a recent local observation, not a capacity guarantee. They depend on enabled exchanges, symbol count, exchange message rate, local machine resources, and current WebSocket connection settings.
+这些数字只是近期本地观测，不是容量保证。它们取决于启用的交易所、交易对数量、交易所消息速率、本地机器资源和当前 WebSocket 连接设置。
 
-## Configuration Notes
+## 配置说明
 
-`configs/local.toml` currently controls:
+`configs/local.toml` 当前控制：
 
-- Enabled exchanges.
-- ClickHouse address, database, credentials, timeout, and retry settings.
-- Symbols.
-- Logging service name, level, format, output, file rotation.
+- 启用的交易所。
+- ClickHouse 地址、数据库、凭证、超时和重试设置。
+- 交易对。
+- 日志服务名、级别、格式、输出和文件轮转。
 
-WebSocket reconnect delay, stream shard size, event queue size, and event worker count are code-level operational defaults, not TOML configuration.
+WebSocket 重连延迟、stream shard 大小、事件队列大小和事件 worker 数量是代码级运行默认值，不是 TOML 配置。
 
-WebSocket adapters use a shared 4 MiB read limit. Collector stream lists are split by a code-level max streams per connection; each shard runs its own connection and reconnect backoff. Connection read failures and subscription write failures still trigger reconnects; single-message decode or dispatch failures are logged with exchange and message size and then skipped.
+WebSocket 适配器使用共享的 4 MiB 读取限制。Collector stream 列表会按代码级每连接最大 stream 数拆分；每个 shard 运行自己的连接和重连 backoff。连接读取失败和订阅写入失败仍会触发重连；单条消息解码或派发失败会带上交易所和消息大小记录日志，然后跳过。
 
-WebSocket handlers enqueue or coalesce validated events before returning. Background collector workers write queued events to Redis and optional ClickHouse-backed store paths. K-line and liquidation events wait for queue capacity when the queue is full. Latest-state events such as last price, mark price, book ticker, and open interest are coalesced by event type and symbol, then flushed periodically so Redis receives the newest state without being forced to write every intermediate update.
+WebSocket handler 在返回前会把校验后的事件入队或合并。后台 collector worker 会将队列事件写入 Redis，以及可选的 ClickHouse-backed store 路径。K 线和爆仓事件在队列满时会等待队列容量。最新状态事件，例如最新成交价、标记价格、book ticker 和 open interest，会按事件类型和交易对合并，然后定期 flush，因此 Redis 能收到最新状态，但不会被迫写入每一个中间更新。
 
-Backfill only throttles actual REST K-line fetch requests. Local checks such as reading the latest Redis open time and skipping symbols without a closed window are not delayed. The throttle is code-level and per collector, so large symbol lists recover more slowly but avoid starting with a burst of thousands of exchange REST calls.
+回填只会对真实 REST K 线请求限流。读取 Redis 最新 open time、跳过没有已闭合窗口的交易对等本地检查不会延迟。限流是代码级、按 collector 生效，因此大交易对列表恢复更慢，但可以避免启动时产生数千个交易所 REST 请求。
 
-Runtime values still defined in code include:
+仍在代码中定义的运行值包括：
 
-- REST bootstrap limit.
-- Exchange base URLs.
-- Exchange interval lists.
-- Mark price polling interval.
-- Open interest polling interval.
-- Retention limits and TTLs.
-- Aggregation scan interval.
-- Indicator lookback periods.
+- REST 启动限制。
+- 交易所 base URL。
+- 交易所周期列表。
+- 标记价格轮询间隔。
+- Open interest 轮询间隔。
+- 保留长度和 TTL。
+- 聚合扫描间隔。
+- 指标 lookback 周期。
 
-## Current Limitations
+## 当前限制
 
-- Redis is not a durable historical data store.
-- Indicator parameters and groups are not yet runtime-configurable.
-- Indicators currently use K-line OHLCV data only; open interest, liquidation, mark price premium, and order book imbalance are not yet part of indicator calculation.
-- The service does not expose an HTTP API.
-- The local README and architecture docs should be updated when service responsibilities move or new production modules are introduced.
+- Redis 不是持久化历史数据存储。
+- 指标参数和指标组暂未支持运行时配置。
+- 指标当前只使用 K 线 OHLCV 数据；open interest、爆仓、标记价格溢价和订单簿不平衡暂未参与指标计算。
+- 服务不提供 HTTP API。
+- 当服务职责移动或新增生产模块时，应同步更新本地 README 和架构文档。
 
-## Useful Next Improvements
+## 后续可改进项
 
-- Make indicator scan interval, lookback periods, and indicator groups configurable.
-- Add optional indicator history retention.
-- Add data quality signals such as gap detection, stale data, and insufficient data.
-- Add derived indicators from open interest, liquidation, mark price, and book ticker data.
-- Decide the durable historical market data store.
+- 将指标扫描间隔、lookback 周期和指标组改为可配置。
+- 增加可选指标历史保留策略。
+- 增加数据质量信号，例如缺口检测、数据陈旧、数据不足。
+- 基于 open interest、爆仓、标记价格和 book ticker 增加派生指标。
+- 确定持久化历史行情数据存储方案。

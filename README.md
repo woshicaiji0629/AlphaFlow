@@ -1,115 +1,160 @@
 # AlphaFlow
 
-AlphaFlow is an intelligent trading system project. The current implementation focuses on real-time market data collection, derived K-line aggregation, technical indicator calculation, Redis-based real-time handoff, and ClickHouse-based historical storage.
+AlphaFlow 是一个智能交易系统项目。当前实现重点包括实时行情采集、派生 K 线聚合、技术指标计算、基于 Redis 的实时数据交接、基于 ClickHouse 的行情历史存储，以及带持仓管理能力的 Python 策略框架原型。
 
-## Current Status
+## 当前状态
 
-- `backend/go-service/market-data` is the active service.
-- Redis is used as the current real-time data cache and service handoff layer.
-- ClickHouse stores closed K-line and indicator history for later research, backtest, reporting, and API workflows.
-- Binance and Gate are enabled in the local config by default. Bitget and Bybit adapters exist but are disabled by default.
-- Python currently contains a minimal `alphaflow-core` service scaffold managed by `uv`.
-- Frontend is reserved for a future React + TypeScript application.
+- `backend/go-service/market-data` 是当前活跃的行情数据服务。
+- `backend/python-service/alphaflow-core` 是当前活跃的策略框架原型。
+- Redis 用作实时行情缓存、服务间交接层，以及活跃策略仓位存储。
+- ClickHouse 存储已闭合 K 线和指标历史，用于后续研究、回测、报表和 API 工作流。
+- PostgreSQL 存储已平仓策略仓位，用于分析策略表现。
+- 本地配置默认启用 Binance 和 Gate。Bitget 和 Bybit 适配器已存在，但默认关闭。
+- Python 服务可以读取 Redis 行情快照、ClickHouse 指标历史，执行多策略研判，在 Redis 管理活跃仓位，并把已平仓仓位持久化到 PostgreSQL。
+- Frontend 预留给未来的 React + TypeScript 应用。
 
-## Project Layout
+## 项目结构
 
 ```text
 AlphaFlow/
   backend/
     go-service/
-      market-data/                 # Go market data collector, aggregator, indicator runner
-      pkg/                         # Shared Go logger, Redis client, HTTP client, constants
+      market-data/                 # Go 行情采集、聚合、指标计算服务
+      pkg/                         # Go 共享 logger、Redis client、HTTP client、常量
     python-service/
-      alphaflow-core/              # Python service scaffold managed by uv
+      alphaflow-core/              # Python 策略框架，使用 uv 管理依赖
   docs/
-    architecture.md                # Architecture boundaries and stage planning
-    market-data.md                 # Current market-data service notes
-  frontend/                        # Reserved for future frontend work
-  data/                            # Local runtime data, including Redis data
-  logs/                            # Local service logs
+    architecture.md                # 架构边界和阶段规划
+    market-data.md                 # 当前行情服务说明
+  frontend/                        # 预留给未来前端
+  data/                            # 本地运行数据，包括 Redis、ClickHouse、PostgreSQL 数据
+  logs/                            # 本地服务日志
 ```
 
-## Read This First
+## 优先阅读
 
-- [docs/architecture.md](docs/architecture.md) explains service boundaries, current architecture, and planned modules.
-- [docs/market-data.md](docs/market-data.md) explains the implemented Go market-data service, Redis keys, indicators, local run commands, and known limits.
-- [Makefile](Makefile) is the main local command entry point.
+- [docs/architecture.md](docs/architecture.md) 说明服务边界、当前架构和计划模块。
+- [docs/market-data.md](docs/market-data.md) 说明已实现的 Go 行情服务、Redis key、指标、本地运行命令和已知限制。
+- [Makefile](Makefile) 是主要的本地命令入口。
 
-## Local Commands
+## 本地命令
 
-Start Redis:
+启动 Redis：
 
 ```sh
 make redis-up
 ```
 
-Run the Go market-data service locally:
+启动 PostgreSQL：
+
+```sh
+make postgres-up
+```
+
+本地运行 Go 行情服务：
 
 ```sh
 make go-market-data-run
 ```
 
-Start Redis, ClickHouse, and market-data with Docker Compose:
+使用 Docker Compose 启动 Redis、ClickHouse、PostgreSQL 和 market-data：
 
 ```sh
 make stack-up
 ```
 
-Run Go tests:
+本地运行 Python 策略服务：
+
+```sh
+make py-run
+```
+
+运行 Go 测试：
 
 ```sh
 make go-market-data-test
 ```
 
-Run the Go market-data collector load test:
+运行 Go 行情采集负载测试：
 
 ```sh
 cd backend/go-service/market-data
 go run ./cmd/market-data-loadtest -symbols=50 -duration=30s -rate=5000 -store-latency=1ms
 ```
 
-Run Python checks:
+运行 Python 检查：
 
 ```sh
 make py-check
 ```
 
-Run all available checks:
+运行所有可用检查：
 
 ```sh
 make check
 ```
 
-## Current Data Flow
+## 当前数据流
 
 ```text
-Exchange REST/WebSocket
+交易所 REST/WebSocket
   -> Go market-data collector
   -> Redis + ClickHouse
-  -> Python strategy/backtest/API workflows
+  -> Python 策略框架
+  -> Redis 活跃仓位 + PostgreSQL 已平仓仓位
 ```
 
-Inside `market-data`, K-lines can also flow through derived aggregation and indicator calculation:
+在 `market-data` 内部，K 线还会经过派生聚合和指标计算：
 
 ```text
-Raw K-lines
-  -> derived K-line aggregation
-  -> indicator runner
-  -> latest indicator snapshot in Redis + history in ClickHouse
+原始 K 线
+  -> 派生 K 线聚合
+  -> 指标运行器
+  -> Redis 最新指标快照 + ClickHouse 指标历史
 ```
 
-## Configuration
+在 `alphaflow-core` 内部，策略研判同时使用当前状态和历史窗口：
 
-The local Go market-data config lives at:
+```text
+Redis 最新行情 + 最近 K 线
+ClickHouse 最近指标历史
+  -> K 线窗口分析 + 指标窗口分析
+  -> 策略决策
+  -> Redis 活跃仓位
+  -> PostgreSQL 已平仓历史
+```
+
+## 配置
+
+本地 Go 行情服务配置文件：
 
 ```text
 backend/go-service/market-data/configs/local.toml
 ```
 
-The config currently controls enabled exchanges, symbols, ClickHouse connection and retry settings, and logging. Several runtime values such as WebSocket operational safeguards, indicator scan interval, retention limits, and exchange interval lists are still code-level constants.
+当前配置控制启用的交易所、交易对、ClickHouse 连接和重试设置、日志等。部分运行参数仍是代码级常量，例如 WebSocket 运行保护、指标扫描间隔、保留长度和交易所周期列表。
 
-## Important Notes
+Python 策略服务读取以下环境变量：
 
-- Redis is for real-time state and short-window cache; ClickHouse is for closed K-line and indicator history.
-- Strategy, backtest, API, execution, risk, and frontend workflows are planned but not implemented as production modules yet.
-- Keep documentation aligned with actual implementation. Mark future ideas as planning items instead of current behavior.
+```text
+ALPHAFLOW_REDIS_URL
+ALPHAFLOW_POSTGRES_DSN
+ALPHAFLOW_CLICKHOUSE_HTTP_URL
+ALPHAFLOW_CLICKHOUSE_USERNAME
+ALPHAFLOW_CLICKHOUSE_PASSWORD
+ALPHAFLOW_STRATEGY_EXCHANGE
+ALPHAFLOW_STRATEGY_MARKET
+ALPHAFLOW_STRATEGY_SYMBOL
+ALPHAFLOW_STRATEGY_KLINE_INTERVAL
+ALPHAFLOW_STRATEGY_INTERVAL_SECONDS
+```
+
+如果配置了 `ALPHAFLOW_POSTGRES_DSN`，策略服务启动时会初始化已平仓仓位表。如果配置了 `ALPHAFLOW_CLICKHOUSE_HTTP_URL`，策略服务会从 ClickHouse 读取最近指标历史，用于指标窗口分析。
+
+## 重要说明
+
+- Redis 用于实时行情状态、短窗口缓存、服务交接和活跃策略仓位。
+- ClickHouse 用于已闭合 K 线和指标历史。
+- PostgreSQL 用于已平仓策略仓位和策略表现分析。
+- 当前策略框架是信号生成和模拟持仓管理原型。真实交易所下单执行、回测、账户级风控、API 工作流和前端还不是生产模块。
+- 文档应始终和实际实现保持一致。未来想法需要明确标记为计划项，不要写成当前行为。

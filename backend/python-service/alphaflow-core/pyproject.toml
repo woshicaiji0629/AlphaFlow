@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Python backend for AlphaFlow."
 requires-python = ">=3.12"
 dependencies = [
+    "asyncpg>=0.30.0",
     "redis>=8.0.1",
 ]
 

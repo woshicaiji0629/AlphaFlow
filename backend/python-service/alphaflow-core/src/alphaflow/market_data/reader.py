@@ -11,8 +11,19 @@ from alphaflow.market_data.keys import (
     indicator_key,
     kline_data_key,
     kline_index_key,
+    last_price_key,
+    mark_price_key,
 )
-from alphaflow.strategy.models import DataHealth, IndicatorSnapshot, Kline, MarketSnapshot
+from alphaflow.strategy.indicator_window import analyze_indicators
+from alphaflow.strategy.models import (
+    DataHealth,
+    IndicatorSnapshot,
+    Kline,
+    LastPrice,
+    MarketSnapshot,
+    MarkPrice,
+)
+from alphaflow.strategy.window import analyze_klines
 
 
 class RedisClient(Protocol):
@@ -25,18 +36,43 @@ class RedisClient(Protocol):
     async def aclose(self) -> None: ...
 
 
+class IndicatorHistoryReader(Protocol):
+    async def read_indicator_history(
+        self,
+        exchange: str,
+        market: str,
+        symbol: str,
+        interval: str,
+    ) -> tuple[IndicatorSnapshot, ...]: ...
+
+
 class MarketDataNotReadyError(RuntimeError):
     pass
 
 
 class AsyncMarketDataReader:
-    def __init__(self, redis: RedisClient, kline_limit: int = 50) -> None:
+    def __init__(
+        self,
+        redis: RedisClient,
+        kline_limit: int = 200,
+        indicator_history_reader: IndicatorHistoryReader | None = None,
+    ) -> None:
         self._redis = redis
         self._kline_limit = kline_limit
+        self._indicator_history_reader = indicator_history_reader
 
     @classmethod
-    def from_url(cls, url: str, kline_limit: int = 50) -> AsyncMarketDataReader:
-        return cls(cast(RedisClient, Redis.from_url(url)), kline_limit=kline_limit)
+    def from_url(
+        cls,
+        url: str,
+        kline_limit: int = 200,
+        indicator_history_reader: IndicatorHistoryReader | None = None,
+    ) -> AsyncMarketDataReader:
+        return cls(
+            cast(RedisClient, Redis.from_url(url)),
+            kline_limit=kline_limit,
+            indicator_history_reader=indicator_history_reader,
+        )
 
     async def close(self) -> None:
         await self._redis.aclose()
@@ -62,10 +98,38 @@ class AsyncMarketDataReader:
             interval,
             self._kline_limit,
         )
+        last_price_payload = await self._redis.get(last_price_key(exchange, market, symbol))
+        mark_price_payload = await self._redis.get(mark_price_key(exchange, market, symbol))
+        indicator = decode_indicator(indicator_payload)
+        indicator_history = merge_indicator_history(
+            await self.read_indicator_history(exchange, market, symbol, interval),
+            indicator,
+        )
         return MarketSnapshot(
-            indicator=decode_indicator(indicator_payload),
+            indicator=indicator,
             health=decode_health(health_payload),
             klines=tuple(klines),
+            indicator_history=indicator_history,
+            indicator_window=analyze_indicators(indicator_history),
+            last_price=decode_last_price(last_price_payload) if last_price_payload else None,
+            mark_price=decode_mark_price(mark_price_payload) if mark_price_payload else None,
+            window=analyze_klines(tuple(klines), lookback=self._kline_limit),
+        )
+
+    async def read_indicator_history(
+        self,
+        exchange: str,
+        market: str,
+        symbol: str,
+        interval: str,
+    ) -> tuple[IndicatorSnapshot, ...]:
+        if self._indicator_history_reader is None:
+            return ()
+        return await self._indicator_history_reader.read_indicator_history(
+            exchange,
+            market,
+            symbol,
+            interval,
         )
 
     async def read_many(
@@ -115,6 +179,16 @@ def decode_indicator(payload: bytes | str) -> IndicatorSnapshot:
     )
 
 
+def merge_indicator_history(
+    history: tuple[IndicatorSnapshot, ...],
+    current: IndicatorSnapshot,
+) -> tuple[IndicatorSnapshot, ...]:
+    without_current = tuple(
+        snapshot for snapshot in history if snapshot.open_time != current.open_time
+    )
+    return tuple(sorted((*without_current, current), key=lambda snapshot: snapshot.open_time))
+
+
 def decode_health(payload: bytes | str) -> DataHealth:
     data = decode_json(payload)
     return DataHealth(
@@ -150,6 +224,34 @@ def decode_kline(payload: bytes | str) -> Kline:
         taker_buy_volume=str(data.get("taker_buy_volume", "")),
         taker_buy_quote_volume=str(data.get("taker_buy_quote_volume", "")),
         is_closed=bool(data.get("is_closed", False)),
+        event_time=int(data.get("event_time", 0)),
+    )
+
+
+def decode_last_price(payload: bytes | str) -> LastPrice:
+    data = decode_json(payload)
+    return LastPrice(
+        exchange=str(data["exchange"]),
+        market=str(data["market"]),
+        symbol=str(data["symbol"]),
+        price=str(data["price"]),
+        quantity=str(data.get("quantity", "")),
+        event_time=int(data.get("event_time", 0)),
+        trade_time=int(data.get("trade_time", 0)),
+        trade_id=int(data.get("trade_id", 0)),
+    )
+
+
+def decode_mark_price(payload: bytes | str) -> MarkPrice:
+    data = decode_json(payload)
+    return MarkPrice(
+        exchange=str(data["exchange"]),
+        market=str(data["market"]),
+        symbol=str(data["symbol"]),
+        mark_price=str(data["mark_price"]),
+        index_price=str(data.get("index_price", "")),
+        funding_rate=str(data.get("funding_rate", "")),
+        next_funding_time=int(data.get("next_funding_time", 0)),
         event_time=int(data.get("event_time", 0)),
     )
 

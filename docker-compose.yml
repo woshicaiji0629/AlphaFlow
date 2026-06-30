@@ -24,6 +24,19 @@ services:
       - ./logs/clickhouse:/var/log/clickhouse-server
     restart: unless-stopped
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: alphaflow-postgres
+    environment:
+      POSTGRES_DB: alphaflow
+      POSTGRES_USER: alphaflow
+      POSTGRES_PASSWORD: alphaflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
   market-data:
     build:
       context: ./backend/go-service

@@ -5,6 +5,8 @@ from alphaflow.market_data.keys import (
     indicator_key,
     kline_data_key,
     kline_index_key,
+    last_price_key,
+    mark_price_key,
 )
 from alphaflow.market_data.reader import AsyncMarketDataReader
 
@@ -14,4 +16,6 @@ __all__ = [
     "indicator_key",
     "kline_data_key",
     "kline_index_key",
+    "last_price_key",
+    "mark_price_key",
 ]

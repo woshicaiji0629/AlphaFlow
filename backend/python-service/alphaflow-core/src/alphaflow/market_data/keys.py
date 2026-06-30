@@ -6,6 +6,14 @@ def data_health_key(exchange: str, market: str, symbol: str, interval: str) -> s
     return f"{exchange_code(exchange)}:{market}:health:{symbol}:{interval}"
 
 
+def last_price_key(exchange: str, market: str, symbol: str) -> str:
+    return f"{exchange_code(exchange)}:{market}:lp:{symbol}"
+
+
+def mark_price_key(exchange: str, market: str, symbol: str) -> str:
+    return f"{exchange_code(exchange)}:{market}:mp:{symbol}"
+
+
 def kline_base_key(exchange: str, market: str, symbol: str, interval: str) -> str:
     return f"{exchange_code(exchange)}:{market}:k:{symbol}:{interval}"
 

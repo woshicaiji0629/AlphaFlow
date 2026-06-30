@@ -20,13 +20,31 @@ class FakeRunner:
 
 def test_main_builds_default_runner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     fake = FakeRunner()
+    captured: dict[str, str] = {}
 
     monkeypatch.setattr(main_module, "setup_logging", lambda _: None)
-    monkeypatch.setattr(main_module, "build_default_runner", lambda _: fake)
+    monkeypatch.setattr(
+        main_module,
+        "build_default_runner",
+        lambda redis_url, postgres_dsn, clickhouse_url, clickhouse_username, clickhouse_password: (
+            captured.update(
+                {
+                    "redis_url": redis_url,
+                    "postgres_dsn": postgres_dsn,
+                    "clickhouse_url": clickhouse_url,
+                    "clickhouse_username": clickhouse_username,
+                    "clickhouse_password": clickhouse_password,
+                }
+            )
+            or fake
+        ),
+    )
 
     main_module.main()
 
     assert fake.interval_seconds == 10
+    assert captured["postgres_dsn"] == ""
+    assert captured["clickhouse_url"] == ""
     assert fake.targets == [
         StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")
     ]
