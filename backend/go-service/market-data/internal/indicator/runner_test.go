@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/indicatorwindow"
 	"alphaflow/go-service/market-data/internal/model"
 )
 
@@ -24,6 +25,9 @@ type fakeStore struct {
 	rangeRequests            [][2]int64
 	snapshots                []model.IndicatorSnapshot
 	latestSnapshots          []model.IndicatorSnapshot
+	windowSnapshots          []model.IndicatorWindowSnapshot
+	latestWindowSnapshots    []model.IndicatorWindowSnapshot
+	realtimeSnapshots        []model.IndicatorRealtimeSnapshot
 	rangeDelay               time.Duration
 	activeRangeCalls         atomic.Int64
 	maxActiveRangeCalls      atomic.Int64
@@ -89,6 +93,36 @@ func (s *fakeStore) SetLatestIndicator(_ context.Context, snapshot model.Indicat
 	return nil
 }
 
+func (s *fakeStore) SetIndicatorWindow(
+	_ context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.windowSnapshots = append(s.windowSnapshots, snapshot)
+	return nil
+}
+
+func (s *fakeStore) SetLatestIndicatorWindow(
+	_ context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latestWindowSnapshots = append(s.latestWindowSnapshots, snapshot)
+	return nil
+}
+
+func (s *fakeStore) SetIndicatorRealtime(
+	_ context.Context,
+	snapshot model.IndicatorRealtimeSnapshot,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.realtimeSnapshots = append(s.realtimeSnapshots, snapshot)
+	return nil
+}
+
 func TestRunnerWritesIndicatorSnapshot(t *testing.T) {
 	klines := make([]model.Kline, 0, 120)
 	for index := 0; index < 120; index++ {
@@ -127,6 +161,19 @@ func TestRunnerWritesIndicatorSnapshot(t *testing.T) {
 	}
 	if got.Signals["ema_alignment"] == "" {
 		t.Fatalf("missing ema alignment: %#v", got.Signals)
+	}
+	if len(store.windowSnapshots) != 1 {
+		t.Fatalf("window snapshots = %d, want 1", len(store.windowSnapshots))
+	}
+	window := store.windowSnapshots[0]
+	if window.Version != indicatorwindow.Version {
+		t.Fatalf("window version = %q, want %q", window.Version, indicatorwindow.Version)
+	}
+	if window.Values["ema7_win_slope"] == "" {
+		t.Fatalf("missing ema7 window slope: %#v", window.Values)
+	}
+	if window.Signals["ema_alignment_win_latest"] == "" {
+		t.Fatalf("missing ema alignment window latest: %#v", window.Signals)
 	}
 }
 
@@ -405,7 +452,7 @@ func TestRunnerSkipsScanAfterHandledClosedKline(t *testing.T) {
 	}
 }
 
-func TestRunnerSkipsOpenKlineFromHandler(t *testing.T) {
+func TestRunnerWritesRealtimeSnapshotForOpenKlineFromHandler(t *testing.T) {
 	klines := minuteKlines(10)
 	store := &fakeStore{
 		available:    true,
@@ -431,6 +478,8 @@ func TestRunnerSkipsOpenKlineFromHandler(t *testing.T) {
 	store.rangeRequests = nil
 	store.snapshots = nil
 	store.latestSnapshots = nil
+	store.latestWindowSnapshots = nil
+	store.realtimeSnapshots = nil
 	store.mu.Unlock()
 
 	open := minuteKline(int64(len(klines)), 110)
@@ -444,8 +493,24 @@ func TestRunnerSkipsOpenKlineFromHandler(t *testing.T) {
 	if len(store.snapshots) != 0 {
 		t.Fatalf("closed snapshots = %d, want 0", len(store.snapshots))
 	}
-	if len(store.latestSnapshots) != 0 {
-		t.Fatalf("latest snapshots = %d, want 0", len(store.latestSnapshots))
+	if len(store.latestSnapshots) != 1 {
+		t.Fatalf("latest snapshots = %d, want 1", len(store.latestSnapshots))
+	}
+	if len(store.latestWindowSnapshots) != 1 {
+		t.Fatalf("latest window snapshots = %d, want 1", len(store.latestWindowSnapshots))
+	}
+	if len(store.realtimeSnapshots) != 1 {
+		t.Fatalf("realtime snapshots = %d, want 1", len(store.realtimeSnapshots))
+	}
+	realtime := store.realtimeSnapshots[0]
+	if realtime.Kline.IsClosed {
+		t.Fatal("realtime kline is closed, want open")
+	}
+	if realtime.Kline.Close != open.Close {
+		t.Fatalf("realtime kline close = %q, want %q", realtime.Kline.Close, open.Close)
+	}
+	if realtime.Values["vwap"] == "" {
+		t.Fatalf("missing realtime vwap: %#v", realtime.Values)
 	}
 }
 

@@ -3,8 +3,8 @@ package indicator
 import "testing"
 
 func TestMovingAverageFeatures(t *testing.T) {
-	closes := linearValues(120, 100, 0.5)
-	volumes := linearValues(120, 10, 0.1)
+	closes := linearValues(240, 100, 0.5)
+	volumes := linearValues(240, 10, 0.1)
 	values := map[string]string{}
 	signals := map[string]string{}
 
@@ -24,6 +24,18 @@ func TestMovingAverageFeatures(t *testing.T) {
 		"hma21_slope3_pct",
 		"ema_spread_pct",
 		"ma_trend_strength",
+		"ez_ema_5",
+		"ez_ema_8",
+		"ez_ema_9",
+		"ez_ema_34",
+		"ez_ema_55",
+		"ez_ema_89",
+		"ez_ema_144",
+		"ez_ema_200",
+		"ez_ema_fast",
+		"ez_ema_slow",
+		"ez_ema_spread_pct",
+		"ez_ema_group_spread_pct",
 		"script_dual_ma_out1",
 		"script_dual_ma_out2",
 		"script_dual_ma_out1_slope_pct",
@@ -48,10 +60,13 @@ func TestMovingAverageFeatures(t *testing.T) {
 	if signals["alligator_state"] == "" {
 		t.Fatalf("missing alligator_state: %#v", signals)
 	}
-	for _, key := range []string{"ma_arrangement", "ma_cross", "ma_spread_state", "ma_compression", "ma_slope_state", "ma_breakout", "script_dual_ma_cross", "script_ma1_direction", "script_price_cross_ma1", "script_price_cross_ma2", "script_ma_signal", "emd_direction", "emd_cross"} {
+	for _, key := range []string{"ma_arrangement", "ma_cross", "ma_spread_state", "ma_compression", "ma_slope_state", "ma_breakout", "ez_ema_cross", "ez_price_cross_ema_pair", "ez_price_above_ema_pair", "ez_price_below_ema_pair", "ez_ema_stack", "ez_ema_spread_state", "ez_ema_compression", "script_dual_ma_cross", "script_ma1_direction", "script_price_cross_ma1", "script_price_cross_ma2", "script_ma_signal", "emd_direction", "emd_cross"} {
 		if signals[key] == "" {
 			t.Fatalf("missing %s in %#v", key, signals)
 		}
+	}
+	if signals["ez_ema_stack"] != "bull" {
+		t.Fatalf("ez_ema_stack = %q, want bull", signals["ez_ema_stack"])
 	}
 }
 

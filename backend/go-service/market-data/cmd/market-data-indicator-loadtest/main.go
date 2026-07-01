@@ -71,6 +71,36 @@ func (s *loadStore) SetLatestIndicator(_ context.Context, snapshot model.Indicat
 	return nil
 }
 
+func (s *loadStore) SetIndicatorWindow(_ context.Context, snapshot model.IndicatorWindowSnapshot) error {
+	if s.redisLatency > 0 {
+		time.Sleep(s.redisLatency)
+	}
+	s.redisWrites.Add(1)
+	return nil
+}
+
+func (s *loadStore) SetLatestIndicatorWindow(
+	_ context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	if s.redisLatency > 0 {
+		time.Sleep(s.redisLatency)
+	}
+	s.redisWrites.Add(1)
+	return nil
+}
+
+func (s *loadStore) SetIndicatorRealtime(
+	_ context.Context,
+	snapshot model.IndicatorRealtimeSnapshot,
+) error {
+	if s.redisLatency > 0 {
+		time.Sleep(s.redisLatency)
+	}
+	s.redisWrites.Add(1)
+	return nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 

@@ -306,13 +306,17 @@ func (s *RedisStore) SetLatestBatch(
 	openInterests []model.OpenInterest,
 	openKlines []model.Kline,
 	indicators []model.IndicatorSnapshot,
+	indicatorWins []model.IndicatorWindowSnapshot,
+	indicatorRTs []model.IndicatorRealtimeSnapshot,
 ) error {
 	if len(lastPrices) == 0 &&
 		len(markPrices) == 0 &&
 		len(bookTickers) == 0 &&
 		len(openInterests) == 0 &&
 		len(openKlines) == 0 &&
-		len(indicators) == 0 {
+		len(indicators) == 0 &&
+		len(indicatorWins) == 0 &&
+		len(indicatorRTs) == 0 {
 		return nil
 	}
 	release, err := s.acquire(ctx)
@@ -381,6 +385,26 @@ func (s *RedisStore) SetLatestBatch(
 		}
 		key := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
+		hasWrites = true
+	}
+	for _, snapshot := range indicatorWins {
+		fields, err := indicatorWindowHashFields(snapshot, s.retention.LatestTTL)
+		if err != nil {
+			return err
+		}
+		key := model.IndicatorWindowLatestKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+		pipe.HSet(ctx, key, fields...)
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
+		hasWrites = true
+	}
+	for _, snapshot := range indicatorRTs {
+		fields, err := indicatorRealtimeHashFields(snapshot, s.retention.LatestTTL)
+		if err != nil {
+			return err
+		}
+		key := model.IndicatorRealtimeKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+		pipe.HSet(ctx, key, fields...)
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
 		hasWrites = true
 	}
 	if !hasWrites {
@@ -565,6 +589,155 @@ func (s *RedisStore) SetIndicatorWithOpenTime(ctx context.Context, snapshot mode
 		return fmt.Errorf("set indicator: %w", err)
 	}
 	return nil
+}
+
+func (s *RedisStore) SetIndicatorWindowWithOpenTime(
+	ctx context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	windowKey := model.IndicatorWindowKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	lastKey := model.IndicatorWindowLastKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	fields, err := indicatorWindowHashFields(snapshot, s.retention.LatestTTL)
+	if err != nil {
+		return err
+	}
+	pipe := s.client.Pipeline()
+	pipe.HSet(ctx, windowKey, fields...)
+	pipe.Expire(ctx, windowKey, s.retention.LatestTTL)
+	pipe.Set(ctx, lastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set indicator window: %w", err)
+	}
+	return nil
+}
+
+func (s *RedisStore) SetIndicatorRealtime(
+	ctx context.Context,
+	snapshot model.IndicatorRealtimeSnapshot,
+) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	key := model.IndicatorRealtimeKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	fields, err := indicatorRealtimeHashFields(snapshot, s.retention.LatestTTL)
+	if err != nil {
+		return err
+	}
+	pipe := s.client.Pipeline()
+	pipe.HSet(ctx, key, fields...)
+	pipe.Expire(ctx, key, s.retention.LatestTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set indicator realtime: %w", err)
+	}
+	return nil
+}
+
+func indicatorWindowHashFields(
+	snapshot model.IndicatorWindowSnapshot,
+	ttl time.Duration,
+) ([]interface{}, error) {
+	intervalMillis, err := model.IntervalMillis(snapshot.Interval)
+	if err != nil {
+		return nil, err
+	}
+	fields := []interface{}{
+		"meta:snapshot_type", "window",
+		"meta:exchange", snapshot.Exchange,
+		"meta:market", snapshot.Market,
+		"meta:symbol", snapshot.Symbol,
+		"meta:interval", snapshot.Interval,
+		"meta:open_time", strconv.FormatInt(snapshot.OpenTime, 10),
+		"meta:close_time", strconv.FormatInt(snapshot.CloseTime, 10),
+		"meta:bar_open_time", strconv.FormatInt(snapshot.OpenTime, 10),
+		"meta:bar_close_time", strconv.FormatInt(snapshot.CloseTime, 10),
+		"meta:bar_interval_ms", strconv.FormatInt(intervalMillis, 10),
+		"meta:bar_seq", strconv.FormatInt(barSeq(snapshot.OpenTime, intervalMillis), 10),
+		"meta:age_limit_ms", strconv.FormatInt(windowAgeLimitMillis(intervalMillis), 10),
+		"meta:ttl_seconds", strconv.FormatInt(int64(ttl/time.Second), 10),
+		"meta:version", snapshot.Version,
+		"meta:updated_at", strconv.FormatInt(snapshot.UpdatedAt, 10),
+	}
+	appendPrefixedFields(&fields, "value:", snapshot.Values)
+	appendPrefixedFields(&fields, "signal:", snapshot.Signals)
+	return fields, nil
+}
+
+func indicatorRealtimeHashFields(
+	snapshot model.IndicatorRealtimeSnapshot,
+	ttl time.Duration,
+) ([]interface{}, error) {
+	intervalMillis, err := model.IntervalMillis(snapshot.Interval)
+	if err != nil {
+		return nil, err
+	}
+	fields := []interface{}{
+		"meta:snapshot_type", "realtime",
+		"meta:exchange", snapshot.Exchange,
+		"meta:market", snapshot.Market,
+		"meta:symbol", snapshot.Symbol,
+		"meta:interval", snapshot.Interval,
+		"meta:open_time", strconv.FormatInt(snapshot.OpenTime, 10),
+		"meta:close_time", strconv.FormatInt(snapshot.CloseTime, 10),
+		"meta:bar_open_time", strconv.FormatInt(snapshot.Kline.OpenTime, 10),
+		"meta:bar_close_time", strconv.FormatInt(snapshot.Kline.CloseTime, 10),
+		"meta:bar_interval_ms", strconv.FormatInt(intervalMillis, 10),
+		"meta:bar_seq", strconv.FormatInt(barSeq(snapshot.Kline.OpenTime, intervalMillis), 10),
+		"meta:age_limit_ms", strconv.FormatInt(realtimeAgeLimitMillis(intervalMillis), 10),
+		"meta:ttl_seconds", strconv.FormatInt(int64(ttl/time.Second), 10),
+		"meta:updated_at", strconv.FormatInt(snapshot.UpdatedAt, 10),
+		"kline:open_time", strconv.FormatInt(snapshot.Kline.OpenTime, 10),
+		"kline:close_time", strconv.FormatInt(snapshot.Kline.CloseTime, 10),
+		"kline:open", snapshot.Kline.Open,
+		"kline:high", snapshot.Kline.High,
+		"kline:low", snapshot.Kline.Low,
+		"kline:close", snapshot.Kline.Close,
+		"kline:volume", snapshot.Kline.Volume,
+		"kline:quote_volume", snapshot.Kline.QuoteVolume,
+		"kline:trade_count", strconv.FormatInt(snapshot.Kline.TradeCount, 10),
+		"kline:taker_buy_volume", snapshot.Kline.TakerBuyVolume,
+		"kline:taker_buy_quote_volume", snapshot.Kline.TakerBuyQuoteVolume,
+		"kline:is_closed", strconv.FormatBool(snapshot.Kline.IsClosed),
+	}
+	appendPrefixedFields(&fields, "value:", snapshot.Values)
+	appendPrefixedFields(&fields, "signal:", snapshot.Signals)
+	return fields, nil
+}
+
+func barSeq(openTime int64, intervalMillis int64) int64 {
+	if intervalMillis <= 0 {
+		return 0
+	}
+	return openTime / intervalMillis
+}
+
+func windowAgeLimitMillis(intervalMillis int64) int64 {
+	return intervalMillis * 2
+}
+
+func realtimeAgeLimitMillis(intervalMillis int64) int64 {
+	switch {
+	case intervalMillis <= 5*60*1000:
+		return 15 * 1000
+	case intervalMillis <= 30*60*1000:
+		return 30 * 1000
+	default:
+		return 60 * 1000
+	}
+}
+
+func appendPrefixedFields(fields *[]interface{}, prefix string, values map[string]string) {
+	for key, value := range values {
+		*fields = append(*fields, prefix+key, value)
+	}
 }
 
 func (s *RedisStore) SetDataHealth(ctx context.Context, health model.DataHealth) error {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/indicatorwindow"
 	"alphaflow/go-service/market-data/internal/model"
 )
 
@@ -42,6 +43,9 @@ type Store interface {
 	) (int64, bool, error)
 	SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
 	SetLatestIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
+	SetIndicatorWindow(ctx context.Context, snapshot model.IndicatorWindowSnapshot) error
+	SetLatestIndicatorWindow(ctx context.Context, snapshot model.IndicatorWindowSnapshot) error
+	SetIndicatorRealtime(ctx context.Context, snapshot model.IndicatorRealtimeSnapshot) error
 }
 
 type Rule struct {
@@ -188,9 +192,6 @@ func (r *Runner) runOnceWithLogging(ctx context.Context) {
 }
 
 func (r *Runner) HandleKline(ctx context.Context, kline model.Kline) error {
-	if !kline.IsClosed {
-		return nil
-	}
 	var errs []error
 	for _, rule := range r.options.Rules {
 		if !ruleMatchesKline(rule, kline) {
@@ -231,14 +232,38 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		Signals:   result.Signals,
 		UpdatedAt: r.now().UnixMilli(),
 	}
+	windowSnapshot, err := r.indicatorWindowSnapshot(rule, kline.Symbol, kline.Interval, calcWindow, snapshot.UpdatedAt)
+	if err != nil {
+		return err
+	}
 	if kline.IsClosed {
 		if err := r.store.SetIndicator(ctx, snapshot); err != nil {
+			return err
+		}
+		if err := r.store.SetIndicatorWindow(ctx, windowSnapshot); err != nil {
 			return err
 		}
 		r.rememberCalculatedOpenTime(windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval), snapshot.OpenTime)
 		return nil
 	}
-	return r.store.SetLatestIndicator(ctx, snapshot)
+	if err := r.store.SetLatestIndicator(ctx, snapshot); err != nil {
+		return err
+	}
+	if err := r.store.SetLatestIndicatorWindow(ctx, windowSnapshot); err != nil {
+		return err
+	}
+	return r.store.SetIndicatorRealtime(ctx, model.IndicatorRealtimeSnapshot{
+		Exchange:  rule.Exchange,
+		Market:    rule.Market,
+		Symbol:    kline.Symbol,
+		Interval:  kline.Interval,
+		OpenTime:  snapshot.OpenTime,
+		CloseTime: snapshot.CloseTime,
+		Kline:     kline,
+		Values:    snapshot.Values,
+		Signals:   snapshot.Signals,
+		UpdatedAt: snapshot.UpdatedAt,
+	})
 }
 
 func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol string, interval string) error {
@@ -306,7 +331,14 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		Signals:   result.Signals,
 		UpdatedAt: r.now().UnixMilli(),
 	}
+	windowSnapshot, err := r.indicatorWindowSnapshot(rule, symbol, interval, window, snapshot.UpdatedAt)
+	if err != nil {
+		return err
+	}
 	if err := r.store.SetIndicator(ctx, snapshot); err != nil {
+		return err
+	}
+	if err := r.store.SetIndicatorWindow(ctx, windowSnapshot); err != nil {
 		return err
 	}
 	r.rememberCalculatedOpenTime(key, snapshot.OpenTime)
@@ -320,6 +352,72 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		"values", len(result.Values),
 	)
 	return nil
+}
+
+func (r *Runner) indicatorWindowSnapshot(
+	rule Rule,
+	symbol string,
+	interval string,
+	window *CalculationWindow,
+	updatedAt int64,
+) (model.IndicatorWindowSnapshot, error) {
+	snapshots, err := r.indicatorSnapshotsForWindow(window)
+	if err != nil {
+		return model.IndicatorWindowSnapshot{}, err
+	}
+	result, err := indicatorwindow.Analyze(snapshots)
+	if err != nil {
+		return model.IndicatorWindowSnapshot{}, err
+	}
+	return model.IndicatorWindowSnapshot{
+		Exchange:  rule.Exchange,
+		Market:    rule.Market,
+		Symbol:    symbol,
+		Interval:  interval,
+		OpenTime:  result.OpenTime,
+		CloseTime: result.CloseTime,
+		Version:   result.Version,
+		Values:    result.Values,
+		Signals:   result.Signals,
+		UpdatedAt: updatedAt,
+	}, nil
+}
+
+func (r *Runner) indicatorSnapshotsForWindow(
+	window *CalculationWindow,
+) ([]model.IndicatorSnapshot, error) {
+	if window == nil {
+		return nil, fmt.Errorf("nil calculation window")
+	}
+	closed := window.Klines()
+	if len(closed) == 0 {
+		return nil, fmt.Errorf("no closed klines")
+	}
+	lookback := 20
+	if lookback > len(closed) {
+		lookback = len(closed)
+	}
+	start := len(closed) - lookback
+	snapshots := make([]model.IndicatorSnapshot, 0, lookback)
+	for index := start; index < len(closed); index++ {
+		result, err := Calculate(closed[:index+1], r.options.CalculateOptions)
+		if err != nil {
+			return nil, err
+		}
+		kline := closed[index]
+		snapshots = append(snapshots, model.IndicatorSnapshot{
+			Exchange:  kline.Exchange,
+			Market:    kline.Market,
+			Symbol:    kline.Symbol,
+			Interval:  kline.Interval,
+			OpenTime:  result.OpenTime,
+			CloseTime: result.CloseTime,
+			Values:    result.Values,
+			Signals:   result.Signals,
+			UpdatedAt: r.now().UnixMilli(),
+		})
+	}
+	return snapshots, nil
 }
 
 func (r *Runner) calculatedThrough(key string, openTime int64) bool {

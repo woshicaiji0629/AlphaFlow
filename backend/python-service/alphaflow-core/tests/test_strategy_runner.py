@@ -422,69 +422,57 @@ def make_snapshot(side: SignalSide, close: str = "101") -> MarketSnapshot:
 
 def make_indicator_window(side: SignalSide) -> IndicatorWindowAnalysis:
     bullish = side == SignalSide.BUY
-    direction = "rising" if bullish else "falling"
+    direction = "up" if bullish else "down"
+    bias = "bull" if bullish else "bear"
+    action = "pump" if bullish else "dump"
+    opposite_action = "dump" if bullish else "pump"
     return IndicatorWindowAnalysis(
         sample_count=200,
         values={
-            "ema7": IndicatorSeriesAnalysis(
-                latest=105 if bullish else 95,
-                previous=104 if bullish else 96,
-                direction=direction,
-            ),
-            "ema25": IndicatorSeriesAnalysis(
-                latest=100,
-                previous=99 if bullish else 101,
-                direction=direction,
-            ),
-            "ema99": IndicatorSeriesAnalysis(
-                latest=90 if bullish else 110,
-                previous=89 if bullish else 111,
-                direction=direction,
-            ),
-            "ema25_slope5_pct": IndicatorSeriesAnalysis(
-                latest=0.4 if bullish else -0.4,
-                previous=0.2 if bullish else -0.2,
-                direction=direction,
-            ),
-            "macd_hist": IndicatorSeriesAnalysis(
-                latest=0.12 if bullish else -0.12,
-                previous=0.04 if bullish else -0.04,
-                direction=direction,
-            ),
-            "macd_hist_delta": IndicatorSeriesAnalysis(
-                latest=0.08 if bullish else -0.08,
-                previous=0.02 if bullish else -0.02,
-                direction=direction,
-            ),
-            "adx14": IndicatorSeriesAnalysis(latest=24, previous=18, direction="rising"),
-            "rsi14": IndicatorSeriesAnalysis(
-                latest=58 if bullish else 42,
-                previous=52 if bullish else 48,
-                direction=direction,
-            ),
+            f"{action}_window_score": IndicatorSeriesAnalysis(latest=82),
+            f"{opposite_action}_window_score": IndicatorSeriesAnalysis(latest=8),
         },
         signals={
             "data_quality": SignalSeriesAnalysis(latest="ok", previous="ok", stable_count=20),
+            "pump_window_signal": SignalSeriesAnalysis(latest="true" if bullish else "false"),
+            "dump_window_signal": SignalSeriesAnalysis(latest="false" if bullish else "true"),
+            "pump_window_fake_risk": SignalSeriesAnalysis(latest="low"),
+            "dump_window_fake_risk": SignalSeriesAnalysis(latest="low"),
+            "pump_window_quality": SignalSeriesAnalysis(latest="strong" if bullish else "weak"),
+            "dump_window_quality": SignalSeriesAnalysis(latest="weak" if bullish else "strong"),
+            "trend_valid": SignalSeriesAnalysis(latest="true"),
+            "trend_window_bias": SignalSeriesAnalysis(latest=bias),
+            "trend_price_progress": SignalSeriesAnalysis(
+                latest="advancing" if bullish else "declining"
+            ),
+            "trend_quality": SignalSeriesAnalysis(latest="strong"),
             "supertrend_direction": SignalSeriesAnalysis(
-                latest="up" if bullish else "down",
-                previous="up" if bullish else "down",
+                latest=direction,
+                previous=direction,
                 stable_count=3,
             ),
+            "alphatrend_direction": SignalSeriesAnalysis(latest=direction, stable_count=3),
+            "ma_window_bias": SignalSeriesAnalysis(latest=bias),
+            "ma_ribbon_state": SignalSeriesAnalysis(
+                latest="bullish_fan" if bullish else "bearish_fan"
+            ),
+            "ma_ribbon_phase": SignalSeriesAnalysis(latest="early_expand"),
             "ema_alignment": SignalSeriesAnalysis(
-                latest="bull" if bullish else "bear",
-                previous="bull" if bullish else "bear",
+                latest=bias,
+                previous=bias,
                 stable_count=3,
             ),
+            "macd_window_bias": SignalSeriesAnalysis(latest=bias),
+            "macd_window_quality": SignalSeriesAnalysis(latest="strong"),
             "macd_momentum": SignalSeriesAnalysis(
                 latest="expanding_bull" if bullish else "expanding_bear",
                 previous="expanding_bull" if bullish else "expanding_bear",
                 stable_count=3,
             ),
             "macd_divergence": SignalSeriesAnalysis(latest="none", previous="none", stable_count=5),
-            "di_direction": SignalSeriesAnalysis(
-                latest="bull" if bullish else "bear",
-                previous="bull" if bullish else "bear",
-                stable_count=3,
+            "price_volume_confirmation": SignalSeriesAnalysis(
+                latest="confirm_up" if bullish else "confirm_down"
             ),
+            "volume_window_state": SignalSeriesAnalysis(latest="spike"),
         },
     )

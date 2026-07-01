@@ -121,6 +121,42 @@ func TestMarketStoreCoalescesLatestWrites(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetLatestIndicator: %v", err)
 	}
+	if err := s.SetIndicatorRealtime(context.Background(), model.IndicatorRealtimeSnapshot{
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "1m",
+		OpenTime: 1000,
+		Kline: model.Kline{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			Close:    "100",
+		},
+		Values: map[string]string{"rsi": "50"},
+	}); err != nil {
+		t.Fatalf("SetIndicatorRealtime: %v", err)
+	}
+	if err := s.SetIndicatorRealtime(context.Background(), model.IndicatorRealtimeSnapshot{
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "1m",
+		OpenTime: 1000,
+		Kline: model.Kline{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			Close:    "101",
+		},
+		Values: map[string]string{"rsi": "51"},
+	}); err != nil {
+		t.Fatalf("SetIndicatorRealtime: %v", err)
+	}
 	s.latestMu.Lock()
 	s.openKlines[klineLatestKey(model.Kline{
 		Exchange: "binance",
@@ -183,12 +219,20 @@ func TestMarketStoreCoalescesLatestWrites(t *testing.T) {
 	if batch.indicators[0].Values["rsi"] != "51" {
 		t.Fatalf("indicator rsi = %q, want 51", batch.indicators[0].Values["rsi"])
 	}
+	if len(batch.indicatorRTs) != 1 {
+		t.Fatalf("indicator realtime snapshots = %d, want 1", len(batch.indicatorRTs))
+	}
+	if batch.indicatorRTs[0].Kline.Close != "101" {
+		t.Fatalf("indicator realtime close = %q, want 101", batch.indicatorRTs[0].Kline.Close)
+	}
 	if batch := s.drainLatest(); len(batch.lastPrices) != 0 ||
 		len(batch.markPrices) != 0 ||
 		len(batch.bookTickers) != 0 ||
 		len(batch.openInterests) != 0 ||
 		len(batch.openKlines) != 0 ||
-		len(batch.indicators) != 0 {
+		len(batch.indicators) != 0 ||
+		len(batch.indicatorWins) != 0 ||
+		len(batch.indicatorRTs) != 0 {
 		t.Fatalf("drainLatest after drain = %#v, want empty", batch)
 	}
 }
@@ -290,6 +334,22 @@ func TestMarketStoreRequeueLatestKeepsNewerValues(t *testing.T) {
 			OpenTime: 1000,
 			Values:   map[string]string{"rsi": "50"},
 		}},
+		indicatorRTs: []model.IndicatorRealtimeSnapshot{{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			Kline: model.Kline{
+				Exchange: "binance",
+				Market:   "um",
+				Symbol:   "ETHUSDT",
+				Interval: "1m",
+				OpenTime: 1000,
+				Close:    "100",
+			},
+			Values: map[string]string{"rsi": "50"},
+		}},
 	}
 	if err := s.SetLastPrice(context.Background(), model.LastPrice{
 		Exchange: "binance",
@@ -321,6 +381,22 @@ func TestMarketStoreRequeueLatestKeepsNewerValues(t *testing.T) {
 		OpenTime: 1000,
 		Values:   map[string]string{"rsi": "51"},
 	}
+	s.indicatorRTs[model.IndicatorRealtimeKey("binance", "um", "ETHUSDT", "1m")] = model.IndicatorRealtimeSnapshot{
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "1m",
+		OpenTime: 1000,
+		Kline: model.Kline{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			Close:    "101",
+		},
+		Values: map[string]string{"rsi": "51"},
+	}
 	s.latestMu.Unlock()
 
 	s.requeueLatest(oldBatch)
@@ -343,6 +419,12 @@ func TestMarketStoreRequeueLatestKeepsNewerValues(t *testing.T) {
 	}
 	if batch.indicators[0].Values["rsi"] != "51" {
 		t.Fatalf("indicator rsi = %q, want 51", batch.indicators[0].Values["rsi"])
+	}
+	if len(batch.indicatorRTs) != 1 {
+		t.Fatalf("indicator realtime snapshots = %d, want 1", len(batch.indicatorRTs))
+	}
+	if batch.indicatorRTs[0].Kline.Close != "101" {
+		t.Fatalf("indicator realtime close = %q, want 101", batch.indicatorRTs[0].Kline.Close)
 	}
 }
 

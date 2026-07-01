@@ -130,9 +130,22 @@ class MarketSnapshot:
     indicator_history: tuple[IndicatorSnapshot, ...] = ()
     indicator_window: IndicatorWindowAnalysis | None = None
     timeframe_windows: Mapping[str, TimeframeWindow] = MappingProxyType({})
+    freshness: SnapshotFreshness | None = None
     last_price: LastPrice | None = None
     mark_price: MarkPrice | None = None
     window: WindowAnalysis | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotFreshness:
+    valid: bool
+    reason: str = ""
+    window_bar_seq: int = 0
+    realtime_bar_seq: int = 0
+    expected_window_bar_seq: int = 0
+    expected_realtime_bar_seq: int = 0
+    window_updated_at: int = 0
+    realtime_updated_at: int = 0
 
 
 @dataclass(frozen=True)

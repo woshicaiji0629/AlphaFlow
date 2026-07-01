@@ -126,6 +126,39 @@ func TestPriceVolumeConfirmationDetectsBearishDivergence(t *testing.T) {
 	}
 }
 
+func TestVolumeProfileFeatures(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(220, 100, 0.2, 100)
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+
+	for _, key := range []string{
+		"volume_profile_poc",
+		"volume_profile_vah",
+		"volume_profile_val",
+		"volume_profile_range_high",
+		"volume_profile_range_low",
+		"volume_profile_value_area_pct",
+		"volume_profile_poc_distance_pct",
+		"volume_profile_vah_distance_pct",
+		"volume_profile_val_distance_pct",
+	} {
+		if values[key] == "" {
+			t.Fatalf("missing %s in %#v", key, values)
+		}
+	}
+	for _, key := range []string{
+		"volume_profile_position",
+		"volume_profile_poc_side",
+		"volume_profile_value_area_state",
+	} {
+		if signals[key] == "" {
+			t.Fatalf("missing %s in %#v", key, signals)
+		}
+	}
+}
+
 func TestChaikinMoneyFlowAndADLine(t *testing.T) {
 	highs := []float64{10, 11, 12, 13, 14}
 	lows := []float64{8, 9, 10, 11, 12}

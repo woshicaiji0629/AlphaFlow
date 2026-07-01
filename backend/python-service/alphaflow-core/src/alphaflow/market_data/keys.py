@@ -2,6 +2,14 @@ def indicator_key(exchange: str, market: str, symbol: str, interval: str) -> str
     return f"{exchange_code(exchange)}:{market}:ind:{symbol}:{interval}"
 
 
+def indicator_window_key(exchange: str, market: str, symbol: str, interval: str) -> str:
+    return f"{exchange_code(exchange)}:{market}:indwin:{symbol}:{interval}"
+
+
+def indicator_realtime_key(exchange: str, market: str, symbol: str, interval: str) -> str:
+    return f"{exchange_code(exchange)}:{market}:indrt:{symbol}:{interval}"
+
+
 def data_health_key(exchange: str, market: str, symbol: str, interval: str) -> str:
     return f"{exchange_code(exchange)}:{market}:health:{symbol}:{interval}"
 

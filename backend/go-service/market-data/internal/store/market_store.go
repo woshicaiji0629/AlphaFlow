@@ -41,6 +41,8 @@ type MarketStore struct {
 	openInterests  map[string]model.OpenInterest
 	openKlines     map[string]model.Kline
 	indicators     map[string]model.IndicatorSnapshot
+	indicatorWins  map[string]model.IndicatorWindowSnapshot
+	indicatorRTs   map[string]model.IndicatorRealtimeSnapshot
 	lastOpenTimes  map[string]int64
 	statusMu       sync.Mutex
 	marketStatuses map[string]model.MarketStatus
@@ -67,6 +69,8 @@ func NewMarketStore(redisStore *RedisStore, clickHouseStore *ClickHouseStore, op
 		openInterests:        map[string]model.OpenInterest{},
 		openKlines:           map[string]model.Kline{},
 		indicators:           map[string]model.IndicatorSnapshot{},
+		indicatorWins:        map[string]model.IndicatorWindowSnapshot{},
+		indicatorRTs:         map[string]model.IndicatorRealtimeSnapshot{},
 		lastOpenTimes:        map[string]int64{},
 		marketStatuses:       map[string]model.MarketStatus{},
 		clickHouseFlushReady: make(chan struct{}, 1),
@@ -254,6 +258,33 @@ func (s *MarketStore) SetLatestIndicator(ctx context.Context, snapshot model.Ind
 	return nil
 }
 
+func (s *MarketStore) SetIndicatorWindow(
+	ctx context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	return s.redis.SetIndicatorWindowWithOpenTime(ctx, snapshot)
+}
+
+func (s *MarketStore) SetLatestIndicatorWindow(
+	ctx context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	s.latestMu.Lock()
+	s.indicatorWins[model.IndicatorWindowLatestKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)] = snapshot
+	s.latestMu.Unlock()
+	return nil
+}
+
+func (s *MarketStore) SetIndicatorRealtime(
+	ctx context.Context,
+	snapshot model.IndicatorRealtimeSnapshot,
+) error {
+	s.latestMu.Lock()
+	s.indicatorRTs[model.IndicatorRealtimeKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)] = snapshot
+	s.latestMu.Unlock()
+	return nil
+}
+
 func (s *MarketStore) LastIndicatorOpenTime(
 	ctx context.Context,
 	exchange string,
@@ -322,6 +353,8 @@ type latestBatch struct {
 	openInterests []model.OpenInterest
 	openKlines    []model.Kline
 	indicators    []model.IndicatorSnapshot
+	indicatorWins []model.IndicatorWindowSnapshot
+	indicatorRTs  []model.IndicatorRealtimeSnapshot
 }
 
 type clickHouseBatch struct {
@@ -357,7 +390,9 @@ func (s *MarketStore) flushLatest(ctx context.Context) error {
 		len(batch.bookTickers) == 0 &&
 		len(batch.openInterests) == 0 &&
 		len(batch.openKlines) == 0 &&
-		len(batch.indicators) == 0 {
+		len(batch.indicators) == 0 &&
+		len(batch.indicatorWins) == 0 &&
+		len(batch.indicatorRTs) == 0 {
 		return nil
 	}
 	if err := s.redis.SetLatestBatch(
@@ -368,6 +403,8 @@ func (s *MarketStore) flushLatest(ctx context.Context) error {
 		batch.openInterests,
 		batch.openKlines,
 		batch.indicators,
+		batch.indicatorWins,
+		batch.indicatorRTs,
 	); err != nil {
 		s.requeueLatest(batch)
 		return err
@@ -386,6 +423,8 @@ func (s *MarketStore) drainLatest() latestBatch {
 		openInterests: make([]model.OpenInterest, 0, len(s.openInterests)),
 		openKlines:    make([]model.Kline, 0, len(s.openKlines)),
 		indicators:    make([]model.IndicatorSnapshot, 0, len(s.indicators)),
+		indicatorWins: make([]model.IndicatorWindowSnapshot, 0, len(s.indicatorWins)),
+		indicatorRTs:  make([]model.IndicatorRealtimeSnapshot, 0, len(s.indicatorRTs)),
 	}
 	for _, price := range s.lastPrices {
 		batch.lastPrices = append(batch.lastPrices, price)
@@ -405,6 +444,12 @@ func (s *MarketStore) drainLatest() latestBatch {
 	for _, snapshot := range s.indicators {
 		batch.indicators = append(batch.indicators, snapshot)
 	}
+	for _, snapshot := range s.indicatorWins {
+		batch.indicatorWins = append(batch.indicatorWins, snapshot)
+	}
+	for _, snapshot := range s.indicatorRTs {
+		batch.indicatorRTs = append(batch.indicatorRTs, snapshot)
+	}
 
 	clear(s.lastPrices)
 	clear(s.markPrices)
@@ -412,6 +457,8 @@ func (s *MarketStore) drainLatest() latestBatch {
 	clear(s.openInterests)
 	clear(s.openKlines)
 	clear(s.indicators)
+	clear(s.indicatorWins)
+	clear(s.indicatorRTs)
 	return batch
 }
 
@@ -453,6 +500,18 @@ func (s *MarketStore) requeueLatest(batch latestBatch) {
 		key := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 		if _, ok := s.indicators[key]; !ok {
 			s.indicators[key] = snapshot
+		}
+	}
+	for _, snapshot := range batch.indicatorWins {
+		key := model.IndicatorWindowLatestKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+		if _, ok := s.indicatorWins[key]; !ok {
+			s.indicatorWins[key] = snapshot
+		}
+	}
+	for _, snapshot := range batch.indicatorRTs {
+		key := model.IndicatorRealtimeKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+		if _, ok := s.indicatorRTs[key]; !ok {
+			s.indicatorRTs[key] = snapshot
 		}
 	}
 }

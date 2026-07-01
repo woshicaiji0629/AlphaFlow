@@ -1,22 +1,101 @@
 # 指标文档
 
-本文档描述 Go `market-data` 服务当前输出的指标快照字段，以及 Python 策略侧的使用方式。
+本文档描述 Go `market-data` 服务当前输出的底层指标快照字段、窗口聚合特征，以及 Python 策略侧的使用方式。
 
-指标计算只使用已闭合 K 线。每个快照按交易所、市场、交易对、周期和 open time 写入 Redis 最新状态，并在启用 ClickHouse 时写入历史。
+指标计算只使用已闭合 K 线。每个底层快照按交易所、市场、交易对、周期和 open time 写入 Redis 最新状态，并在启用 ClickHouse 时写入历史。
 
-## 存储模型
+## 底层指标存储模型
 
-指标快照不是一列一个指标，而是两个动态 map：
+底层指标快照不是一列一个指标，而是两个动态 map：
 
 - `values`：数值型字段，统一以字符串存储，策略侧会按需解析为浮点数。
 - `signals`：枚举或状态型字段，统一以字符串存储。
 
-新增指标通常不需要改数据库字段。只要 Go 计算端写入新的 `values["key"]` 或 `signals["key"]`，Redis/ClickHouse 会随快照一起保存。Python 指标窗口分析会自动枚举历史里的所有 key：
+新增指标通常不需要改数据库字段。只要 Go 计算端写入新的 `values["key"]` 或 `signals["key"]`，Redis/ClickHouse 会随快照一起保存。窗口聚合层会枚举历史里的指标 key：
 
 - 数值字段会生成最新值、前值、变化、斜率、方向、连续上升/下降次数、区间位置。
 - 信号字段会生成最新状态、前值、是否变化、稳定持续次数、距上次变化多久。
 
 注意：新字段只会出现在部署后的新快照里，老历史不会补齐。
+
+底层指标序列仍然需要保留。原因是窗口聚合口径会调整，策略特征也会持续迭代。底层序列是可追溯、可回放、可重新计算的事实数据；窗口聚合特征是面向策略消费的二级结果。
+
+## 窗口聚合特征层
+
+当前实时策略路径优先消费 Go `indicatorwindow` 输出的窗口聚合特征，而不是让 Python 策略自己拉取大量历史指标再计算窗口。
+
+窗口聚合层分两份 Redis hash：
+
+- `indwin`：上一根已收盘 K 线的窗口聚合结果。
+- `indrt`：当前未收盘 K 线的实时指标表现和 K 线基础信息。
+
+窗口聚合层解决的问题：
+
+- 把几十到几百根历史指标压缩成一个交易对、一个周期的一份特征 hash。
+- 把底层指标转换成策略可读语义，例如趋势是否有效、均线是否缠绕、MACD 是否跟随、成交量是否放大。
+- 为多策略共享同一份特征，避免每个策略重复做窗口计算。
+- 通过 `meta:bar_seq`、`meta:updated_at` 和 `meta:age_limit_ms` 判断数据是否最新。
+
+窗口字段分两类：
+
+- 通用窗口字段：由底层数值和信号自动生成，例如 `{key}_win_latest`、`{key}_win_slope`、`{key}_win_stable_count`。
+- 适配语义字段：按指标特点额外聚合，例如 `ma_ribbon_state`、`macd_window_bias`、`pump_window_signal`。
+
+策略应优先使用适配语义字段；只有当策略需要更细粒度判断时，再读取通用窗口字段。
+
+## 策略常用语义特征
+
+### 拉盘/砸盘窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `value:pump_window_score` | value | 拉盘特征分数。 |
+| `value:dump_window_score` | value | 砸盘特征分数。 |
+| `signal:pump_window_signal` | signal | 是否出现可用多头触发。 |
+| `signal:dump_window_signal` | signal | 是否出现可用空头触发。 |
+| `signal:pump_window_fake_risk` | signal | 多头假信号风险。 |
+| `signal:dump_window_fake_risk` | signal | 空头假信号风险。 |
+| `signal:pump_window_quality` | signal | 多头触发质量。 |
+| `signal:dump_window_quality` | signal | 空头触发质量。 |
+
+### 趋势窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `signal:trend_valid` | signal | 当前趋势是否有效。 |
+| `signal:trend_window_bias` | signal | 窗口趋势偏向。 |
+| `signal:trend_price_progress` | signal | 价格推进状态，例如 `advancing`、`declining`。 |
+| `signal:trend_quality` | signal | 趋势质量。 |
+| `signal:supertrend_direction` | signal | Supertrend 方向。 |
+| `signal:alphatrend_direction` | signal | AlphaTrend 方向。 |
+
+### 均线窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `signal:ma_window_bias` | signal | 均线窗口偏向。 |
+| `signal:ma_ribbon_state` | signal | 均线带状态，例如多头发散、空头发散、缠绕。 |
+| `signal:ma_ribbon_phase` | signal | 均线带阶段，例如早期发散、趋势延续、横盘。 |
+| `signal:ema_alignment` | signal | EMA 排列方向。 |
+
+### MACD 窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `signal:macd_window_bias` | signal | MACD 窗口偏向。 |
+| `signal:macd_window_quality` | signal | MACD 动能质量。 |
+| `signal:macd_momentum` | signal | MACD 动能状态。 |
+| `signal:macd_divergence` | signal | MACD 背离状态。 |
+
+### 成交量和价量窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `signal:volume_window_state` | signal | 成交量窗口状态，例如放量、突破量、常态。 |
+| `signal:volume_state` | signal | 底层成交量状态。 |
+| `signal:price_volume_confirmation` | signal | 价量确认或背离。 |
+
+这些语义字段不是底层事实数据的替代品。它们是当前策略消费的稳定接口，后续可以在 Go 聚合层调整口径，再让策略保持较小改动。
 
 ## 命名约定
 

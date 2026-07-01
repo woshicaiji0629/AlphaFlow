@@ -7,6 +7,8 @@ import pytest
 from alphaflow.market_data import (
     data_health_key,
     indicator_key,
+    indicator_realtime_key,
+    indicator_window_key,
     kline_data_key,
     kline_index_key,
     last_price_key,
@@ -25,6 +27,9 @@ class FakeRedis:
 
     async def get(self, name: str) -> bytes | str | None:
         return self.values.get(name)
+
+    async def hgetall(self, name: str) -> dict[bytes | str, bytes | str]:
+        return self.hashes.get(name, {})
 
     async def zrevrange(self, name: str, start: int, end: int) -> list[bytes | str]:
         values = list(reversed(self.zsets.get(name, [])))
@@ -153,8 +158,112 @@ async def run_reader_reports_missing_indicator() -> None:
         await AsyncMarketDataReader(redis).read_snapshot("binance", "um", "ETHUSDT", "1m")
 
 
+def test_reader_decodes_feature_hash_snapshot() -> None:
+    asyncio.run(run_reader_decodes_feature_hash_snapshot())
+
+
+async def run_reader_decodes_feature_hash_snapshot() -> None:
+    redis = FakeRedis()
+    target = ("binance", "um", "ETHUSDT", "15m")
+    redis.hashes[indicator_window_key(*target)] = {
+        "meta:snapshot_type": "window",
+        "meta:exchange": "binance",
+        "meta:market": "um",
+        "meta:symbol": "ETHUSDT",
+        "meta:interval": "15m",
+        "meta:open_time": "900000",
+        "meta:close_time": "1799999",
+        "meta:bar_interval_ms": "900000",
+        "meta:bar_seq": "1",
+        "meta:age_limit_ms": "1800000",
+        "meta:updated_at": "1800500",
+        "value:window_sample_count": "20",
+        "value:ema7_win_latest": "101",
+        "value:ema7_win_previous": "100",
+        "value:ema7_win_change": "1",
+        "value:ema7_win_slope": "0.5",
+        "value:pump_window_score": "88",
+        "signal:ema7_win_direction": "rising",
+        "signal:supertrend_direction_win_latest": "up",
+        "signal:supertrend_direction_win_stable_count": "3",
+        "signal:pump_window_signal": "true",
+    }
+    redis.hashes[indicator_realtime_key(*target)] = {
+        "meta:snapshot_type": "realtime",
+        "meta:exchange": "binance",
+        "meta:market": "um",
+        "meta:symbol": "ETHUSDT",
+        "meta:interval": "15m",
+        "meta:open_time": "1800000",
+        "meta:close_time": "2699999",
+        "meta:bar_interval_ms": "900000",
+        "meta:bar_seq": "2",
+        "meta:age_limit_ms": "30000",
+        "meta:updated_at": "1810000",
+        "kline:open_time": "1800000",
+        "kline:close_time": "2699999",
+        "kline:open": "101",
+        "kline:high": "103",
+        "kline:low": "100",
+        "kline:close": "102",
+        "kline:volume": "12",
+        "kline:quote_volume": "1224",
+        "kline:trade_count": "10",
+        "kline:is_closed": "false",
+        "value:rsi14": "58",
+        "signal:ema_alignment": "bull",
+    }
+
+    snapshot = await AsyncMarketDataReader(redis, now_ms=lambda: 1810000).read_snapshot(*target)
+
+    assert snapshot.health.is_ok()
+    assert snapshot.freshness is not None
+    assert snapshot.freshness.valid
+    assert snapshot.freshness.window_bar_seq == 1
+    assert snapshot.freshness.realtime_bar_seq == 2
+    assert snapshot.indicator.open_time == 1800000
+    assert snapshot.indicator.values["close"] == "102"
+    assert snapshot.indicator.values["rsi14"] == "58"
+    assert snapshot.klines[0].close == "102"
+    assert snapshot.indicator_window is not None
+    assert snapshot.indicator_window.sample_count == 20
+    assert snapshot.indicator_window.values["ema7"].latest == 101
+    assert snapshot.indicator_window.values["ema7"].direction == "rising"
+    assert snapshot.indicator_window.values["pump_window_score"].latest == 88
+    assert snapshot.indicator_window.signals["supertrend_direction"].latest == "up"
+    assert snapshot.indicator_window.signals["supertrend_direction"].stable_count == 3
+    assert snapshot.indicator_window.signals["pump_window_signal"].latest == "true"
+
+
+def test_reader_rejects_stale_realtime_feature_hash() -> None:
+    asyncio.run(run_reader_rejects_stale_realtime_feature_hash())
+
+
+async def run_reader_rejects_stale_realtime_feature_hash() -> None:
+    redis = FakeRedis()
+    target = ("binance", "um", "ETHUSDT", "3m")
+    redis.hashes[indicator_window_key(*target)] = {
+        "meta:bar_interval_ms": "180000",
+        "meta:bar_seq": "9",
+        "meta:age_limit_ms": "360000",
+        "meta:updated_at": "1800000",
+    }
+    redis.hashes[indicator_realtime_key(*target)] = {
+        "meta:bar_interval_ms": "180000",
+        "meta:bar_seq": "10",
+        "meta:age_limit_ms": "15000",
+        "meta:updated_at": "1800000",
+        "kline:is_closed": "false",
+    }
+
+    with pytest.raises(MarketDataNotReadyError, match="realtime hash is stale"):
+        await AsyncMarketDataReader(redis, now_ms=lambda: 1816000).read_snapshot(*target)
+
+
 def test_market_data_keys_match_go_shape() -> None:
     assert indicator_key("binance", "um", "ETHUSDT", "1m") == "bn:um:ind:ETHUSDT:1m"
+    assert indicator_window_key("binance", "um", "ETHUSDT", "1m") == "bn:um:indwin:ETHUSDT:1m"
+    assert indicator_realtime_key("binance", "um", "ETHUSDT", "1m") == "bn:um:indrt:ETHUSDT:1m"
     assert data_health_key("binance", "um", "ETHUSDT", "1m") == "bn:um:health:ETHUSDT:1m"
     assert last_price_key("binance", "um", "ETHUSDT") == "bn:um:lp:ETHUSDT"
     assert mark_price_key("binance", "um", "ETHUSDT") == "bn:um:mp:ETHUSDT"

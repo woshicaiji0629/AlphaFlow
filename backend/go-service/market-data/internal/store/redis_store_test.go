@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
 	"alphaflow/go-service/pkg/lcache"
@@ -75,6 +76,68 @@ func TestKlineTrimStopRank(t *testing.T) {
 	}
 }
 
+func TestIndicatorWindowHashFieldsIncludeBarFreshness(t *testing.T) {
+	fields, err := indicatorWindowHashFields(model.IndicatorWindowSnapshot{
+		Exchange:  "binance",
+		Market:    "um",
+		Symbol:    "ETHUSDT",
+		Interval:  "15m",
+		OpenTime:  900000,
+		CloseTime: 1799999,
+		Version:   "v1",
+		Values:    map[string]string{"pump_window_score": "80"},
+		Signals:   map[string]string{"pump_window_signal": "true"},
+		UpdatedAt: 1801000,
+	}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("indicatorWindowHashFields: %v", err)
+	}
+	got := hashFieldsMap(fields)
+	assertHashField(t, got, "meta:snapshot_type", "window")
+	assertHashField(t, got, "meta:bar_open_time", "900000")
+	assertHashField(t, got, "meta:bar_close_time", "1799999")
+	assertHashField(t, got, "meta:bar_interval_ms", "900000")
+	assertHashField(t, got, "meta:bar_seq", "1")
+	assertHashField(t, got, "meta:age_limit_ms", "1800000")
+	assertHashField(t, got, "meta:ttl_seconds", "86400")
+	assertHashField(t, got, "value:pump_window_score", "80")
+	assertHashField(t, got, "signal:pump_window_signal", "true")
+}
+
+func TestIndicatorRealtimeHashFieldsIncludeBarFreshness(t *testing.T) {
+	fields, err := indicatorRealtimeHashFields(model.IndicatorRealtimeSnapshot{
+		Exchange:  "binance",
+		Market:    "um",
+		Symbol:    "ETHUSDT",
+		Interval:  "3m",
+		OpenTime:  180000,
+		CloseTime: 359999,
+		Kline: model.Kline{
+			OpenTime:  180000,
+			CloseTime: 359999,
+			Close:     "100",
+			IsClosed:  false,
+		},
+		Values:    map[string]string{"rsi14": "55"},
+		Signals:   map[string]string{"ema_alignment": "bull"},
+		UpdatedAt: 181000,
+	}, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("indicatorRealtimeHashFields: %v", err)
+	}
+	got := hashFieldsMap(fields)
+	assertHashField(t, got, "meta:snapshot_type", "realtime")
+	assertHashField(t, got, "meta:bar_open_time", "180000")
+	assertHashField(t, got, "meta:bar_close_time", "359999")
+	assertHashField(t, got, "meta:bar_interval_ms", "180000")
+	assertHashField(t, got, "meta:bar_seq", "1")
+	assertHashField(t, got, "meta:age_limit_ms", "15000")
+	assertHashField(t, got, "meta:ttl_seconds", "86400")
+	assertHashField(t, got, "kline:is_closed", "false")
+	assertHashField(t, got, "value:rsi14", "55")
+	assertHashField(t, got, "signal:ema_alignment", "bull")
+}
+
 func TestRedisStoreSkipsUnchangedWebSocketStatusPayload(t *testing.T) {
 	store := &RedisStore{webSocketStatusCache: lcache.MustNew(10)}
 	key := model.WebSocketStatusKey("binance", "um")
@@ -87,6 +150,29 @@ func TestRedisStoreSkipsUnchangedWebSocketStatusPayload(t *testing.T) {
 	}
 	if store.shouldSkipWebSocketStatusWrite(key, []byte(`{"available":false}`)) {
 		t.Fatal("changed payload write was skipped")
+	}
+}
+
+func hashFieldsMap(fields []interface{}) map[string]string {
+	values := make(map[string]string, len(fields)/2)
+	for index := 0; index+1 < len(fields); index += 2 {
+		key, ok := fields[index].(string)
+		if !ok {
+			continue
+		}
+		value, ok := fields[index+1].(string)
+		if !ok {
+			continue
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func assertHashField(t *testing.T, fields map[string]string, key string, want string) {
+	t.Helper()
+	if got := fields[key]; got != want {
+		t.Fatalf("%s = %q, want %q", key, got, want)
 	}
 }
 

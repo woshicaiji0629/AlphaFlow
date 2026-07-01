@@ -4,20 +4,17 @@ from dataclasses import dataclass, replace
 from alphaflow.strategy.models import (
     ExitReasonType,
     ExitRule,
-    IndicatorSeriesAnalysis,
     IndicatorWindowAnalysis,
     MarketAnalysis,
     MarketSnapshot,
     PositionSide,
     PositionState,
     Signal,
-    SignalSeriesAnalysis,
     SignalSide,
     StrategyContext,
     StrategyResult,
     StrategyTarget,
     TimeframeWindow,
-    WindowAnalysis,
 )
 from alphaflow.strategy.position import PositionManager
 
@@ -27,9 +24,15 @@ class SupertrendStrategyConfig:
     entry_interval: str = "3m"
     confirmation_intervals: tuple[str, ...] = ("5m", "10m", "15m", "30m")
     entry_threshold: float = 0.72
-    min_stable_supertrend_bars: int = 2
     max_blocking_timeframes: int = 1
-    ema_tangle_distance_pct: float = 0.03
+
+
+@dataclass(frozen=True)
+class EntryDecision:
+    side: SignalSide
+    score: float
+    blocked: bool
+    reasons: tuple[str, ...]
 
 
 class SupertrendStrategy:
@@ -96,6 +99,13 @@ class SupertrendStrategy:
         if snapshot.indicator_window is None:
             return result(snapshot, self.name, hold(snapshot, "indicator window missing"))
 
+        if snapshot.freshness is not None and not snapshot.freshness.valid:
+            return result(
+                snapshot,
+                self.name,
+                hold(snapshot, f"feature freshness not ok: {snapshot.freshness.reason}"),
+            )
+
         quality = latest_signal(snapshot.indicator_window, "data_quality")
         if quality not in {"", "ok"}:
             return result(
@@ -104,57 +114,62 @@ class SupertrendStrategy:
                 hold(snapshot, f"indicator quality not ok: {quality}"),
             )
 
-        long_score, long_reasons, long_blocked = score_side(snapshot, SignalSide.BUY, self._config)
-        short_score, short_reasons, short_blocked = score_side(
-            snapshot,
-            SignalSide.SELL,
-            self._config,
-        )
+        long_decision = entry_decision(snapshot, SignalSide.BUY, self._config)
+        short_decision = entry_decision(snapshot, SignalSide.SELL, self._config)
 
         exit_result = exit_signal(
             snapshot,
             position,
-            long_score,
-            long_reasons,
-            short_score,
-            short_reasons,
+            long_decision,
+            short_decision,
             self._config,
         )
         if exit_result is not None:
             return result(snapshot, self.name, exit_result)
 
         if (
-            not long_blocked
-            and long_score >= self._config.entry_threshold
-            and long_score >= short_score
+            not long_decision.blocked
+            and long_decision.score >= self._config.entry_threshold
+            and long_decision.score >= short_decision.score
         ):
             return result(
                 snapshot,
                 self.name,
-                signal(snapshot, SignalSide.BUY, long_score, "; ".join(long_reasons)),
+                signal(
+                    snapshot,
+                    SignalSide.BUY,
+                    long_decision.score,
+                    "; ".join(long_decision.reasons),
+                ),
             )
-        if not short_blocked and short_score >= self._config.entry_threshold:
+        if not short_decision.blocked and short_decision.score >= self._config.entry_threshold:
             return result(
                 snapshot,
                 self.name,
-                signal(snapshot, SignalSide.SELL, short_score, "; ".join(short_reasons)),
+                signal(
+                    snapshot,
+                    SignalSide.SELL,
+                    short_decision.score,
+                    "; ".join(short_decision.reasons),
+                ),
             )
 
-        reasons = long_reasons if long_score >= short_score else short_reasons
-        score = max(long_score, short_score)
-        if long_blocked and short_blocked:
+        leading_decision = (
+            long_decision if long_decision.score >= short_decision.score else short_decision
+        )
+        reasons = list(leading_decision.reasons)
+        score = max(long_decision.score, short_decision.score)
+        if long_decision.blocked and short_decision.blocked:
             reasons = ["both sides blocked by weak or conflicting windows"]
-            reasons.extend(long_reasons if long_score >= short_score else short_reasons)
+            reasons.extend(leading_decision.reasons)
         return result(snapshot, self.name, hold(snapshot, "; ".join(reasons), score=score))
 
 
 def exit_signal(
     snapshot: MarketSnapshot,
     position: PositionState | None,
-    long_score: float,
-    long_reasons: list[str],
-    short_score: float,
-    short_reasons: list[str],
+    long_decision: EntryDecision,
+    short_decision: EntryDecision,
     config: SupertrendStrategyConfig,
 ) -> Signal | None:
     if position is None or position.is_flat():
@@ -165,13 +180,14 @@ def exit_signal(
             return signal(
                 snapshot,
                 SignalSide.SELL,
-                max(short_score, config.entry_threshold),
+                max(short_decision.score, config.entry_threshold),
                 reason,
             )
         return hold(
             snapshot,
-            "long exit deferred: waiting for confirmed bearish window; " + "; ".join(short_reasons),
-            score=short_score,
+            "long exit deferred: waiting for confirmed bearish window; "
+            + "; ".join(short_decision.reasons),
+            score=short_decision.score,
         )
     if position.side == PositionSide.SHORT:
         should_exit, reason = should_exit_position(snapshot, SignalSide.BUY)
@@ -179,15 +195,235 @@ def exit_signal(
             return signal(
                 snapshot,
                 SignalSide.BUY,
-                max(long_score, config.entry_threshold),
+                max(long_decision.score, config.entry_threshold),
                 reason,
             )
         return hold(
             snapshot,
-            "short exit deferred: waiting for confirmed bullish window; " + "; ".join(long_reasons),
-            score=long_score,
+            "short exit deferred: waiting for confirmed bullish window; "
+            + "; ".join(long_decision.reasons),
+            score=long_decision.score,
         )
     return None
+
+
+def entry_decision(
+    snapshot: MarketSnapshot,
+    side: SignalSide,
+    config: SupertrendStrategyConfig,
+) -> EntryDecision:
+    window = snapshot.indicator_window
+    if window is None:
+        return EntryDecision(side=side, score=0.0, blocked=True, reasons=("indicator window missing",))
+
+    bullish = side == SignalSide.BUY
+    direction = side_direction(side)
+    action_name = "pump" if bullish else "dump"
+    signal_key = f"{action_name}_window_signal"
+    fake_key = f"{action_name}_window_fake_risk"
+    quality_key = f"{action_name}_window_quality"
+    score_key = f"{action_name}_window_score"
+
+    score = 0.0
+    blocked = False
+    reasons: list[str] = []
+
+    if truthy_signal(window, signal_key) or latest_signal(window, "supertrend_direction") == direction:
+        score += 0.30
+        reasons.append(f"3m {action_name} trigger")
+    else:
+        blocked = True
+        reasons.append(f"3m {action_name} signal missing")
+
+    fake_risk = latest_signal(window, fake_key)
+    if fake_risk not in {"", "low"}:
+        blocked = True
+        reasons.append(f"{action_name} fake risk: {fake_risk}")
+
+    event_score = latest_value(window, score_key)
+    if event_score > 0:
+        score += min(event_score / 100.0, 1.0) * 0.10
+
+    quality = latest_signal(window, quality_key)
+    if quality in {"strong", "high"}:
+        score += 0.08
+        reasons.append(f"{action_name} quality strong")
+    elif quality in {"normal", "medium", "weak"}:
+        score += 0.04
+
+    trend_ok, trend_score, trend_reasons = trend_confirmation(window, side)
+    score += trend_score
+    reasons.extend(trend_reasons)
+    blocked = blocked or not trend_ok
+
+    ma_ok, ma_score, ma_reasons = ma_confirmation(window, side)
+    score += ma_score
+    reasons.extend(ma_reasons)
+    blocked = blocked or not ma_ok
+
+    macd_ok, macd_score, macd_reasons = macd_confirmation(window, side)
+    score += macd_score
+    reasons.extend(macd_reasons)
+    blocked = blocked or not macd_ok
+
+    volume_ok, volume_score, volume_reasons = volume_confirmation(window, side)
+    score += volume_score
+    reasons.extend(volume_reasons)
+    blocked = blocked or not volume_ok
+
+    mtf_ok, mtf_score, mtf_reasons = multi_timeframe_confirmation(
+        snapshot.timeframe_windows,
+        side,
+        config,
+    )
+    score += mtf_score
+    reasons.extend(mtf_reasons)
+    blocked = blocked or not mtf_ok
+
+    return EntryDecision(
+        side=side,
+        score=min(round(score, 4), 1.0),
+        blocked=blocked,
+        reasons=tuple(reasons),
+    )
+
+
+def trend_confirmation(window: IndicatorWindowAnalysis, side: SignalSide) -> tuple[bool, float, list[str]]:
+    direction = side_direction(side)
+    expected_progress = "advancing" if side == SignalSide.BUY else "declining"
+    reasons: list[str] = []
+    score = 0.0
+
+    trend_valid = latest_signal(window, "trend_valid")
+    if trend_valid not in {"", "true"}:
+        return False, score, [f"trend invalid: {trend_valid}"]
+
+    trend_bias = latest_signal(window, "trend_window_bias")
+    supertrend = latest_signal(window, "supertrend_direction")
+    alphatrend = latest_signal(window, "alphatrend_direction")
+    if trend_bias in {direction, direction_name(side)} or supertrend == direction or alphatrend == direction:
+        score += 0.12
+        reasons.append("trend direction aligned")
+    elif trend_bias:
+        return False, score, [f"trend direction blocks: {trend_bias}"]
+
+    progress = latest_signal(window, "trend_price_progress")
+    if progress in {"", expected_progress}:
+        score += 0.06
+    else:
+        return False, score, [f"trend progress blocks: {progress}"]
+
+    trend_quality = latest_signal(window, "trend_quality")
+    if trend_quality in {"strong", "high"}:
+        score += 0.04
+    elif trend_quality in {"flat", "weak"}:
+        return False, score, [f"trend quality weak: {trend_quality}"]
+
+    return True, score, reasons
+
+
+def ma_confirmation(window: IndicatorWindowAnalysis, side: SignalSide) -> tuple[bool, float, list[str]]:
+    expected = "bull" if side == SignalSide.BUY else "bear"
+    reasons: list[str] = []
+    score = 0.0
+
+    state = latest_signal(window, "ma_ribbon_state")
+    phase = latest_signal(window, "ma_ribbon_phase")
+    alignment = latest_signal(window, "ema_alignment")
+
+    if state in {"tangled", "flat", "range"} or phase in {"tangled", "range", "flat"}:
+        return False, score, [f"ma ribbon has no direction: {state or phase}"]
+
+    expected_states = {f"{expected}ish_fan", f"{expected}_fan", expected, "expanding"}
+    if state in expected_states or alignment == expected:
+        score += 0.14
+        reasons.append("ma ribbon direction aligned")
+    elif state:
+        return False, score, [f"ma ribbon blocks: {state}"]
+
+    if phase in {"early_expand", "trend", "spreading", "expanding"}:
+        score += 0.06
+
+    return True, score, reasons
+
+
+def macd_confirmation(window: IndicatorWindowAnalysis, side: SignalSide) -> tuple[bool, float, list[str]]:
+    expected = "bull" if side == SignalSide.BUY else "bear"
+    opposite = "bear" if side == SignalSide.BUY else "bull"
+    reasons: list[str] = []
+    score = 0.0
+
+    bias = latest_signal(window, "macd_window_bias")
+    momentum = latest_signal(window, "macd_momentum")
+    if bias == expected or momentum.endswith(expected):
+        score += 0.12
+        reasons.append("macd follows direction")
+    elif bias == opposite or momentum.endswith(opposite):
+        return False, score, [f"macd blocks: {bias or momentum}"]
+
+    quality = latest_signal(window, "macd_window_quality")
+    if quality in {"strong", "high"}:
+        score += 0.05
+    elif quality in {"weak", "normal", "medium", ""}:
+        score += 0.02
+
+    divergence = latest_signal(window, "macd_divergence")
+    if divergence in {f"divergence_{opposite}", opposite}:
+        return False, score, [f"macd divergence blocks: {divergence}"]
+
+    return True, score, reasons
+
+
+def volume_confirmation(window: IndicatorWindowAnalysis, side: SignalSide) -> tuple[bool, float, list[str]]:
+    expected = "confirm_up" if side == SignalSide.BUY else "confirm_down"
+    opposite = "divergence_bear" if side == SignalSide.BUY else "divergence_bull"
+    price_volume = latest_signal(window, "price_volume_confirmation")
+    if price_volume == opposite:
+        return False, 0.0, [f"price-volume blocks: {price_volume}"]
+
+    score = 0.0
+    reasons: list[str] = []
+    if price_volume in {expected, "confirmed", "support"}:
+        score += 0.05
+        reasons.append("price-volume confirmed")
+
+    volume_state = latest_signal(window, "volume_window_state") or latest_signal(window, "volume_state")
+    if volume_state in {"spike", "expanding", "breakout", "above_average"}:
+        score += 0.03
+
+    return True, score, reasons
+
+
+def multi_timeframe_confirmation(
+    windows: Mapping[str, TimeframeWindow],
+    side: SignalSide,
+    config: SupertrendStrategyConfig,
+) -> tuple[bool, float, list[str]]:
+    if not windows:
+        return True, 0.0, ["confirmation windows missing"]
+
+    aligned: list[str] = []
+    blocking: list[str] = []
+    for interval in config.confirmation_intervals:
+        window = windows.get(interval)
+        if window is None:
+            continue
+        state = classify_timeframe(window, side)
+        if state == "aligned":
+            aligned.append(interval)
+        elif state == "blocking":
+            blocking.append(interval)
+
+    reasons: list[str] = []
+    if aligned:
+        reasons.append(f"mtf aligned: {','.join(aligned)}")
+    if blocking:
+        reasons.append(f"mtf blocking: {','.join(blocking)}")
+    if "5m" in blocking and "10m" in blocking:
+        return False, min(len(aligned) * 0.04, 0.15), reasons + ["5m and 10m both blocking"]
+    if len(blocking) > config.max_blocking_timeframes:
+        return False, min(len(aligned) * 0.04, 0.15), reasons
+    return True, min(len(aligned) * 0.04, 0.15), reasons
 
 
 def should_exit_position(snapshot: MarketSnapshot, exit_side: SignalSide) -> tuple[bool, str]:
@@ -196,404 +432,24 @@ def should_exit_position(snapshot: MarketSnapshot, exit_side: SignalSide) -> tup
         return False, "indicator window missing"
 
     expected = "up" if exit_side == SignalSide.BUY else "down"
-    supertrend = indicator_window.signals.get("supertrend_direction")
-    if supertrend is None or supertrend.latest != expected:
+    action_name = "pump" if exit_side == SignalSide.BUY else "dump"
+    if not (
+        truthy_signal(indicator_window, f"{action_name}_window_signal")
+        or latest_signal(indicator_window, "supertrend_direction") == expected
+    ):
         return False, f"3m supertrend has not turned {expected}"
 
-    if ema_macd_confirm_exit(indicator_window, exit_side):
-        return True, f"confirmed {expected} exit: supertrend, ema and macd aligned"
+    if entry_window_confirms_exit(indicator_window, exit_side):
+        return True, f"confirmed {expected} exit: trend, ma and macd aligned"
     if short_timeframes_block_exit(snapshot.timeframe_windows, exit_side):
         return True, f"confirmed {expected} exit: 5m and 10m blocking"
-    if supertrend.stable_count > 1:
+    supertrend = indicator_window.signals.get("supertrend_direction")
+    if supertrend is not None and supertrend.stable_count > 1:
         return (
             True,
             f"confirmed {expected} exit: supertrend stable for {supertrend.stable_count} bars",
         )
     return False, f"3m supertrend turned {expected} but exit confirmation is weak"
-
-
-def score_side(
-    snapshot: MarketSnapshot,
-    side: SignalSide,
-    config: SupertrendStrategyConfig,
-) -> tuple[float, list[str], bool]:
-    indicator_window = snapshot.indicator_window
-    if indicator_window is None:
-        return 0.0, ["indicator window missing"], True
-
-    expected = "up" if side == SignalSide.BUY else "down"
-    score = 0.0
-    reasons: list[str] = []
-    blocked = False
-
-    supertrend = indicator_window.signals.get("supertrend_direction")
-    if not supertrend or supertrend.latest != expected:
-        return 0.0, [f"3m supertrend is not {expected}"], True
-    if supertrend.changed or supertrend.stable_count >= config.min_stable_supertrend_bars:
-        score += 0.3
-        reasons.append(f"3m supertrend {expected}")
-    else:
-        reasons.append("3m supertrend not stable enough")
-        blocked = True
-
-    if frequent_flip(supertrend):
-        reasons.append("3m supertrend flipped too recently")
-        blocked = True
-
-    ema_score, ema_reasons, ema_blocked = score_ema_window(indicator_window, side, config)
-    score += ema_score
-    reasons.extend(ema_reasons)
-    blocked = blocked or ema_blocked
-
-    macd_score, macd_reasons, macd_blocked = score_macd_window(indicator_window, side)
-    score += macd_score
-    reasons.extend(macd_reasons)
-    blocked = blocked or macd_blocked
-
-    strength_score, strength_reasons, strength_blocked = score_strength_windows(
-        indicator_window,
-        snapshot.window,
-        side,
-    )
-    score += strength_score
-    reasons.extend(strength_reasons)
-    blocked = blocked or strength_blocked
-
-    multi_score, multi_reasons, multi_blocked = score_confirmation_timeframes(
-        snapshot.timeframe_windows,
-        side,
-        config,
-    )
-    score += multi_score
-    reasons.extend(multi_reasons)
-    blocked = blocked or multi_blocked
-
-    return min(1.0, score), reasons, blocked
-
-
-def score_ema_window(
-    window: IndicatorWindowAnalysis,
-    side: SignalSide,
-    config: SupertrendStrategyConfig,
-) -> tuple[float, list[str], bool]:
-    expected_alignment = "bull" if side == SignalSide.BUY else "bear"
-    expected_direction = "rising" if side == SignalSide.BUY else "falling"
-    reasons: list[str] = []
-    score = 0.0
-    blocked = False
-
-    ema7 = window.values.get("ema7")
-    ema25 = window.values.get("ema25")
-    ema99 = window.values.get("ema99")
-    slope = window.values.get("ema25_slope5_pct")
-    alignment = window.signals.get("ema_alignment")
-
-    if ema7 is None or ema25 is None:
-        return 0.0, ["ema7 or ema25 window missing"], True
-
-    if ema_relation_ok(ema7, ema25, side):
-        score += 0.08
-        reasons.append("ema7/ema25 directional relation")
-    else:
-        reasons.append("ema7/ema25 relation not directional")
-        blocked = True
-
-    if ema7.direction == expected_direction and ema25.direction == expected_direction:
-        score += 0.05
-        reasons.append("ema short and medium windows aligned")
-    else:
-        reasons.append("ema windows not moving together")
-        blocked = True
-
-    if slope is not None and slope.direction == expected_direction and latest_on_side(slope, side):
-        score += 0.04
-        reasons.append("ema25 slope confirms direction")
-    else:
-        reasons.append("ema25 slope weak")
-        blocked = True
-
-    if alignment is not None and alignment.latest == expected_alignment:
-        score += 0.03
-        reasons.append(f"ema alignment {expected_alignment}")
-    elif ema99 is not None and ema_relation_ok(ema25, ema99, side):
-        score += 0.02
-        reasons.append("ema99 does not block trend")
-    else:
-        reasons.append("ema alignment mixed")
-
-    if ema_tangled(ema7, ema25, config.ema_tangle_distance_pct):
-        reasons.append("ema7/ema25 tangled")
-        blocked = True
-
-    return score, reasons, blocked
-
-
-def score_macd_window(
-    window: IndicatorWindowAnalysis,
-    side: SignalSide,
-) -> tuple[float, list[str], bool]:
-    expected_direction = "rising" if side == SignalSide.BUY else "falling"
-    opposite_momentum = "expanding_bear" if side == SignalSide.BUY else "expanding_bull"
-    bad_divergence = "bearish" if side == SignalSide.BUY else "bullish"
-    reasons: list[str] = []
-    score = 0.0
-    blocked = False
-
-    hist = window.values.get("macd_hist")
-    hist_delta = window.values.get("macd_hist_delta")
-    fast_hist = window.values.get("macd_fast_hist")
-    fast_hist_delta = window.values.get("macd_fast_hist_delta")
-    momentum = window.signals.get("macd_momentum")
-    fast_momentum = window.signals.get("macd_fast_momentum")
-    divergence = window.signals.get("macd_divergence")
-    fast_divergence = window.signals.get("macd_fast_divergence")
-
-    if hist is None:
-        return 0.0, ["macd histogram window missing"], True
-    if hist.direction == expected_direction:
-        score += 0.12
-        reasons.append("macd histogram follows direction")
-    else:
-        reasons.append("macd histogram does not follow")
-        blocked = True
-
-    if hist_delta is not None and latest_on_side(hist_delta, side):
-        score += 0.04
-        reasons.append("macd histogram delta supports move")
-
-    if fast_hist is not None:
-        if fast_hist.direction == expected_direction:
-            score += 0.04
-            reasons.append("fast macd histogram follows direction")
-        else:
-            reasons.append("fast macd histogram does not follow")
-            blocked = True
-
-    if fast_hist_delta is not None and latest_on_side(fast_hist_delta, side):
-        score += 0.02
-        reasons.append("fast macd histogram delta supports move")
-
-    if momentum is not None and momentum.latest == opposite_momentum:
-        reasons.append(f"macd momentum blocks: {opposite_momentum}")
-        blocked = True
-    elif momentum is not None and momentum.latest:
-        score += 0.02
-        reasons.append(f"macd momentum {momentum.latest}")
-
-    if divergence is not None and divergence.latest == bad_divergence:
-        reasons.append(f"macd divergence blocks: {bad_divergence}")
-        blocked = True
-
-    if fast_momentum is not None and fast_momentum.latest == opposite_momentum:
-        reasons.append(f"fast macd momentum blocks: {opposite_momentum}")
-        blocked = True
-    elif fast_momentum is not None and fast_momentum.latest:
-        score += 0.01
-        reasons.append(f"fast macd momentum {fast_momentum.latest}")
-
-    if fast_divergence is not None and fast_divergence.latest == bad_divergence:
-        reasons.append(f"fast macd divergence blocks: {bad_divergence}")
-        blocked = True
-
-    return score, reasons, blocked
-
-
-def score_strength_windows(
-    indicator_window: IndicatorWindowAnalysis,
-    kline_window: WindowAnalysis | None,
-    side: SignalSide,
-) -> tuple[float, list[str], bool]:
-    reasons: list[str] = []
-    score = 0.0
-    blocked = False
-
-    adx = indicator_window.values.get("adx14")
-    di = indicator_window.signals.get("di_direction")
-    rsi = indicator_window.values.get("rsi14")
-    obv_slope = indicator_window.values.get("obv_slope5")
-    price_volume = indicator_window.signals.get("price_volume_confirmation")
-    indicator_volume = indicator_window.signals.get("volume_state")
-
-    if adx is not None and (adx.direction == "rising" or adx.latest >= 20):
-        score += 0.07
-        reasons.append("adx trend strength improving")
-    else:
-        reasons.append("adx trend strength weak")
-
-    bad_di = "bear" if side == SignalSide.BUY else "bull"
-    if di is not None and di.latest == bad_di:
-        reasons.append(f"di direction blocks: {bad_di}")
-        blocked = True
-    elif di is not None and di.latest:
-        score += 0.04
-        reasons.append(f"di direction {di.latest}")
-
-    if rsi is not None:
-        if side == SignalSide.BUY and rsi.latest >= 75:
-            reasons.append("rsi overheated")
-            blocked = True
-        elif side == SignalSide.SELL and rsi.latest <= 25:
-            reasons.append("rsi oversold")
-            blocked = True
-        else:
-            score += 0.03
-            reasons.append("rsi not extreme")
-
-    flow_score, flow_reasons, flow_blocked = score_money_flow(
-        obv_slope,
-        price_volume,
-        indicator_volume,
-        side,
-    )
-    score += flow_score
-    reasons.extend(flow_reasons)
-    blocked = blocked or flow_blocked
-
-    if kline_window is not None:
-        if side == SignalSide.BUY and kline_window.trend == "down":
-            reasons.append("kline window downtrend blocks long")
-            blocked = True
-        elif side == SignalSide.SELL and kline_window.trend == "up":
-            reasons.append("kline window uptrend blocks short")
-            blocked = True
-        elif kline_window.volume_state == "expanding":
-            score += 0.04
-            reasons.append("volume expanding")
-        elif kline_window.trend == "range" and kline_window.volume_state != "expanding":
-            reasons.append("range without volume expansion")
-            blocked = True
-
-    return score, reasons, blocked
-
-
-def score_money_flow(
-    obv_slope: IndicatorSeriesAnalysis | None,
-    price_volume: SignalSeriesAnalysis | None,
-    indicator_volume: SignalSeriesAnalysis | None,
-    side: SignalSide,
-) -> tuple[float, list[str], bool]:
-    expected_direction = "rising" if side == SignalSide.BUY else "falling"
-    expected_confirmation = "confirm_up" if side == SignalSide.BUY else "confirm_down"
-    bad_confirmation = "divergence_bear" if side == SignalSide.BUY else "divergence_bull"
-    reasons: list[str] = []
-    score = 0.0
-    blocked = False
-
-    if obv_slope is not None:
-        if latest_on_side(obv_slope, side) and obv_slope.direction == expected_direction:
-            score += 0.04
-            reasons.append("obv slope confirms flow")
-        elif obv_slope.latest != 0:
-            reasons.append("obv slope does not confirm flow")
-            blocked = True
-
-    if price_volume is not None:
-        if price_volume.latest == expected_confirmation:
-            score += 0.04
-            reasons.append(f"price-volume {expected_confirmation}")
-        elif price_volume.latest == bad_confirmation:
-            reasons.append(f"price-volume blocks: {bad_confirmation}")
-            blocked = True
-        elif price_volume.latest == "neutral":
-            reasons.append("price-volume neutral")
-
-    if indicator_volume is not None and indicator_volume.latest in {"spike", "climax"}:
-        score += 0.02
-        reasons.append(f"indicator volume {indicator_volume.latest}")
-
-    return score, reasons, blocked
-
-
-def score_confirmation_timeframes(
-    windows: Mapping[str, TimeframeWindow],
-    side: SignalSide,
-    config: SupertrendStrategyConfig,
-) -> tuple[float, list[str], bool]:
-    if not windows:
-        return 0.0, ["confirmation windows missing"], False
-
-    states = {
-        interval: classify_timeframe(window, side)
-        for interval, window in windows.items()
-        if interval in config.confirmation_intervals
-    }
-    aligned = sum(1 for state in states.values() if state == "aligned")
-    improving = sum(1 for state in states.values() if state == "improving")
-    blocking = sum(1 for state in states.values() if state == "blocking")
-    reasons = [f"timeframes aligned={aligned} improving={improving} blocking={blocking}"]
-
-    if states.get("5m") == "blocking" and states.get("10m") == "blocking":
-        reasons.append("5m and 10m both blocking")
-        return 0.0, reasons, True
-    if blocking > config.max_blocking_timeframes:
-        return 0.0, reasons, True
-
-    score = min(0.19, aligned * 0.05 + improving * 0.025)
-    return score, reasons, False
-
-
-def classify_timeframe(window: TimeframeWindow, side: SignalSide) -> str:
-    if not window.is_ok() or window.indicator_window is None:
-        return "missing"
-
-    expected = "up" if side == SignalSide.BUY else "down"
-    opposite = "down" if side == SignalSide.BUY else "up"
-    expected_ema = "bull" if side == SignalSide.BUY else "bear"
-    opposite_ema = "bear" if side == SignalSide.BUY else "bull"
-    expected_macd = "rising" if side == SignalSide.BUY else "falling"
-    opposite_macd = "falling" if side == SignalSide.BUY else "rising"
-
-    signals = window.indicator_window.signals
-    values = window.indicator_window.values
-    supertrend = signals.get("supertrend_direction")
-    ema = signals.get("ema_alignment")
-    macd = values.get("macd_hist")
-    slope = values.get("ema25_slope5_pct")
-
-    if supertrend is not None and supertrend.latest == expected:
-        return "aligned"
-    if (
-        supertrend is not None
-        and supertrend.latest == opposite
-        and ema is not None
-        and ema.latest == opposite_ema
-        and macd is not None
-        and macd.direction == opposite_macd
-    ):
-        return "blocking"
-    if (
-        macd is not None
-        and macd.direction == expected_macd
-        and (slope is None or slope.direction == expected_macd)
-    ):
-        return "improving"
-    if ema is not None and ema.latest == expected_ema:
-        return "improving"
-    return "neutral"
-
-
-def ema_macd_confirm_exit(window: IndicatorWindowAnalysis, side: SignalSide) -> bool:
-    expected_direction = "rising" if side == SignalSide.BUY else "falling"
-    ema7 = window.values.get("ema7")
-    ema25 = window.values.get("ema25")
-    ema_slope = window.values.get("ema25_slope5_pct")
-    macd = window.values.get("macd_hist")
-    macd_momentum = window.signals.get("macd_momentum")
-    expected_momentum = "expanding_bull" if side == SignalSide.BUY else "expanding_bear"
-    ema_confirmed = (
-        ema7 is not None
-        and ema25 is not None
-        and ema_relation_ok(ema7, ema25, side)
-        and ema7.direction == expected_direction
-        and ema25.direction == expected_direction
-        and (ema_slope is None or ema_slope.direction == expected_direction)
-    )
-    macd_confirmed = (
-        macd is not None
-        and macd.direction == expected_direction
-        and (macd_momentum is None or macd_momentum.latest in {"", "none", expected_momentum})
-    )
-    return ema_confirmed and macd_confirmed
 
 
 def short_timeframes_block_exit(
@@ -608,49 +464,45 @@ def short_timeframes_block_exit(
     )
 
 
-def frequent_flip(signal_series: SignalSeriesAnalysis) -> bool:
-    return (
-        signal_series.changed
-        and signal_series.previous not in {"", "none"}
-        and signal_series.stable_count < 1
-    )
+def entry_window_confirms_exit(window: IndicatorWindowAnalysis, side: SignalSide) -> bool:
+    trend_ok, _, _ = trend_confirmation(window, side)
+    ma_ok, _, _ = ma_confirmation(window, side)
+    macd_ok, _, _ = macd_confirmation(window, side)
+    return trend_ok and ma_ok and macd_ok
 
 
-def ema_relation_ok(
-    fast: IndicatorSeriesAnalysis,
-    slow: IndicatorSeriesAnalysis,
-    side: SignalSide,
-) -> bool:
-    if side == SignalSide.BUY:
-        return fast.latest > slow.latest
-    return fast.latest < slow.latest
+def classify_timeframe(window: TimeframeWindow, side: SignalSide) -> str:
+    indicator_window = window.indicator_window
+    if indicator_window is None or not window.health.is_ok():
+        return "missing"
 
+    expected = "bull" if side == SignalSide.BUY else "bear"
+    opposite = "bear" if side == SignalSide.BUY else "bull"
+    expected_direction = side_direction(side)
+    opposite_action = "dump" if side == SignalSide.BUY else "pump"
 
-def ema_tangled(
-    fast: IndicatorSeriesAnalysis,
-    slow: IndicatorSeriesAnalysis,
-    threshold_pct: float,
-) -> bool:
-    if slow.latest == 0:
-        return False
-    distance_pct = abs(fast.latest - slow.latest) / abs(slow.latest) * 100
-    return distance_pct < threshold_pct
+    aligned_votes = 0
+    blocking_votes = 0
+    for key in ("trend_window_bias", "ma_window_bias", "macd_window_bias"):
+        value = latest_signal(indicator_window, key)
+        if value in {expected, expected_direction, direction_name(side)}:
+            aligned_votes += 1
+        elif value in {opposite, opposite_direction(side), direction_name(opposite_side(side))}:
+            blocking_votes += 1
 
+    if latest_signal(indicator_window, "supertrend_direction") == expected_direction:
+        aligned_votes += 1
+    elif latest_signal(indicator_window, "supertrend_direction") == opposite_direction(side):
+        blocking_votes += 1
 
-def latest_signal(window: IndicatorWindowAnalysis, key: str) -> str:
-    signal_series = window.signals.get(key)
-    if signal_series is None:
-        return ""
-    return signal_series.latest
+    if truthy_signal(indicator_window, f"{opposite_action}_window_signal"):
+        blocking_votes += 2
 
-
-def optional_float(value: str | None) -> float | None:
-    if value is None or value.strip() == "":
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    if blocking_votes >= 2:
+        return "blocking"
+    if aligned_votes >= 2:
+        return "aligned"
+    return "neutral"
 
 
 def signal(snapshot: MarketSnapshot, side: SignalSide, score: float, reason: str) -> Signal:
@@ -686,19 +538,16 @@ def analyze_market(snapshot: MarketSnapshot, summary: str) -> MarketAnalysis:
     window = snapshot.window
     price = current_price(snapshot)
     price_text = f"current price {price}" if price else "current price unavailable"
+    indicator_window = snapshot.indicator_window
     return MarketAnalysis(
         summary=f"{summary}; {price_text}",
-        trend=window.trend if window is not None else "",
-        momentum=latest_signal(snapshot.indicator_window, "macd_momentum")
-        if snapshot.indicator_window is not None
-        else "",
-        volatility=latest_signal(snapshot.indicator_window, "volatility_state")
-        if snapshot.indicator_window is not None
-        else "",
+        trend=latest_signal(indicator_window, "trend_window_bias")
+        or (window.trend if window is not None else ""),
+        momentum=latest_signal(indicator_window, "macd_window_bias")
+        or latest_signal(indicator_window, "macd_momentum"),
+        volatility=latest_signal(indicator_window, "volatility_state"),
         volume=window.volume_state if window is not None else "",
-        risk=latest_signal(snapshot.indicator_window, "data_quality")
-        if snapshot.indicator_window is not None
-        else "unknown",
+        risk=latest_signal(indicator_window, "data_quality") or "unknown",
         key_levels={
             key: value
             for key, value in snapshot.indicator.values.items()
@@ -762,7 +611,42 @@ def price_exit_rules(take_profit_price: str, stop_loss_price: str) -> tuple[Exit
     return tuple(rules)
 
 
-def latest_on_side(series: IndicatorSeriesAnalysis, side: SignalSide) -> bool:
-    if side == SignalSide.BUY:
-        return series.latest > 0
-    return series.latest < 0
+def latest_signal(window: IndicatorWindowAnalysis | None, key: str) -> str:
+    if window is None:
+        return ""
+    signal_value = window.signals.get(key)
+    if signal_value is None or signal_value.latest is None:
+        return ""
+    return str(signal_value.latest)
+
+
+def latest_value(window: IndicatorWindowAnalysis | None, key: str) -> float:
+    if window is None:
+        return 0.0
+    series = window.values.get(key)
+    if series is None or series.latest is None:
+        return 0.0
+    try:
+        return float(series.latest)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def truthy_signal(window: IndicatorWindowAnalysis, key: str) -> bool:
+    return latest_signal(window, key).lower() in {"true", "yes", "1", "buy", "sell"}
+
+
+def side_direction(side: SignalSide) -> str:
+    return "up" if side == SignalSide.BUY else "down"
+
+
+def opposite_direction(side: SignalSide) -> str:
+    return "down" if side == SignalSide.BUY else "up"
+
+
+def direction_name(side: SignalSide) -> str:
+    return "bull" if side == SignalSide.BUY else "bear"
+
+
+def opposite_side(side: SignalSide) -> SignalSide:
+    return SignalSide.SELL if side == SignalSide.BUY else SignalSide.BUY

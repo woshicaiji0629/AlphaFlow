@@ -1,6 +1,9 @@
 package indicator
 
-import "math"
+import (
+	"math"
+	"strconv"
+)
 
 func addMovingAverageFeatures(values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
 	hma21, ok := hma(closes, 21)
@@ -35,6 +38,7 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 		setValue(values, "ma_trend_strength", math.Abs(spread), true)
 		addMovingAverageStructureFeatures(values, signals, closes, ema7, ema25, ema99)
 	}
+	addEZEMASuiteFeatures(values, signals, closes)
 	addScriptDualMovingAverage(values, signals, closes, volumes)
 	addScriptMovingAverageSignal(values, signals, closes)
 	addEMDFeatures(values, signals, closes, 25, 1)
@@ -481,4 +485,111 @@ func movingAverageState(ema7 float64, ema25 float64, ema99 float64, last float64
 	default:
 		return "mixed"
 	}
+}
+
+func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, closes []float64) {
+	periods := []int{5, 8, 9, 34, 55, 89, 144, 200}
+	if len(closes) < periods[len(periods)-1]+1 {
+		return
+	}
+
+	current := make(map[int]float64, len(periods))
+	previous := make(map[int]float64, len(periods))
+	for _, period := range periods {
+		value, ok := ema(closes, period)
+		if !ok {
+			return
+		}
+		prev, ok := ema(closes[:len(closes)-1], period)
+		if !ok {
+			return
+		}
+		current[period] = value
+		previous[period] = prev
+		setValue(values, "ez_ema_"+strconv.Itoa(period), value, true)
+	}
+
+	fast := current[9]
+	slow := current[55]
+	prevFast := previous[9]
+	prevSlow := previous[55]
+	last := closes[len(closes)-1]
+	prevClose := closes[len(closes)-2]
+
+	setValue(values, "ez_ema_fast", fast, true)
+	setValue(values, "ez_ema_slow", slow, true)
+	setValue(values, "ez_ema_spread_pct", percentDistance(fast, slow), slow != 0)
+	signals["ez_ema_cross"] = crossSignal(prevFast, prevSlow, fast, slow)
+	signals["ez_price_cross_ema_pair"] = priceCrossEMAPair(prevClose, last, prevFast, prevSlow, fast, slow)
+	signals["ez_price_above_ema_pair"] = boolText(last > fast && last > slow)
+	signals["ez_price_below_ema_pair"] = boolText(last < fast && last < slow)
+	signals["ez_ema_stack"] = ezEMAStack(current)
+
+	currentSpread := ezEMASpread(current, periods)
+	previousSpread := ezEMASpread(previous, periods)
+	setValue(values, "ez_ema_group_spread_pct", currentSpread/last*100, last != 0)
+	signals["ez_ema_spread_state"] = spreadState(currentSpread, previousSpread)
+	signals["ez_ema_compression"] = compressionState(currentSpread, last)
+}
+
+func priceCrossEMAPair(
+	previousClose float64,
+	currentClose float64,
+	previousFast float64,
+	previousSlow float64,
+	currentFast float64,
+	currentSlow float64,
+) string {
+	switch {
+	case previousClose <= previousFast && previousClose <= previousSlow &&
+		currentClose > currentFast && currentClose > currentSlow:
+		return "up"
+	case previousClose >= previousFast && previousClose >= previousSlow &&
+		currentClose < currentFast && currentClose < currentSlow:
+		return "down"
+	default:
+		return "none"
+	}
+}
+
+func ezEMAStack(values map[int]float64) string {
+	bull := values[5] > values[8] &&
+		values[8] > values[9] &&
+		values[9] > values[34] &&
+		values[34] > values[55] &&
+		values[55] > values[89] &&
+		values[89] > values[144] &&
+		values[144] > values[200]
+	bear := values[5] < values[8] &&
+		values[8] < values[9] &&
+		values[9] < values[34] &&
+		values[34] < values[55] &&
+		values[55] < values[89] &&
+		values[89] < values[144] &&
+		values[144] < values[200]
+	switch {
+	case bull:
+		return "bull"
+	case bear:
+		return "bear"
+	default:
+		return "mixed"
+	}
+}
+
+func ezEMASpread(values map[int]float64, periods []int) float64 {
+	minValue := values[periods[0]]
+	maxValue := values[periods[0]]
+	for _, period := range periods[1:] {
+		minValue = math.Min(minValue, values[period])
+		maxValue = math.Max(maxValue, values[period])
+	}
+	return maxValue - minValue
+}
+
+func boolText(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
