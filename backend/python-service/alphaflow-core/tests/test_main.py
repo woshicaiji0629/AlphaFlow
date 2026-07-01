@@ -46,5 +46,5 @@ def test_main_builds_default_runner(monkeypatch) -> None:  # type: ignore[no-unt
     assert captured["postgres_dsn"] == ""
     assert captured["clickhouse_url"] == ""
     assert fake.targets == [
-        StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")
+        StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")
     ]

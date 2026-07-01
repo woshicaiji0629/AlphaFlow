@@ -155,8 +155,9 @@ class PositionManager:
         )
 
     def _target_size(self, confidence: float) -> float:
-        size = self._max_position_size * max(0.0, min(1.0, confidence))
-        return round(size, 6)
+        if confidence <= 0:
+            return 0.0
+        return round(self._max_position_size, 6)
 
     def _risk_exit(
         self,

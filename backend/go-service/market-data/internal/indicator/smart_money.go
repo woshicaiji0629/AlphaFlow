@@ -33,30 +33,42 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 
 	trend := detectSwingTrend(pivotHighs, pivotLows)
 	direction := ""
+	structureEvent := "none"
+	structureBias := structureBias(trend)
 	switch {
 	case swingHigh.price > 0 && closes[last] > swingHigh.price:
 		direction = "up"
+		structureBias = "bull"
 		if trend == swingTrendDown {
 			signals["choch"] = "up"
+			structureEvent = "choch_up"
 		} else {
 			signals["market_structure"] = "bos_up"
+			structureEvent = "bos_up"
 		}
 	case swingLow.price > 0 && closes[last] < swingLow.price:
 		direction = "down"
+		structureBias = "bear"
 		if trend == swingTrendUp {
 			signals["choch"] = "down"
+			structureEvent = "choch_down"
 		} else {
 			signals["market_structure"] = "bos_down"
+			structureEvent = "bos_down"
 		}
 	case swingHigh.price > 0 && highs[last] > swingHigh.price && closes[last] < swingHigh.price:
 		signals["market_structure"] = "range"
 		signals["smart_money"] = "liquidity_sweep_high"
+		structureEvent = "sweep_high"
 	case swingLow.price > 0 && lows[last] < swingLow.price && closes[last] > swingLow.price:
 		signals["market_structure"] = "range"
 		signals["smart_money"] = "liquidity_sweep_low"
+		structureEvent = "sweep_low"
 	default:
 		signals["market_structure"] = "range"
 	}
+	signals["structure_event"] = structureEvent
+	signals["structure_bias"] = structureBias
 
 	blockHigh, blockLow, ok := orderBlock(opens, highs, lows, closes, start, last, direction)
 	if ok {
@@ -92,6 +104,17 @@ func detectSwingTrend(highs []priceLevel, lows []priceLevel) swingTrend {
 		return swingTrendDown
 	default:
 		return swingTrendRange
+	}
+}
+
+func structureBias(trend swingTrend) string {
+	switch trend {
+	case swingTrendUp:
+		return "bull"
+	case swingTrendDown:
+		return "bear"
+	default:
+		return "range"
 	}
 }
 

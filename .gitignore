@@ -33,6 +33,5 @@ coverage/
 !.env.example
 
 # Local runtime data
-/data/redis/
-/data/clickhouse/
+/data/
 /logs/

@@ -1,31 +1,50 @@
 package indicator
 
+import "math"
+
 func addSqueezeMomentum(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
-	bbUpper, bbMiddle, bbLower, ok := bollinger(closes, 20, 2)
+	const (
+		length   = 20
+		multKC   = 1.5
+		lengthKC = 20
+	)
+	basis, ok := sma(closes, length)
 	if !ok {
 		return
 	}
-	atrValue, ok := atr(highs, lows, closes, 20)
+	deviation, ok := standardDeviation(closes, length)
 	if !ok {
 		return
 	}
-	kcMiddle := bbMiddle
-	kcUpper := kcMiddle + 1.5*atrValue
-	kcLower := kcMiddle - 1.5*atrValue
+	bbUpper := basis + multKC*deviation
+	bbLower := basis - multKC*deviation
+
+	ma, ok := sma(closes, lengthKC)
+	if !ok {
+		return
+	}
+	ranges := trueRangeSeries(highs, lows, closes)
+	rangeMA, ok := sma(ranges, lengthKC)
+	if !ok {
+		return
+	}
+	kcUpper := ma + rangeMA*multKC
+	kcLower := ma - rangeMA*multKC
+	squeeze := "off"
 	switch {
-	case bbUpper < kcUpper && bbLower > kcLower:
-		signals["squeeze"] = "on"
-	case bbUpper > kcUpper && bbLower < kcLower:
-		signals["squeeze"] = "released"
-	default:
-		signals["squeeze"] = "off"
+	case bbLower > kcLower && bbUpper < kcUpper:
+		squeeze = "on"
+	case bbLower < kcLower && bbUpper > kcUpper:
+		squeeze = "released"
 	}
-	momentum, previous, ok := squeezeMomentum(highs, lows, closes, 20)
+	signals["squeeze"] = squeeze
+	momentum, previous, ok := squeezeMomentum(highs, lows, closes, lengthKC)
 	if !ok {
 		return
 	}
 	setValue(values, "squeeze_momentum", momentum, true)
 	setValue(values, "squeeze_momentum_delta", momentum-previous, true)
+	signals["squeeze_state"] = squeezeState(squeeze, momentum, previous)
 	switch {
 	case momentum > 0 && momentum >= previous:
 		signals["momentum_state"] = "bull"
@@ -37,6 +56,24 @@ func addSqueezeMomentum(values map[string]string, signals map[string]string, hig
 		signals["momentum_state"] = "bear_fading"
 	default:
 		signals["momentum_state"] = "flat"
+	}
+}
+
+func squeezeState(squeeze string, momentum float64, previous float64) string {
+	direction := "flat"
+	switch {
+	case momentum > 0 && momentum >= previous:
+		direction = "up"
+	case momentum < 0 && momentum <= previous:
+		direction = "down"
+	}
+	switch squeeze {
+	case "on":
+		return "squeeze_on"
+	case "released":
+		return "release_" + direction
+	default:
+		return "off_" + direction
 	}
 }
 
@@ -109,7 +146,7 @@ func bollingerTrend(middleSlopePct float64) string {
 }
 
 func squeezeMomentum(highs []float64, lows []float64, closes []float64, period int) (float64, float64, bool) {
-	if period <= 0 || len(closes) < period+1 {
+	if period <= 0 || len(closes) < period*2 || len(highs) != len(closes) || len(lows) != len(closes) {
 		return 0, 0, false
 	}
 	current, ok := squeezeMomentumAt(highs, lows, closes, period, len(closes))
@@ -124,14 +161,75 @@ func squeezeMomentum(highs []float64, lows []float64, closes []float64, period i
 }
 
 func squeezeMomentumAt(highs []float64, lows []float64, closes []float64, period int, end int) (float64, bool) {
-	if end < period || end > len(closes) {
+	if end < period*2 || end > len(closes) || len(highs) < end || len(lows) < end {
 		return 0, false
 	}
-	highest, lowest := highLow(highs[end-period:end], lows[end-period:end])
-	closeMA, ok := sma(closes[:end], period)
-	if !ok {
+	source := make([]float64, 0, period)
+	start := end - period
+	for index := start; index < end; index++ {
+		highest, lowest := highLow(highs[index-period+1:index+1], lows[index-period+1:index+1])
+		closeMA, ok := sma(closes[:index+1], period)
+		if !ok {
+			return 0, false
+		}
+		baseline := ((highest+lowest)/2 + closeMA) / 2
+		source = append(source, closes[index]-baseline)
+	}
+	return linearRegression(source, period, 0)
+}
+
+func standardDeviation(values []float64, period int) (float64, bool) {
+	if period <= 0 || len(values) < period {
 		return 0, false
 	}
-	baseline := ((highest+lowest)/2 + closeMA) / 2
-	return closes[end-1] - baseline, true
+	average, _ := sma(values, period)
+	window := values[len(values)-period:]
+	var variance float64
+	for _, value := range window {
+		diff := value - average
+		variance += diff * diff
+	}
+	return math.Sqrt(variance / float64(period)), true
+}
+
+func trueRangeSeries(highs []float64, lows []float64, closes []float64) []float64 {
+	values := make([]float64, 0, len(closes))
+	for index := range closes {
+		if index == 0 {
+			values = append(values, highs[index]-lows[index])
+			continue
+		}
+		values = append(values, maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		))
+	}
+	return values
+}
+
+func linearRegression(values []float64, period int, offset int) (float64, bool) {
+	if period <= 0 || len(values) < period || offset < 0 || offset >= period {
+		return 0, false
+	}
+	window := values[len(values)-period:]
+	var sumX float64
+	var sumY float64
+	var sumXY float64
+	var sumXX float64
+	for index, value := range window {
+		x := float64(index)
+		sumX += x
+		sumY += value
+		sumXY += x * value
+		sumXX += x * x
+	}
+	count := float64(period)
+	denominator := count*sumXX - sumX*sumX
+	if denominator == 0 {
+		return 0, false
+	}
+	slope := (count*sumXY - sumX*sumY) / denominator
+	intercept := (sumY - slope*sumX) / count
+	return intercept + slope*float64(period-1-offset), true
 }

@@ -112,12 +112,24 @@ class MarkPrice:
 
 
 @dataclass(frozen=True)
+class StrategyTarget:
+    exchange: str
+    market: str
+    symbol: str
+    interval: str
+
+    def as_tuple(self) -> tuple[str, str, str, str]:
+        return self.exchange, self.market, self.symbol, self.interval
+
+
+@dataclass(frozen=True)
 class MarketSnapshot:
     indicator: IndicatorSnapshot
     health: DataHealth
     klines: tuple[Kline, ...] = ()
     indicator_history: tuple[IndicatorSnapshot, ...] = ()
     indicator_window: IndicatorWindowAnalysis | None = None
+    timeframe_windows: Mapping[str, TimeframeWindow] = MappingProxyType({})
     last_price: LastPrice | None = None
     mark_price: MarkPrice | None = None
     window: WindowAnalysis | None = None
@@ -168,6 +180,17 @@ class WindowAnalysis:
     trend: str = "unknown"
     momentum: str = "unknown"
     volume_state: str = "unknown"
+
+
+@dataclass(frozen=True)
+class TimeframeWindow:
+    interval: str
+    health: DataHealth
+    indicator_window: IndicatorWindowAnalysis | None = None
+    window: WindowAnalysis | None = None
+
+    def is_ok(self) -> bool:
+        return self.health.is_ok()
 
 
 @dataclass(frozen=True)
@@ -233,6 +256,14 @@ class PositionState:
 
     def is_flat(self) -> bool:
         return self.side == PositionSide.FLAT or self.size <= 0
+
+
+@dataclass(frozen=True)
+class StrategyContext:
+    strategy_name: str
+    target: StrategyTarget
+    snapshots: Mapping[str, MarketSnapshot]
+    position: PositionState | None = None
 
 
 @dataclass(frozen=True)

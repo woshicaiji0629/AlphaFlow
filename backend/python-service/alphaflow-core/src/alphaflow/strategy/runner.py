@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Protocol
 
 from alphaflow.market_data.clickhouse_reader import AsyncClickHouseIndicatorReader
@@ -19,8 +19,10 @@ from alphaflow.strategy.models import (
     PositionPlan,
     PositionSide,
     PositionState,
+    StrategyContext,
     StrategyDecision,
     StrategyResult,
+    StrategyTarget,
 )
 from alphaflow.strategy.position_store import (
     PositionHistoryStore,
@@ -32,17 +34,6 @@ from alphaflow.strategy.position_store import (
 DEFAULT_POSITION_MARGIN = 100.0
 DEFAULT_LEVERAGE = 100.0
 DEFAULT_FEE_RATE = 0.0006
-
-
-@dataclass(frozen=True)
-class StrategyTarget:
-    exchange: str
-    market: str
-    symbol: str
-    interval: str
-
-    def as_tuple(self) -> tuple[str, str, str, str]:
-        return self.exchange, self.market, self.symbol, self.interval
 
 
 class MarketDataReader(Protocol):
@@ -75,27 +66,72 @@ class StrategyRunner:
         await self.initialize()
         decisions: list[StrategyDecision] = []
         for target in targets:
+            contexts = await self.read_contexts(target)
+            if not contexts:
+                continue
+            decision = self._engine.evaluate(contexts)
+            await self.apply_decision(contexts, decision)
+            decisions.append(decision)
+            self.log_decision(decision)
+        return decisions
+
+    async def read_contexts(
+        self,
+        target: StrategyTarget,
+    ) -> list[StrategyContext]:
+        contexts: list[StrategyContext] = []
+        positions = await self.read_positions(target)
+        for strategy in self._engine.strategies:
+            intervals = strategy.required_intervals(target)
+            snapshots = await self.read_snapshots(target, intervals)
+            entry_snapshot = snapshots.get(target.interval)
+            if entry_snapshot is None:
+                continue
+            position = positions.get(strategy.name)
+            if position is not None:
+                position = await self.refresh_position(entry_snapshot, position)
+            contexts.append(
+                StrategyContext(
+                    strategy_name=strategy.name,
+                    target=target,
+                    snapshots=snapshots,
+                    position=position,
+                )
+            )
+        return contexts
+
+    async def read_snapshots(
+        self,
+        target: StrategyTarget,
+        intervals: Sequence[str],
+    ) -> dict[str, MarketSnapshot]:
+        snapshots: dict[str, MarketSnapshot] = {}
+        for interval in intervals:
             try:
-                snapshot = await self._reader.read_snapshot(*target.as_tuple())
+                snapshots[interval] = await self._reader.read_snapshot(
+                    target.exchange,
+                    target.market,
+                    target.symbol,
+                    interval,
+                )
             except MarketDataNotReadyError as exc:
+                message = (
+                    "market data not ready"
+                    if interval == target.interval
+                    else "strategy context not ready"
+                )
                 self._logger.warning(
-                    "market data not ready",
+                    message,
                     extra={
                         "exchange": target.exchange,
                         "market": target.market,
                         "symbol": target.symbol,
-                        "interval": target.interval,
+                        "interval": interval,
                         "error": str(exc),
                     },
                 )
                 continue
-            positions = await self.read_positions(target)
-            positions = await self.refresh_positions(snapshot, positions)
-            decision = self._engine.evaluate(snapshot, positions=positions)
-            await self.apply_decision(snapshot, decision)
-            decisions.append(decision)
-            self.log_decision(decision)
-        return decisions
+        return snapshots
 
     async def initialize(self) -> None:
         if self._history_store is None or self._history_initialized:
@@ -134,10 +170,31 @@ class StrategyRunner:
                 await self._position_store.save_active_position(updated)
         return refreshed
 
-    async def apply_decision(self, snapshot: MarketSnapshot, decision: StrategyDecision) -> None:
+    async def refresh_position(
+        self,
+        snapshot: MarketSnapshot,
+        position: PositionState,
+    ) -> PositionState:
+        if self._position_store is None:
+            return position
+        updated = refresh_position_extremes(position, current_price(snapshot))
+        if updated != position:
+            await self._position_store.save_active_position(updated)
+        return updated
+
+    async def apply_decision(
+        self,
+        contexts: Sequence[StrategyContext],
+        decision: StrategyDecision,
+    ) -> None:
         if self._position_store is None:
             return
+        context_by_strategy = {context.strategy_name: context for context in contexts}
         for result in decision.results:
+            context = context_by_strategy.get(result.strategy_name)
+            if context is None:
+                continue
+            snapshot = context.snapshots[context.target.interval]
             plan = result.position_plan
             if plan is None:
                 continue

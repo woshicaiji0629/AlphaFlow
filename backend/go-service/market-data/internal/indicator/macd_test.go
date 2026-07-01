@@ -58,6 +58,23 @@ func TestAddMACDFeatures(t *testing.T) {
 	}
 }
 
+func TestAddMACDFeaturesWithPrefix(t *testing.T) {
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addMACDFeaturesWithPrefix(values, signals, linearValues(80, 100, 0.5), 7, 19, 9, "macd_fast")
+
+	if values["macd_fast_hist_delta"] == "" {
+		t.Fatalf("missing macd_fast_hist_delta: %#v", values)
+	}
+	if values["macd_fast_zero_distance"] == "" {
+		t.Fatalf("missing macd_fast_zero_distance: %#v", values)
+	}
+	if signals["macd_fast_cross"] == "" || signals["macd_fast_zone"] == "" || signals["macd_fast_momentum"] == "" || signals["macd_fast_divergence"] == "" {
+		t.Fatalf("missing fast macd signals: %#v", signals)
+	}
+}
+
 func TestMACDDivergence(t *testing.T) {
 	closes := []float64{100, 105, 102, 108, 104, 112, 106, 116, 110, 120}
 	series := []macdPoint{

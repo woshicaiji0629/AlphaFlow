@@ -35,6 +35,9 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 		setValue(values, "ma_trend_strength", math.Abs(spread), true)
 		addMovingAverageStructureFeatures(values, signals, closes, ema7, ema25, ema99)
 	}
+	addScriptDualMovingAverage(values, signals, closes, volumes)
+	addScriptMovingAverageSignal(values, signals, closes)
+	addEMDFeatures(values, signals, closes, 25, 1)
 }
 
 func addAlligatorFeatures(values map[string]string, signals map[string]string, closes []float64) {
@@ -118,6 +121,39 @@ func tema(values []float64, period int) (float64, bool) {
 	return 3*ema1[len(ema1)-1] - 3*ema2[len(ema2)-1] + ema3[len(ema3)-1], true
 }
 
+func tilsonT3(values []float64, period int, factor float64) (float64, bool) {
+	first, ok := gd(values, period, factor)
+	if !ok {
+		return 0, false
+	}
+	second, ok := gd(first, period, factor)
+	if !ok {
+		return 0, false
+	}
+	third, ok := gd(second, period, factor)
+	if !ok {
+		return 0, false
+	}
+	return third[len(third)-1], true
+}
+
+func gd(values []float64, period int, factor float64) ([]float64, bool) {
+	first, ok := emaSeries(values, period)
+	if !ok {
+		return nil, false
+	}
+	second, ok := emaSeries(first, period)
+	if !ok {
+		return nil, false
+	}
+	offset := len(first) - len(second)
+	result := make([]float64, 0, len(second))
+	for index, secondValue := range second {
+		result = append(result, first[index+offset]*(1+factor)-secondValue*factor)
+	}
+	return result, true
+}
+
 func kama(values []float64, period int, fast int, slow int) (float64, bool) {
 	if period <= 0 || fast <= 0 || slow <= 0 || len(values) <= period {
 		return 0, false
@@ -160,6 +196,173 @@ func smma(values []float64, period int) (float64, bool) {
 		current = (current*float64(period-1) + values[index]) / float64(period)
 	}
 	return current, true
+}
+
+func smmaSeries(values []float64, period int) ([]float64, bool) {
+	if period <= 0 || len(values) < period {
+		return nil, false
+	}
+	result := make([]float64, 0, len(values)-period+1)
+	current, _ := sma(values[:period], period)
+	result = append(result, current)
+	for index := period; index < len(values); index++ {
+		current = (current*float64(period-1) + values[index]) / float64(period)
+		result = append(result, current)
+	}
+	return result, true
+}
+
+func movingAverageByType(values []float64, volumes []float64, period int, maType int, t3Factor float64) (float64, bool) {
+	switch maType {
+	case 1:
+		return sma(values, period)
+	case 2:
+		return ema(values, period)
+	case 3:
+		return wma(values, period)
+	case 4:
+		return hma(values, period)
+	case 5:
+		return vwma(values, volumes, period)
+	case 6:
+		return smma(values, period)
+	case 7:
+		return tema(values, period)
+	default:
+		return tilsonT3(values, period, t3Factor)
+	}
+}
+
+func addScriptDualMovingAverage(values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
+	const (
+		period1  = 20
+		period2  = 50
+		maType1  = 1
+		maType2  = 1
+		smooth   = 2
+		t3Factor = 0.7
+	)
+	if len(closes) < period2+smooth+1 {
+		return
+	}
+	out1, ok1 := movingAverageByType(closes, volumes, period1, maType1, t3Factor)
+	out2, ok2 := movingAverageByType(closes, volumes, period2, maType2, t3Factor)
+	prevOut1, okPrev1 := movingAverageByType(closes[:len(closes)-1], volumes[:len(volumes)-1], period1, maType1, t3Factor)
+	prevOut2, okPrev2 := movingAverageByType(closes[:len(closes)-1], volumes[:len(volumes)-1], period2, maType2, t3Factor)
+	smoothOut1, okSmooth := movingAverageByType(closes[:len(closes)-smooth], volumes[:len(volumes)-smooth], period1, maType1, t3Factor)
+	if !ok1 || !ok2 || !okPrev1 || !okPrev2 || !okSmooth {
+		return
+	}
+	setValue(values, "script_dual_ma_out1", out1, true)
+	setValue(values, "script_dual_ma_out2", out2, true)
+	setValue(values, "script_dual_ma_out1_slope_pct", percentDistance(out1, smoothOut1), smoothOut1 != 0)
+	setValue(values, "script_dual_ma_out2_slope_pct", percentDistance(out2, prevOut2), prevOut2 != 0)
+	signals["script_ma1_direction"] = maDirection(out1, smoothOut1)
+	signals["script_price_cross_ma1"] = priceCrossMA(closes, out1)
+	signals["script_price_cross_ma2"] = priceCrossMA(closes, out2)
+	signals["script_dual_ma_cross"] = crossSignal(prevOut1, prevOut2, out1, out2)
+}
+
+func maDirection(current float64, previous float64) string {
+	switch {
+	case current > previous:
+		return "up"
+	case current < previous:
+		return "down"
+	default:
+		return "flat"
+	}
+}
+
+func priceCrossMA(closes []float64, average float64) string {
+	last := len(closes) - 1
+	openLike := closes[last-1]
+	closeValue := closes[last]
+	switch {
+	case openLike < average && closeValue > average:
+		return "up"
+	case openLike > average && closeValue < average:
+		return "down"
+	default:
+		return "none"
+	}
+}
+
+func addScriptMovingAverageSignal(values map[string]string, signals map[string]string, closes []float64) {
+	if len(closes) < 28 {
+		return
+	}
+	ema10, ok10 := ema(closes, 10)
+	breakthrough, okBreakthrough := ema(closes[:len(closes)-1], 13)
+	ema12, ok12 := ema(closes, 12)
+	ema26, ok26 := ema(closes, 26)
+	prevEMA10, okPrev10 := ema(closes[:len(closes)-1], 10)
+	prevBreakthrough, okPrevBreakthrough := ema(closes[:len(closes)-2], 13)
+	if !ok10 || !okBreakthrough || !ok12 || !ok26 || !okPrev10 || !okPrevBreakthrough || breakthrough == 0 || prevBreakthrough == 0 {
+		return
+	}
+	a1x := (ema10 - breakthrough) / breakthrough * 100
+	prevA1x := (prevEMA10 - prevBreakthrough) / prevBreakthrough * 100
+	midDirection := ema12 - ema26
+	setValue(values, "script_ma_breakout_pct", a1x, true)
+	setValue(values, "script_ma_mid_direction", midDirection, true)
+	switch {
+	case prevA1x <= 0 && a1x > 0 && midDirection > 0:
+		signals["script_ma_signal"] = "bull_breakout"
+	case prevA1x >= 0 && a1x < 0 && midDirection < 0:
+		signals["script_ma_signal"] = "bear_breakout"
+	case a1x >= 0:
+		signals["script_ma_signal"] = "bull_color"
+	default:
+		signals["script_ma_signal"] = "bear_color"
+	}
+}
+
+func addEMDFeatures(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
+	avgSeries, ok := smmaSeries(closes, period)
+	if !ok || len(avgSeries) < period+2 {
+		return
+	}
+	offset := len(closes) - len(avgSeries)
+	deviations := make([]float64, 0, len(avgSeries))
+	for index, avg := range avgSeries {
+		deviations = append(deviations, math.Abs(closes[index+offset]-avg))
+	}
+	emdSeries, ok := emaSeries(deviations, period)
+	if !ok || len(emdSeries) < 2 {
+		return
+	}
+	avg := avgSeries[len(avgSeries)-1]
+	emd := emdSeries[len(emdSeries)-1]
+	upper := avg + emd*multiplier
+	lower := avg - emd*multiplier
+	previousAvg := avgSeries[len(avgSeries)-2]
+	previousEMD := emdSeries[len(emdSeries)-2]
+	previousUpper := previousAvg + previousEMD*multiplier
+	previousLower := previousAvg - previousEMD*multiplier
+	current := closes[len(closes)-1]
+	previous := closes[len(closes)-2]
+
+	setValue(values, "emd_avg", avg, true)
+	setValue(values, "emd_value", emd, true)
+	setValue(values, "emd_upper", upper, true)
+	setValue(values, "emd_lower", lower, true)
+	switch {
+	case current > upper:
+		signals["emd_direction"] = "up"
+	case current < lower:
+		signals["emd_direction"] = "down"
+	default:
+		signals["emd_direction"] = "range"
+	}
+	switch {
+	case previous <= previousUpper && current > upper:
+		signals["emd_cross"] = "golden"
+	case previous >= previousLower && current < lower:
+		signals["emd_cross"] = "dead"
+	default:
+		signals["emd_cross"] = "none"
+	}
 }
 
 func alligatorDirection(jaw float64, teeth float64, lips float64) string {

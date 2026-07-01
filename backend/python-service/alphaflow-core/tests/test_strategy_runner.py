@@ -8,13 +8,17 @@ from alphaflow.strategy import (
     DataHealth,
     ExitReasonType,
     ExitRule,
+    IndicatorSeriesAnalysis,
     IndicatorSnapshot,
+    IndicatorWindowAnalysis,
     Kline,
     MarketSnapshot,
     PositionSide,
     PositionState,
+    SignalSeriesAnalysis,
     SignalSide,
     StrategyEngine,
+    WindowAnalysis,
 )
 from alphaflow.strategy.runner import StrategyRunner, StrategyTarget
 
@@ -86,20 +90,20 @@ def test_strategy_runner_logs_signal(caplog: pytest.LogCaptureFixture) -> None:
 
 
 async def run_strategy_runner_logs_signal(caplog: pytest.LogCaptureFixture) -> None:
-    snapshot = make_snapshot(values={"rsi_14": "32", "macd_hist": "0.1"})
+    snapshot = make_snapshot(side=SignalSide.BUY)
     logger = logging.getLogger("test-strategy-runner")
     runner = StrategyRunner(FakeReader(snapshot), StrategyEngine(), logger=logger)
 
     with caplog.at_level(logging.INFO, logger="test-strategy-runner"):
         decisions = await runner.run_once(
-            [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+            [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
         )
 
     assert decisions[0].results[0].signal.side == SignalSide.BUY
     fields = caplog.records[0].__dict__
     assert fields["side"] == "buy"
     assert fields["symbol"] == "ETHUSDT"
-    assert fields["strategy"] == "rule"
+    assert fields["strategy"] == "supertrend"
     assert fields["position_action"] == "open_long"
     assert fields["analysis"]
 
@@ -109,7 +113,7 @@ def test_strategy_runner_opens_position_with_reason() -> None:
 
 
 async def run_strategy_runner_opens_position_with_reason() -> None:
-    snapshot = make_snapshot(values={"rsi_14": "32", "macd_hist": "0.1"})
+    snapshot = make_snapshot(side=SignalSide.BUY)
     position_store = FakePositionStore()
     runner = StrategyRunner(
         FakeReader(snapshot),
@@ -119,13 +123,13 @@ async def run_strategy_runner_opens_position_with_reason() -> None:
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert position_store.saved
-    assert position_store.saved[0].strategy_name == "rule"
+    assert position_store.saved[0].strategy_name == "supertrend"
     assert position_store.saved[0].side == PositionSide.LONG
-    assert [rule.trigger_price for rule in position_store.saved[0].exit_rules] == ["110", "95"]
+    assert [rule.trigger_price for rule in position_store.saved[0].exit_rules] == ["110", "96"]
     assert "buy signal opens long exposure" in position_store.saved[0].entry_reason
 
 
@@ -134,12 +138,12 @@ def test_strategy_runner_closes_position_to_history_before_clearing() -> None:
 
 
 async def run_strategy_runner_closes_position_to_history_before_clearing() -> None:
-    snapshot = make_snapshot(values={"rsi_14": "70", "macd_hist": "-0.08"}, close="105")
+    snapshot = make_snapshot(side=SignalSide.SELL, close="105")
     active = PositionState(
         exchange="binance",
         market="um",
         symbol="ETHUSDT",
-        strategy_name="rule",
+        strategy_name="supertrend",
         position_id="position-1",
         side=PositionSide.LONG,
         size=1.0,
@@ -164,7 +168,7 @@ async def run_strategy_runner_closes_position_to_history_before_clearing() -> No
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert history_store.initialized
@@ -189,12 +193,12 @@ def test_strategy_runner_closes_position_on_take_profit() -> None:
 
 
 async def run_strategy_runner_closes_position_on_take_profit() -> None:
-    snapshot = make_snapshot(values={"rsi_14": "50", "macd_hist": "0"}, close="111")
+    snapshot = make_snapshot(side=SignalSide.BUY, close="111")
     active = PositionState(
         exchange="binance",
         market="um",
         symbol="ETHUSDT",
-        strategy_name="rule",
+        strategy_name="supertrend",
         position_id="position-2",
         side=PositionSide.LONG,
         size=1.0,
@@ -219,7 +223,7 @@ async def run_strategy_runner_closes_position_on_take_profit() -> None:
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert len(history_store.saved) == 1
@@ -234,12 +238,12 @@ def test_strategy_runner_partially_closes_position() -> None:
 
 
 async def run_strategy_runner_partially_closes_position() -> None:
-    snapshot = make_snapshot(values={"rsi_14": "50", "macd_hist": "0"}, close="111")
+    snapshot = make_snapshot(side=SignalSide.BUY, close="111")
     active = PositionState(
         exchange="binance",
         market="um",
         symbol="ETHUSDT",
-        strategy_name="rule",
+        strategy_name="supertrend",
         position_id="position-3",
         side=PositionSide.LONG,
         size=2.0,
@@ -274,7 +278,7 @@ async def run_strategy_runner_partially_closes_position() -> None:
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert history_store.saved[0].size == 1.0
@@ -288,7 +292,7 @@ async def run_strategy_runner_partially_closes_position() -> None:
     assert position_store.position.size == 1.0
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert history_store.saved[-1].is_final_exit
@@ -304,12 +308,12 @@ def test_strategy_runner_trailing_stop_uses_updated_high() -> None:
 
 
 async def run_strategy_runner_trailing_stop_uses_updated_high() -> None:
-    first_snapshot = make_snapshot(values={"rsi_14": "50", "macd_hist": "0"}, close="120")
+    first_snapshot = make_snapshot(side=SignalSide.BUY, close="120")
     active = PositionState(
         exchange="binance",
         market="um",
         symbol="ETHUSDT",
-        strategy_name="rule",
+        strategy_name="supertrend",
         position_id="position-4",
         side=PositionSide.LONG,
         size=1.0,
@@ -340,7 +344,7 @@ async def run_strategy_runner_trailing_stop_uses_updated_high() -> None:
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert position_store.position is not None
@@ -348,7 +352,7 @@ async def run_strategy_runner_trailing_stop_uses_updated_high() -> None:
     assert position_store.position.exit_rules[0].metadata["reference_price"] == "120"
 
     runner = StrategyRunner(
-        FakeReader(make_snapshot(values={"rsi_14": "50", "macd_hist": "0"}, close="107")),
+        FakeReader(make_snapshot(side=SignalSide.BUY, close="107")),
         StrategyEngine(),
         position_store=position_store,
         history_store=history_store,
@@ -356,25 +360,26 @@ async def run_strategy_runner_trailing_stop_uses_updated_high() -> None:
     )
 
     await runner.run_once(
-        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="1m")]
+        [StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")]
     )
 
     assert history_store.saved[-1].exit_reason_type == ExitReasonType.TRAILING_STOP
     assert position_store.position is None
 
 
-def make_snapshot(values: dict[str, str], close: str = "101") -> MarketSnapshot:
+def make_snapshot(side: SignalSide, close: str = "101") -> MarketSnapshot:
+    bullish = side == SignalSide.BUY
     merged_values = {
         "support_1": "95",
         "resistance_1": "110",
+        "supertrend": "96" if bullish else "104",
     }
-    merged_values.update(values)
     return MarketSnapshot(
         indicator=IndicatorSnapshot(
             exchange="binance",
             market="um",
             symbol="ETHUSDT",
-            interval="1m",
+            interval="3m",
             open_time=1000,
             close_time=1999,
             values=merged_values,
@@ -385,7 +390,7 @@ def make_snapshot(values: dict[str, str], close: str = "101") -> MarketSnapshot:
             exchange="binance",
             market="um",
             symbol="ETHUSDT",
-            interval="1m",
+            interval="3m",
             kline_status="ok",
             indicator_status="ok",
         ),
@@ -394,7 +399,7 @@ def make_snapshot(values: dict[str, str], close: str = "101") -> MarketSnapshot:
                 exchange="binance",
                 market="um",
                 symbol="ETHUSDT",
-                interval="1m",
+                interval="3m",
                 open_time=1000,
                 close_time=1999,
                 open="100",
@@ -405,4 +410,81 @@ def make_snapshot(values: dict[str, str], close: str = "101") -> MarketSnapshot:
                 is_closed=True,
             ),
         ),
+        indicator_window=make_indicator_window(side),
+        window=WindowAnalysis(
+            sample_count=200,
+            lookback=200,
+            trend="up" if bullish else "down",
+            volume_state="expanding",
+        ),
+    )
+
+
+def make_indicator_window(side: SignalSide) -> IndicatorWindowAnalysis:
+    bullish = side == SignalSide.BUY
+    direction = "rising" if bullish else "falling"
+    return IndicatorWindowAnalysis(
+        sample_count=200,
+        values={
+            "ema7": IndicatorSeriesAnalysis(
+                latest=105 if bullish else 95,
+                previous=104 if bullish else 96,
+                direction=direction,
+            ),
+            "ema25": IndicatorSeriesAnalysis(
+                latest=100,
+                previous=99 if bullish else 101,
+                direction=direction,
+            ),
+            "ema99": IndicatorSeriesAnalysis(
+                latest=90 if bullish else 110,
+                previous=89 if bullish else 111,
+                direction=direction,
+            ),
+            "ema25_slope5_pct": IndicatorSeriesAnalysis(
+                latest=0.4 if bullish else -0.4,
+                previous=0.2 if bullish else -0.2,
+                direction=direction,
+            ),
+            "macd_hist": IndicatorSeriesAnalysis(
+                latest=0.12 if bullish else -0.12,
+                previous=0.04 if bullish else -0.04,
+                direction=direction,
+            ),
+            "macd_hist_delta": IndicatorSeriesAnalysis(
+                latest=0.08 if bullish else -0.08,
+                previous=0.02 if bullish else -0.02,
+                direction=direction,
+            ),
+            "adx14": IndicatorSeriesAnalysis(latest=24, previous=18, direction="rising"),
+            "rsi14": IndicatorSeriesAnalysis(
+                latest=58 if bullish else 42,
+                previous=52 if bullish else 48,
+                direction=direction,
+            ),
+        },
+        signals={
+            "data_quality": SignalSeriesAnalysis(latest="ok", previous="ok", stable_count=20),
+            "supertrend_direction": SignalSeriesAnalysis(
+                latest="up" if bullish else "down",
+                previous="up" if bullish else "down",
+                stable_count=3,
+            ),
+            "ema_alignment": SignalSeriesAnalysis(
+                latest="bull" if bullish else "bear",
+                previous="bull" if bullish else "bear",
+                stable_count=3,
+            ),
+            "macd_momentum": SignalSeriesAnalysis(
+                latest="expanding_bull" if bullish else "expanding_bear",
+                previous="expanding_bull" if bullish else "expanding_bear",
+                stable_count=3,
+            ),
+            "macd_divergence": SignalSeriesAnalysis(latest="none", previous="none", stable_count=5),
+            "di_direction": SignalSeriesAnalysis(
+                latest="bull" if bullish else "bear",
+                previous="bull" if bullish else "bear",
+                stable_count=3,
+            ),
+        },
     )

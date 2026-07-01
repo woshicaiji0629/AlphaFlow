@@ -15,6 +15,12 @@ func TestSmartMoneyDetectsBreakOfStructureUp(t *testing.T) {
 	if signals["market_structure"] != "bos_up" {
 		t.Fatalf("market_structure = %q, want bos_up", signals["market_structure"])
 	}
+	if signals["structure_event"] != "bos_up" {
+		t.Fatalf("structure_event = %q, want bos_up", signals["structure_event"])
+	}
+	if signals["structure_bias"] != "bull" {
+		t.Fatalf("structure_bias = %q, want bull", signals["structure_bias"])
+	}
 	if values["swing_high"] != "15" {
 		t.Fatalf("swing_high = %q, want 15", values["swing_high"])
 	}
@@ -35,6 +41,9 @@ func TestSmartMoneyDetectsLiquiditySweepHigh(t *testing.T) {
 
 	if signals["smart_money"] != "liquidity_sweep_high" {
 		t.Fatalf("smart_money = %q, want liquidity_sweep_high; signals=%#v", signals["smart_money"], signals)
+	}
+	if signals["structure_event"] != "sweep_high" {
+		t.Fatalf("structure_event = %q, want sweep_high", signals["structure_event"])
 	}
 	if signals["market_structure"] != "range" {
 		t.Fatalf("market_structure = %q, want range", signals["market_structure"])

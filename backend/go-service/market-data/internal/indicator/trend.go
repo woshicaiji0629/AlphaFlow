@@ -57,6 +57,7 @@ func addSupertrend(values map[string]string, signals map[string]string, highs []
 	}{
 		{name: "supertrend_7_2", period: 7, multiplier: 2},
 		{name: "supertrend_10_3", period: 10, multiplier: 3},
+		{name: "supertrend_10_3_3", period: 10, multiplier: 3.3},
 		{name: "supertrend_14_4", period: 14, multiplier: 4},
 	} {
 		presetValue, presetDirection, presetOK := supertrend(highs, lows, closes, preset.period, preset.multiplier)
@@ -83,6 +84,9 @@ func addAlphaTrend(values map[string]string, signals map[string]string, highs []
 	setValue(values, "alphatrend_slope_pct", percentDistance(lastPoint.value, prevPoint.value), prevPoint.value != 0)
 	signals["alphatrend_direction"] = lastPoint.direction
 	signals["alphatrend_flip"] = trendFlip(prevPoint.direction, lastPoint.direction)
+	cross, signal := alphaTrendSignals(points)
+	signals["alphatrend_cross"] = cross
+	signals["alphatrend_signal"] = signal
 }
 
 func addPSARFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
@@ -94,6 +98,38 @@ func addPSARFeatures(values map[string]string, signals map[string]string, highs 
 	setValue(values, "psar", value, true)
 	setValue(values, "psar_distance_pct", percentDistance(last, value), value != 0)
 	signals["psar_direction"] = direction
+}
+
+func addChandelierExit(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
+	longStop, shortStop, ok := chandelierExit(highs, lows, closes, period, multiplier)
+	if !ok {
+		return
+	}
+	last := closes[len(closes)-1]
+	setValue(values, "chandelier_long", longStop, true)
+	setValue(values, "chandelier_short", shortStop, true)
+	switch {
+	case last >= longStop:
+		signals["chandelier_direction"] = "up"
+		setValue(values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, longStop)), longStop != 0)
+	case last <= shortStop:
+		signals["chandelier_direction"] = "down"
+		setValue(values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, shortStop)), shortStop != 0)
+	default:
+		signals["chandelier_direction"] = "neutral"
+	}
+}
+
+func chandelierExit(highs []float64, lows []float64, closes []float64, period int, multiplier float64) (float64, float64, bool) {
+	if period <= 0 || len(closes) < period || multiplier <= 0 {
+		return 0, 0, false
+	}
+	atrValue, ok := atr(highs, lows, closes, period)
+	if !ok {
+		return 0, 0, false
+	}
+	highest, lowest := highLow(highs[len(highs)-period:], lows[len(lows)-period:])
+	return highest - multiplier*atrValue, lowest + multiplier*atrValue, true
 }
 
 func supertrend(highs []float64, lows []float64, closes []float64, period int, multiplier float64) (float64, string, bool) {
@@ -234,6 +270,265 @@ func alphaTrendSeries(highs []float64, lows []float64, closes []float64, volumes
 		return nil, 0, false
 	}
 	return points, lastMFI, true
+}
+
+func alphaTrendSignals(points []trendPoint) (string, string) {
+	if len(points) < 4 {
+		return "none", "none"
+	}
+	buys := make([]bool, len(points))
+	sells := make([]bool, len(points))
+	for index := 3; index < len(points); index++ {
+		current := points[index].value
+		twoBack := points[index-2].value
+		previous := points[index-1].value
+		threeBack := points[index-3].value
+		buys[index] = current > twoBack && previous <= threeBack
+		sells[index] = current < twoBack && previous >= threeBack
+	}
+
+	last := len(points) - 1
+	cross := "none"
+	signal := "none"
+	if buys[last] {
+		cross = "buy"
+		if alphaTrendSignalAllowed(previousCrossDistance(buys, last), crossDistance(sells, last)) {
+			signal = "buy"
+		}
+	}
+	if sells[last] {
+		cross = "sell"
+		if alphaTrendSignalAllowed(previousCrossDistance(sells, last), crossDistance(buys, last)) {
+			signal = "sell"
+		}
+	}
+	return cross, signal
+}
+
+func alphaTrendSignalAllowed(previousSame int, opposite int) bool {
+	return previousSame >= 0 && opposite >= 0 && previousSame > opposite
+}
+
+type livermoreState struct {
+	trend    int
+	a        float64
+	b        float64
+	c        float64
+	d        float64
+	e        float64
+	f        float64
+	g        float64
+	h        float64
+	hasA     bool
+	hasB     bool
+	hasC     bool
+	hasD     bool
+	hasE     bool
+	hasF     bool
+	hasG     bool
+	hasH     bool
+	buy      bool
+	sell     bool
+	keyPoint float64
+}
+
+func addLivermoreFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, opens []float64) {
+	state, ok := livermoreStructure(highs, lows, closes, opens, 365, 4)
+	if !ok {
+		return
+	}
+	if state.hasC {
+		setValue(values, "livermore_key_point", state.c, true)
+	}
+	if state.hasF {
+		setValue(values, "livermore_pullback_point", state.f, true)
+	}
+	if state.hasG {
+		setValue(values, "livermore_breakout_line", state.g, true)
+	}
+	if state.hasH {
+		setValue(values, "livermore_previous_key_point", state.h, true)
+	}
+	if state.keyPoint != 0 {
+		setValue(values, "livermore_active_point", state.keyPoint, true)
+	}
+	switch state.trend {
+	case 1:
+		signals["livermore_trend"] = "up"
+	case 2:
+		signals["livermore_trend"] = "down"
+	default:
+		signals["livermore_trend"] = "range"
+	}
+	switch {
+	case state.buy:
+		signals["livermore_signal"] = "buy"
+	case state.sell:
+		signals["livermore_signal"] = "sell"
+	default:
+		signals["livermore_signal"] = "none"
+	}
+}
+
+func livermoreStructure(highs []float64, lows []float64, closes []float64, opens []float64, period int, multiplier float64) (livermoreState, bool) {
+	atrValues, ok := atrSeries(highs, lows, closes, period)
+	if !ok || len(opens) != len(closes) {
+		return livermoreState{}, false
+	}
+	offset := len(closes) - len(atrValues)
+	var state livermoreState
+	for atrIndex, atrValue := range atrValues {
+		index := atrIndex + offset
+		da := atrValue * multiplier
+		db := da * 0.5
+		previousTrend := state.trend
+		if state.trend == 0 {
+			if closes[index] > opens[index] {
+				state.trend = 1
+				state.a = highs[index]
+				state.d = state.a - da
+			} else {
+				state.trend = 2
+				state.a = lows[index]
+				state.d = state.a + da
+			}
+			state.hasA = true
+			state.hasD = true
+			state.keyPoint = state.a
+			continue
+		}
+		state.buy = false
+		state.sell = false
+		if state.trend == 1 {
+			updateLivermoreUp(&state, highs[index], lows[index], da, db)
+		} else if state.trend == 2 {
+			updateLivermoreDown(&state, highs[index], lows[index], da, db)
+		}
+		state.buy = state.trend == 1 && previousTrend == 2
+		state.sell = state.trend == 2 && previousTrend == 1
+		if state.hasA {
+			state.keyPoint = state.a
+		}
+	}
+	return state, state.trend != 0
+}
+
+func updateLivermoreUp(state *livermoreState, high float64, low float64, da float64, db float64) {
+	if high > state.a {
+		state.a = high
+		state.b = state.a - da
+		state.hasA = true
+		state.hasB = true
+		if !state.hasC || high > state.c {
+			state.hasC = false
+		}
+	} else if state.hasB && low < state.b {
+		state.hasB = false
+		state.c = state.a
+		state.d = low
+		state.e = state.d + da
+		state.hasC = true
+		state.hasD = true
+		state.hasE = true
+	}
+	if !state.hasD || low < state.d {
+		state.d = low
+		state.e = state.d + da
+		state.hasD = true
+		state.hasE = true
+	} else if state.hasE && high > state.e {
+		state.hasE = false
+		state.f = state.d
+		state.g = state.d - db
+		state.hasF = true
+		state.hasG = true
+		if state.hasH && state.g > state.h {
+			state.hasH = false
+		}
+	}
+	if (state.hasG && low < state.g) || (state.hasH && low < state.h) {
+		state.trend = 2
+		if state.hasC {
+			state.h = state.c
+			state.hasH = true
+		}
+		state.a = low
+		state.b = state.a + da
+		state.hasA = true
+		state.hasB = true
+		state.hasC = false
+		state.hasD = false
+		state.hasF = false
+		state.hasG = false
+	}
+}
+
+func updateLivermoreDown(state *livermoreState, high float64, low float64, da float64, db float64) {
+	if low < state.a {
+		state.a = low
+		state.b = state.a + da
+		state.hasA = true
+		state.hasB = true
+		if !state.hasC || low < state.c {
+			state.hasC = false
+		}
+	} else if state.hasB && high > state.b {
+		state.hasB = false
+		state.c = state.a
+		state.d = high
+		state.e = state.d - da
+		state.hasC = true
+		state.hasD = true
+		state.hasE = true
+	}
+	if !state.hasD || high > state.d {
+		state.d = high
+		state.e = state.d - da
+		state.hasD = true
+		state.hasE = true
+	} else if state.hasE && low < state.e {
+		state.hasE = false
+		state.f = state.d
+		state.g = state.d + db
+		state.hasF = true
+		state.hasG = true
+		if state.hasH && state.g < state.h {
+			state.hasH = false
+		}
+	}
+	if (state.hasG && high > state.g) || (state.hasH && high > state.h) {
+		state.trend = 1
+		if state.hasC {
+			state.h = state.c
+			state.hasH = true
+		}
+		state.a = high
+		state.b = state.a - da
+		state.hasA = true
+		state.hasB = true
+		state.hasC = false
+		state.hasD = false
+		state.hasF = false
+		state.hasG = false
+	}
+}
+
+func crossDistance(series []bool, current int) int {
+	for index := current; index >= 0; index-- {
+		if series[index] {
+			return current - index
+		}
+	}
+	return -1
+}
+
+func previousCrossDistance(series []bool, current int) int {
+	for index := current - 1; index >= 0; index-- {
+		if series[index] {
+			return current - index - 1
+		}
+	}
+	return -1
 }
 
 func psar(highs []float64, lows []float64, closes []float64, step float64, maxStep float64) (float64, string, bool) {

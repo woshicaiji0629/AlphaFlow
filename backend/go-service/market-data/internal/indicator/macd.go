@@ -7,17 +7,29 @@ type macdPoint struct {
 }
 
 func addMACDFeatures(values map[string]string, signals map[string]string, closes []float64, fast int, slow int, signal int) {
+	addMACDFeaturesWithPrefix(values, signals, closes, fast, slow, signal, "macd")
+}
+
+func addMACDFeaturesWithPrefix(
+	values map[string]string,
+	signals map[string]string,
+	closes []float64,
+	fast int,
+	slow int,
+	signal int,
+	prefix string,
+) {
 	series, ok := macdSeries(closes, fast, slow, signal)
 	if !ok {
 		return
 	}
 	last := series[len(series)-1]
-	setValue(values, "macd_hist_delta", macdHistDelta(series), len(series) >= 2)
-	setValue(values, "macd_zero_distance", last.value, true)
-	signals["macd_cross"] = macdCross(series)
-	signals["macd_zone"] = macdZone(last)
-	signals["macd_momentum"] = macdMomentum(series)
-	signals["macd_divergence"] = macdDivergence(closes, series)
+	setValue(values, prefix+"_hist_delta", macdHistDelta(series), len(series) >= 2)
+	setValue(values, prefix+"_zero_distance", last.value, true)
+	signals[prefix+"_cross"] = macdCross(series)
+	signals[prefix+"_zone"] = macdZone(last)
+	signals[prefix+"_momentum"] = macdMomentum(series)
+	signals[prefix+"_divergence"] = macdDivergence(closes, series)
 }
 
 func macd(values []float64, fast int, slow int, signal int) (float64, float64, float64, bool) {

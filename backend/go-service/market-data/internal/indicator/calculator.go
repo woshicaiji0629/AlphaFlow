@@ -102,6 +102,13 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		setValue(values, "macd_hist", macdHist, true)
 	}
 	addMACDFeatures(values, signals, closes, 12, 26, 9)
+	macdFastValue, macdFastSignal, macdFastHist, ok := macd(closes, 7, 19, 9)
+	if ok {
+		setValue(values, "macd_fast", macdFastValue, true)
+		setValue(values, "macd_fast_signal", macdFastSignal, true)
+		setValue(values, "macd_fast_hist", macdFastHist, true)
+	}
+	addMACDFeaturesWithPrefix(values, signals, closes, 7, 19, 9, "macd_fast")
 	addOscillatorFeatures(values, signals, highs, lows, closes)
 	addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
 	upper, middle, lower, ok := bollinger(closes, 20, 2)

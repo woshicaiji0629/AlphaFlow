@@ -47,50 +47,57 @@ func atrSeries(highs []float64, lows []float64, closes []float64, period int) ([
 }
 
 func adx(highs []float64, lows []float64, closes []float64, period int) (float64, float64, float64, bool) {
-	if period <= 0 || len(closes) <= period*2 {
+	if period <= 0 || len(closes) <= period {
 		return 0, 0, 0, false
 	}
 	trs := trueRanges(highs, lows, closes)
-	if len(trs) < period {
+	if len(trs) < period || len(highs) != len(closes) || len(lows) != len(closes) {
 		return 0, 0, 0, false
 	}
-	plusDM := make([]float64, 0, len(closes)-1)
-	minusDM := make([]float64, 0, len(closes)-1)
+	dxValues := make([]float64, 0, len(closes)-1)
+	var smoothedTR float64
+	var smoothedPlusDM float64
+	var smoothedMinusDM float64
+	var plusDI float64
+	var minusDI float64
 	for index := 1; index < len(closes); index++ {
-		upMove := highs[index] - highs[index-1]
-		downMove := lows[index-1] - lows[index]
-		if upMove > downMove && upMove > 0 {
-			plusDM = append(plusDM, upMove)
-		} else {
-			plusDM = append(plusDM, 0)
-		}
-		if downMove > upMove && downMove > 0 {
-			minusDM = append(minusDM, downMove)
-		} else {
-			minusDM = append(minusDM, 0)
-		}
-	}
-	smoothedTR := sum(trs[:period])
-	smoothedPlusDM := sum(plusDM[:period])
-	smoothedMinusDM := sum(minusDM[:period])
-	dxValues := make([]float64, 0, len(trs)-period+1)
-	plusDI, minusDI, dx := directionalIndex(smoothedTR, smoothedPlusDM, smoothedMinusDM)
-	dxValues = append(dxValues, dx)
-	for index := period; index < len(trs); index++ {
-		smoothedTR = smoothedTR - smoothedTR/float64(period) + trs[index]
-		smoothedPlusDM = smoothedPlusDM - smoothedPlusDM/float64(period) + plusDM[index]
-		smoothedMinusDM = smoothedMinusDM - smoothedMinusDM/float64(period) + minusDM[index]
+		trueRange := maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+		upMove := directionalMovementPlus(highs[index], highs[index-1], lows[index], lows[index-1])
+		downMove := directionalMovementMinus(highs[index], highs[index-1], lows[index], lows[index-1])
+		smoothedTR = smoothedTR - smoothedTR/float64(period) + trueRange
+		smoothedPlusDM = smoothedPlusDM - smoothedPlusDM/float64(period) + upMove
+		smoothedMinusDM = smoothedMinusDM - smoothedMinusDM/float64(period) + downMove
+		var dx float64
 		plusDI, minusDI, dx = directionalIndex(smoothedTR, smoothedPlusDM, smoothedMinusDM)
 		dxValues = append(dxValues, dx)
 	}
 	if len(dxValues) < period {
 		return 0, 0, 0, false
 	}
-	adxValue, _ := sma(dxValues[:period], period)
-	for index := period; index < len(dxValues); index++ {
-		adxValue = (adxValue*float64(period-1) + dxValues[index]) / float64(period)
-	}
+	adxValue, _ := sma(dxValues, period)
 	return adxValue, plusDI, minusDI, true
+}
+
+func directionalMovementPlus(currentHigh float64, previousHigh float64, currentLow float64, previousLow float64) float64 {
+	upMove := currentHigh - previousHigh
+	downMove := previousLow - currentLow
+	if upMove > downMove && upMove > 0 {
+		return upMove
+	}
+	return 0
+}
+
+func directionalMovementMinus(currentHigh float64, previousHigh float64, currentLow float64, previousLow float64) float64 {
+	upMove := currentHigh - previousHigh
+	downMove := previousLow - currentLow
+	if downMove > upMove && downMove > 0 {
+		return downMove
+	}
+	return 0
 }
 
 func directionalIndex(smoothedTR float64, smoothedPlusDM float64, smoothedMinusDM float64) (float64, float64, float64) {

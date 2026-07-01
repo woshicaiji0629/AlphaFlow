@@ -57,6 +57,9 @@ func TestOscillatorFeatures(t *testing.T) {
 		"cci20",
 		"williams_r14",
 		"roc12",
+		"wavetrend_wt1",
+		"wavetrend_wt2",
+		"wavetrend_delta",
 	} {
 		if values[key] == "" {
 			t.Fatalf("missing %s in %#v", key, values)
@@ -68,10 +71,31 @@ func TestOscillatorFeatures(t *testing.T) {
 		"cci_state",
 		"williams_state",
 		"roc_state",
+		"wavetrend_cross",
+		"wavetrend_zone",
+		"wavetrend_momentum",
 	} {
 		if signals[key] == "" {
 			t.Fatalf("missing %s in %#v", key, signals)
 		}
+	}
+}
+
+func TestWaveTrendOutputsSeries(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(90, 100, 0.3)
+
+	wt1, wt2, previousWT1, previousWT2, previousDelta, ok := waveTrend(highs, lows, closes, 10, 21)
+	if !ok {
+		t.Fatal("waveTrend returned false")
+	}
+	if wt1 == 0 || wt2 == 0 {
+		t.Fatalf("waveTrend wt1/wt2 = %v/%v, want non-zero", wt1, wt2)
+	}
+	if got := crossSignal(previousWT1, previousWT2, wt1, wt2); got == "" {
+		t.Fatal("missing wavetrend cross")
+	}
+	if got := waveTrendMomentum(wt1-wt2, previousDelta); got == "" {
+		t.Fatal("missing wavetrend momentum")
 	}
 }
 

@@ -2,7 +2,7 @@ package indicator
 
 import "testing"
 
-func TestATRAndADXUseWilderSmoothing(t *testing.T) {
+func TestATRAndADXUseTradingViewScriptSmoothing(t *testing.T) {
 	highs, lows, closes, _ := trendingSeries(80, 100, 1)
 
 	atrValue, ok := atr(highs, lows, closes, 14)
@@ -18,6 +18,28 @@ func TestATRAndADXUseWilderSmoothing(t *testing.T) {
 	}
 	if adxValue <= 0 || plusDI <= minusDI {
 		t.Fatalf("unexpected adx values: adx=%v plus=%v minus=%v", adxValue, plusDI, minusDI)
+	}
+}
+
+func TestDirectionalMovementMatchesTradingViewFormula(t *testing.T) {
+	plus := directionalMovementPlus(12, 10, 8, 9)
+	minus := directionalMovementMinus(12, 10, 8, 9)
+
+	if plus != 2 {
+		t.Fatalf("plus dm = %v, want 2", plus)
+	}
+	if minus != 0 {
+		t.Fatalf("minus dm = %v, want 0", minus)
+	}
+
+	plus = directionalMovementPlus(10, 12, 7, 9)
+	minus = directionalMovementMinus(10, 12, 7, 9)
+
+	if plus != 0 {
+		t.Fatalf("plus dm = %v, want 0", plus)
+	}
+	if minus != 2 {
+		t.Fatalf("minus dm = %v, want 2", minus)
 	}
 }
 

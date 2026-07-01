@@ -10,9 +10,12 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addSupertrend(values, signals, highs, lows, closes, 10, 3)
 	addAlphaTrend(values, signals, highs, lows, closes, volumes, 14, 1)
 	addPSARFeatures(values, signals, highs, lows, closes)
+	addChandelierExit(values, signals, highs, lows, closes, 22, 3)
 	addIchimokuFeatures(values, signals, highs, lows, closes)
 	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addDynamicSwingAnchoredVWAP(values, signals, highs, lows, closes, volumes)
 	addSqueezeMomentum(values, signals, highs, lows, closes)
 	addBollingerFeatures(values, signals, closes)
 	addSmartMoney(values, signals, opens, highs, lows, closes)
+	addLivermoreFeatures(values, signals, highs, lows, closes, opens)
 }

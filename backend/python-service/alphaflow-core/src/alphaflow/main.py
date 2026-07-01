@@ -20,7 +20,7 @@ def main() -> None:
             exchange=os.getenv("ALPHAFLOW_STRATEGY_EXCHANGE", "binance"),
             market=os.getenv("ALPHAFLOW_STRATEGY_MARKET", "um"),
             symbol=os.getenv("ALPHAFLOW_STRATEGY_SYMBOL", "ETHUSDT"),
-            interval=os.getenv("ALPHAFLOW_STRATEGY_KLINE_INTERVAL", "1m"),
+            interval=os.getenv("ALPHAFLOW_STRATEGY_KLINE_INTERVAL", "3m"),
         )
     ]
     runner = build_default_runner(
