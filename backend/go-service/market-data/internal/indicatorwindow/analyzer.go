@@ -50,6 +50,7 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	addMACDWindowAnalysis(ctx)
 	addMomentumWindowAnalysis(ctx)
 	addVolatilityWindowAnalysis(ctx)
+	addTradingViewWindowAnalysis(ctx)
 	addMoneyFlowWindowAnalysis(ctx)
 	addStructureWindowAnalysis(ctx)
 	addCandleWindowAnalysis(ctx)

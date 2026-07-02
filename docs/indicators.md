@@ -95,6 +95,24 @@
 | `signal:volume_state` | signal | 底层成交量状态。 |
 | `signal:price_volume_confirmation` | signal | 价量确认或背离。 |
 
+### 通道和 TradingView 窗口
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `signal:channel_window_bias` | signal | Donchian/Keltner 通道窗口偏向：`bull`、`bear`、`neutral`。 |
+| `signal:channel_breakout_quality` | signal | 通道突破质量：`strong`、`weak`、`neutral`。 |
+| `signal:channel_volatility_state` | signal | 通道宽度状态：`expanding`、`contracting`、`flat`。 |
+| `signal:channel_position_state` | signal | 价格在通道中的位置：`upper`、`middle`、`lower`。 |
+| `signal:channel_fake_risk` | signal | 通道假突破风险：`low`、`medium`、`high`。 |
+| `signal:qqe_window_bias` | signal | QQE 窗口偏向。 |
+| `signal:ut_window_direction` | signal | UT Bot 窗口方向。 |
+| `signal:ssl_window_bias` | signal | SSL Channel 窗口偏向。 |
+| `signal:range_filter_window_state` | signal | Range Filter 窗口状态：`up`、`down`、`flat`。 |
+| `signal:nw_window_bias` | signal | 非重绘 Nadaraya-Watson 窗口偏向。 |
+| `signal:tradingview_window_bias` | signal | QQE、UT、SSL、Range Filter、Nadaraya-Watson 合成偏向。 |
+| `value:tradingview_window_score` | value | 合成偏向分数，正数偏多，负数偏空。 |
+| `signal:exhaustion_risk` | signal | TD、WVF、Nadaraya-Watson 包络综合衰竭风险。 |
+
 这些语义字段不是底层事实数据的替代品。它们是当前策略消费的稳定接口，后续可以在 Go 聚合层调整口径，再让策略保持较小改动。
 
 ## 命名约定
@@ -283,6 +301,20 @@ LazyBear WaveTrend，默认参数 `10/21/4`。
 
 策略建议：WaveTrend 比 MACD 更敏感，适合 3 分钟入场前确认短线动能，但横盘中会频繁交叉。
 
+### QQE Mod
+
+QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、QQE factor `3`。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `values.qqe_line` | value | 平滑后的 RSI 动能线。 |
+| `values.qqe_signal` | value | QQE trailing level。 |
+| `values.qqe_hist` | value | `qqe_line - qqe_signal`。 |
+| `signals.qqe_trend` | signal | QQE 趋势状态：`bull`、`bear`、`neutral`。 |
+| `signals.qqe_cross` | signal | QQE 线和信号线交叉：`golden`、`dead`、`none`。 |
+
+策略建议：QQE 适合作为 Supertrend、Donchian 突破后的动能确认，不建议单独作为入场信号。
+
 ## 波动率和趋势指标
 
 ### ATR / ADX / DI
@@ -301,7 +333,51 @@ LazyBear WaveTrend，默认参数 `10/21/4`。
 
 策略建议：ADX/DI 适合过滤无趋势环境。大周期滞后时不要作为硬拦截，可以降权或只要求“不反向”。
 
-### Bollinger / Donchian / Squeeze
+### TradingView 趋势辅助
+
+以下指标均只使用已闭合 K 线，不使用重绘口径。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `values.ut_stop` | value | UT Bot ATR trailing stop，默认 ATR `10`、倍数 `1`。 |
+| `values.ut_stop_distance_pct` | value | 收盘价相对 UT stop 的距离。 |
+| `signals.ut_direction` | signal | UT Bot 方向：`up`、`down`。 |
+| `signals.ut_signal` | signal | UT Bot 翻转信号：`buy`、`sell`、`none`。 |
+| `values.ssl_upper` | value | SSL Channel 上轨，默认周期 `10`。 |
+| `values.ssl_lower` | value | SSL Channel 下轨，默认周期 `10`。 |
+| `values.ssl_width_pct` | value | SSL Channel 宽度百分比。 |
+| `signals.ssl_direction` | signal | SSL 方向：`bull`、`bear`、`neutral`。 |
+| `signals.ssl_cross` | signal | SSL 方向交叉：`golden`、`dead`、`none`。 |
+| `values.range_filter` | value | Range Filter 过滤线，默认周期 `100`、倍数 `3`。 |
+| `values.range_filter_upper` | value | Range Filter 上带。 |
+| `values.range_filter_lower` | value | Range Filter 下带。 |
+| `values.range_filter_distance_pct` | value | 收盘价相对 Range Filter 的距离。 |
+| `signals.range_filter_direction` | signal | Range Filter 方向：`up`、`down`、`flat`。 |
+
+策略建议：UT Bot 更适合做趋势止损和方向翻转提醒；SSL 和 Range Filter 更适合过滤震荡噪音。
+
+### 恐慌、衰竭和非重绘包络
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `values.wvf` | value | Williams Vix Fix，默认周期 `22`。 |
+| `values.wvf_upper_band` | value | WVF 布林上轨，默认长度 `20`、倍数 `2`。 |
+| `values.wvf_range_high` | value | WVF 回看高位阈值，默认回看 `50`、分位系数 `0.85`。 |
+| `signals.wvf_state` | signal | WVF 状态：`panic`、`normal`。 |
+| `values.td_buy_setup_count` | value | TD Sequential 买入 setup 计数。 |
+| `values.td_sell_setup_count` | value | TD Sequential 卖出 setup 计数。 |
+| `signals.td_exhaustion` | signal | TD setup 9 衰竭状态：`buy`、`sell`、`none`。 |
+| `values.nw_middle` | value | 非重绘 Nadaraya-Watson 中线，默认长度 `50`、bandwidth `8`。 |
+| `values.nw_upper` | value | 非重绘 Nadaraya-Watson 上轨。 |
+| `values.nw_lower` | value | 非重绘 Nadaraya-Watson 下轨。 |
+| `values.nw_width_pct` | value | Nadaraya-Watson 包络宽度百分比。 |
+| `values.nw_position` | value | 收盘价在 Nadaraya-Watson 包络中的位置。 |
+| `signals.nw_trend` | signal | Nadaraya-Watson 中线趋势：`up`、`down`、`flat`。 |
+| `signals.nw_position_state` | signal | 收盘价相对包络位置：`breakout_up`、`breakout_down`、`inside`。 |
+
+策略建议：WVF 用于识别恐慌砸盘，不适合直接追多；TD setup 适合提示趋势衰竭；Nadaraya-Watson 只作为平滑包络参考，避免用重绘版本做回测。
+
+### Bollinger / Donchian / Keltner / Squeeze
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -319,6 +395,16 @@ LazyBear WaveTrend，默认参数 `10/21/4`。
 | `signals.bb_trend` | signal | 布林中轨趋势。 |
 | `values.donchian_high20` | value | Donchian 20 高点。 |
 | `values.donchian_low20` | value | Donchian 20 低点。 |
+| `values.donchian_mid20` | value | Donchian 20 中轨。 |
+| `values.donchian_width_pct20` | value | Donchian 20 通道宽度百分比。 |
+| `values.donchian_position20` | value | 收盘价在 Donchian 20 通道中的位置。 |
+| `signals.donchian_breakout` | signal | Donchian 通道突破状态：`breakout_up`、`breakout_down`、`inside`。 |
+| `values.keltner_upper20` | value | Keltner 20 上轨，口径为 EMA20 + ATR20 * 2。 |
+| `values.keltner_middle20` | value | Keltner 20 中轨，口径为 EMA20。 |
+| `values.keltner_lower20` | value | Keltner 20 下轨，口径为 EMA20 - ATR20 * 2。 |
+| `values.keltner_width_pct20` | value | Keltner 20 通道宽度百分比。 |
+| `values.keltner_position20` | value | 收盘价在 Keltner 20 通道中的位置。 |
+| `signals.keltner_breakout` | signal | Keltner 通道突破状态：`breakout_up`、`breakout_down`、`inside`。 |
 | `values.squeeze_momentum` | value | LazyBear Squeeze Momentum 值。 |
 | `values.squeeze_momentum_delta` | value | Squeeze Momentum 变化。 |
 | `signals.squeeze` | signal | Squeeze 状态。 |

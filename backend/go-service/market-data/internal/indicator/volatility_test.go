@@ -216,6 +216,61 @@ func TestBollingerStateHelpers(t *testing.T) {
 	}
 }
 
+func TestChannelFeatures(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(80, 100, 0.35)
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addChannelFeatures(values, signals, highs, lows, closes)
+
+	for _, key := range []string{
+		"donchian_high20",
+		"donchian_low20",
+		"donchian_mid20",
+		"donchian_width_pct20",
+		"donchian_position20",
+		"keltner_upper20",
+		"keltner_middle20",
+		"keltner_lower20",
+		"keltner_width_pct20",
+		"keltner_position20",
+	} {
+		if values[key] == "" {
+			t.Fatalf("missing %s in %#v", key, values)
+		}
+	}
+	if signals["donchian_breakout"] == "" || signals["keltner_breakout"] == "" {
+		t.Fatalf("missing channel signals: %#v", signals)
+	}
+}
+
+func TestChannelBreakout(t *testing.T) {
+	if got := channelBreakout(11, 10, 5); got != "breakout_up" {
+		t.Fatalf("channelBreakout up = %q", got)
+	}
+	if got := channelBreakout(4, 10, 5); got != "breakout_down" {
+		t.Fatalf("channelBreakout down = %q", got)
+	}
+	if got := channelBreakout(7, 10, 5); got != "inside" {
+		t.Fatalf("channelBreakout inside = %q", got)
+	}
+}
+
+func TestDonchianBreakoutUsesPreviousChannel(t *testing.T) {
+	highs := linearValues(21, 10, 1)
+	lows := linearValues(21, 5, 1)
+	closes := linearValues(21, 7, 1)
+	closes[len(closes)-1] = highs[len(highs)-2] + 0.5
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addDonchianChannelFeatures(values, signals, highs, lows, closes, 20)
+
+	if signals["donchian_breakout"] != "breakout_up" {
+		t.Fatalf("donchian_breakout = %q, want breakout_up", signals["donchian_breakout"])
+	}
+}
+
 func TestSqueezeMomentumAtUsesRangeBaseline(t *testing.T) {
 	highs := []float64{11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
 	lows := []float64{9, 10, 11, 12, 13, 14, 15, 16, 17, 18}

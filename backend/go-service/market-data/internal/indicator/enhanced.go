@@ -16,6 +16,8 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addDynamicSwingAnchoredVWAP(values, signals, highs, lows, closes, volumes)
 	addSqueezeMomentum(values, signals, highs, lows, closes)
 	addBollingerFeatures(values, signals, closes)
+	addChannelFeatures(values, signals, highs, lows, closes)
+	addTradingViewFeatures(values, signals, highs, lows, closes)
 	addSmartMoney(values, signals, opens, highs, lows, closes)
 	addLivermoreFeatures(values, signals, highs, lows, closes, opens)
 }
