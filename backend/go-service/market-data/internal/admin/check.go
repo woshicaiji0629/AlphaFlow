@@ -3,7 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -148,50 +148,50 @@ func checkIntegrity(
 
 	summary := summarizeIntegrity(existing, start, end, intervalMillis)
 
-	log.Printf(
-		"integrity exchange=%s market=%s symbol=%s interval=%s complete=%t expected=%d actual=%d missing=%d start=%d end_exclusive=%d",
-		exchange,
-		market,
-		symbol,
-		interval,
-		len(summary.Missing) == 0,
-		summary.Expected,
-		len(existing),
-		len(summary.Missing),
-		start,
-		end,
+	slog.Info(
+		"integrity",
+		"exchange", exchange,
+		"market", market,
+		"symbol", symbol,
+		"interval", interval,
+		"complete", len(summary.Missing) == 0,
+		"expected", summary.Expected,
+		"actual", len(existing),
+		"missing", len(summary.Missing),
+		"start", start,
+		"end_exclusive", end,
 	)
 	for index, openTime := range summary.Missing {
 		if index >= maxMissingReport {
-			log.Printf(
-				"missing truncated exchange=%s market=%s symbol=%s interval=%s remaining=%d",
-				exchange,
-				market,
-				symbol,
-				interval,
-				len(summary.Missing)-maxMissingReport,
+			slog.Info(
+				"missing truncated",
+				"exchange", exchange,
+				"market", market,
+				"symbol", symbol,
+				"interval", interval,
+				"remaining", len(summary.Missing)-maxMissingReport,
 			)
 			break
 		}
-		log.Printf(
-			"missing exchange=%s market=%s symbol=%s interval=%s open_time=%s open_time_ms=%d",
-			exchange,
-			market,
-			symbol,
-			interval,
-			time.UnixMilli(openTime).In(location).Format(time.RFC3339),
-			openTime,
+		slog.Warn(
+			"missing kline",
+			"exchange", exchange,
+			"market", market,
+			"symbol", symbol,
+			"interval", interval,
+			"open_time", time.UnixMilli(openTime).In(location).Format(time.RFC3339),
+			"open_time_ms", openTime,
 		)
 	}
 	if len(summary.Missing) > 0 {
-		log.Printf(
-			"integrity incomplete exchange=%s market=%s symbol=%s interval=%s missing=%d expected=%d",
-			exchange,
-			market,
-			symbol,
-			interval,
-			len(summary.Missing),
-			summary.Expected,
+		slog.Warn(
+			"integrity incomplete",
+			"exchange", exchange,
+			"market", market,
+			"symbol", symbol,
+			"interval", interval,
+			"missing", len(summary.Missing),
+			"expected", summary.Expected,
 		)
 		if failOnMissing {
 			return fmt.Errorf("%s %s %s integrity check failed: missing %d of %d klines", exchange, symbol, interval, len(summary.Missing), summary.Expected)

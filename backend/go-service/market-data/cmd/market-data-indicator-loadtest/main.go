@@ -4,9 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
-	"log"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +13,7 @@ import (
 
 	"alphaflow/go-service/market-data/internal/indicator"
 	"alphaflow/go-service/market-data/internal/model"
+	"alphaflow/go-service/pkg/logger"
 )
 
 type loadStore struct {
@@ -96,7 +96,7 @@ func (s *loadStore) SetIndicatorRealtime(
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	setupLogger()
 
 	symbolCount := flag.Int("symbols", 500, "number of symbols per exchange")
 	lookback := flag.Int("lookback", 200, "closed klines per symbol/interval")
@@ -105,13 +105,13 @@ func main() {
 	flag.Parse()
 
 	if *symbolCount <= 0 {
-		log.Fatal("symbols must be positive")
+		exitWithError("symbols must be positive")
 	}
 	if *lookback <= 0 {
-		log.Fatal("lookback must be positive")
+		exitWithError("lookback must be positive")
 	}
 	if *runs <= 0 {
-		log.Fatal("runs must be positive")
+		exitWithError("runs must be positive")
 	}
 
 	klines := makeKlines(*lookback)
@@ -132,7 +132,7 @@ func main() {
 	startedAt := time.Now()
 	for run := 0; run < *runs; run++ {
 		if err := runner.RunOnce(context.Background()); err != nil {
-			log.Fatalf("RunOnce %d: %v", run+1, err)
+			exitWithError("RunOnce failed", "run", run+1, "error", err)
 		}
 	}
 	elapsed := time.Since(startedAt)
@@ -150,6 +150,23 @@ func main() {
 		store.rangeReads.Load(),
 		store.redisWrites.Load(),
 	)
+}
+
+func setupLogger() {
+	if err := logger.Setup(logger.Config{
+		Service: "market-data-indicator-loadtest",
+		Level:   "error",
+		Format:  "text",
+		Output:  "stderr",
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "setup logger: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func exitWithError(message string, attrs ...any) {
+	slog.Error(message, attrs...)
+	os.Exit(1)
 }
 
 func indicatorKey(exchange string, market string, symbol string, interval string) string {

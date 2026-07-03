@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/httpclient"
+	"alphaflow/go-service/pkg/logger"
 )
 
 type rankedSymbol struct {
@@ -26,6 +27,8 @@ type exchangeSymbols struct {
 }
 
 func main() {
+	setupLogger()
+
 	limit := flag.Int("limit", 500, "symbols per exchange")
 	output := flag.String("output", "configs/live-top500.toml", "output config path")
 	timeout := flag.Duration("timeout", 30*time.Second, "fetch timeout")
@@ -36,7 +39,7 @@ func main() {
 	flag.Parse()
 
 	if *limit <= 0 {
-		log.Fatal("limit must be positive")
+		exitWithError("limit must be positive")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -47,36 +50,53 @@ func main() {
 
 	binanceSymbols, err := fetchBinance(ctx, client, *binanceBase, *limit)
 	if err != nil {
-		log.Fatalf("fetch binance symbols: %v", err)
+		exitWithError("fetch binance symbols failed", "error", err)
 	}
 	results = append(results, exchangeSymbols{Name: "binance", Symbols: binanceSymbols})
 
 	gateSymbols, err := fetchGate(ctx, client, *gateBase, *limit)
 	if err != nil {
-		log.Fatalf("fetch gate symbols: %v", err)
+		exitWithError("fetch gate symbols failed", "error", err)
 	}
 	results = append(results, exchangeSymbols{Name: "gate", Symbols: gateSymbols})
 
 	bitgetSymbols, err := fetchBitget(ctx, client, *bitgetBase, *limit)
 	if err != nil {
-		log.Fatalf("fetch bitget symbols: %v", err)
+		exitWithError("fetch bitget symbols failed", "error", err)
 	}
 	results = append(results, exchangeSymbols{Name: "bitget", Symbols: bitgetSymbols})
 
 	bybitSymbols, err := fetchBybit(ctx, client, *bybitBase, *limit)
 	if err != nil {
-		log.Fatalf("fetch bybit symbols: %v", err)
+		exitWithError("fetch bybit symbols failed", "error", err)
 	}
 	results = append(results, exchangeSymbols{Name: "bybit", Symbols: bybitSymbols})
 
 	if err := os.WriteFile(*output, []byte(renderConfig(results)), 0o644); err != nil {
-		log.Fatalf("write %s: %v", *output, err)
+		exitWithError("write config failed", "path", *output, "error", err)
 	}
 
 	for _, result := range results {
 		fmt.Printf("%s symbols=%d first=%s\n", result.Name, len(result.Symbols), firstSymbol(result.Symbols))
 	}
 	fmt.Printf("wrote %s\n", *output)
+}
+
+func setupLogger() {
+	if err := logger.Setup(logger.Config{
+		Service: "market-data-symbols",
+		Level:   "info",
+		Format:  "text",
+		Output:  "stderr",
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "setup logger: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func exitWithError(message string, attrs ...any) {
+	slog.Error(message, attrs...)
+	os.Exit(1)
 }
 
 func fetchBinance(ctx context.Context, client *httpclient.Client, baseURL string, limit int) ([]string, error) {

@@ -3,7 +3,7 @@ package admin
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -352,20 +352,20 @@ func backfillRESTInterval(
 		return fmt.Errorf("write %s %s %s klines: %w", client.Exchange(), opts.symbol, interval, err)
 	}
 
-	log.Printf(
-		"backfilled exchange=%s market=%s symbol=%s interval=%s mode=%s initial_existing=%d fetch_jobs=%d fetched=%d skipped_existing=%d written=%d start=%d end_exclusive=%d",
-		client.Exchange(),
-		client.Market(),
-		opts.symbol,
-		interval,
-		opts.mode,
-		initialExisting,
-		len(jobs),
-		totalFetched,
-		totalSkippedExisting,
-		written,
-		start,
-		end,
+	slog.Info(
+		"backfilled klines",
+		"exchange", client.Exchange(),
+		"market", client.Market(),
+		"symbol", opts.symbol,
+		"interval", interval,
+		"mode", opts.mode,
+		"initial_existing", initialExisting,
+		"fetch_jobs", len(jobs),
+		"fetched", totalFetched,
+		"skipped_existing", totalSkippedExisting,
+		"written", written,
+		"start", start,
+		"end_exclusive", end,
 	)
 
 	return checkIntegrity(ctx, adminStore, client.Exchange(), client.Market(), opts.symbol, interval, start, end, intervalMillis, opts.timezone, opts.maxMissingReport, true)
@@ -462,21 +462,21 @@ func backfillDerivedInterval(
 		totalWritten += written
 	}
 
-	log.Printf(
-		"derived backfilled exchange=%s market=%s symbol=%s source_interval=%s target_interval=%s mode=%s initial_existing=%d source=%d skipped_existing=%d skipped_missing_source=%d written=%d start=%d end_exclusive=%d",
-		rule.Exchange,
-		rule.Market,
-		opts.symbol,
-		rule.SourceInterval,
-		rule.TargetInterval,
-		opts.mode,
-		initialExisting,
-		len(sourceKlines),
-		totalSkippedExisting,
-		totalSkippedMissingSource,
-		totalWritten,
-		start,
-		end,
+	slog.Info(
+		"derived backfilled klines",
+		"exchange", rule.Exchange,
+		"market", rule.Market,
+		"symbol", opts.symbol,
+		"source_interval", rule.SourceInterval,
+		"target_interval", rule.TargetInterval,
+		"mode", opts.mode,
+		"initial_existing", initialExisting,
+		"source", len(sourceKlines),
+		"skipped_existing", totalSkippedExisting,
+		"skipped_missing_source", totalSkippedMissingSource,
+		"written", totalWritten,
+		"start", start,
+		"end_exclusive", end,
 	)
 	return checkIntegrity(ctx, adminStore, rule.Exchange, rule.Market, opts.symbol, rule.TargetInterval, start, end, targetMillis, opts.timezone, opts.maxMissingReport, true)
 }
@@ -633,14 +633,14 @@ func fetchKlinesWithRetry(
 			return klines, nil
 		}
 		lastErr = err
-		log.Printf(
-			"fetch retry exchange=%s symbol=%s interval=%s start=%d attempt=%d error=%v",
-			client.Exchange(),
-			symbol,
-			interval,
-			startTime,
-			attempt+1,
-			err,
+		slog.Warn(
+			"fetch retry",
+			"exchange", client.Exchange(),
+			"symbol", symbol,
+			"interval", interval,
+			"start", startTime,
+			"attempt", attempt+1,
+			"error", err,
 		)
 	}
 	return nil, lastErr
@@ -760,7 +760,12 @@ func writeKlinesWithRetry(
 		}
 		if err := store.WriteKlines(ctx, klines); err != nil {
 			lastErr = err
-			log.Printf("write retry batch_size=%d attempt=%d error=%v", len(klines), attempt+1, err)
+			slog.Warn(
+				"write retry",
+				"batch_size", len(klines),
+				"attempt", attempt+1,
+				"error", err,
+			)
 			continue
 		}
 		return nil

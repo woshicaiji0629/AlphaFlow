@@ -2,7 +2,7 @@ package admin
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -69,28 +69,28 @@ func runDelete(ctx context.Context, configPath string, opts deleteOptions) error
 	if err != nil {
 		return err
 	}
-	log.Printf(
-		"delete dry_run=%t exchange=%s market=%s symbol=%s interval=%s start=%d end_exclusive=%d",
-		!opts.confirm,
-		opts.exchange,
-		opts.market,
-		opts.symbol,
-		opts.interval,
-		start,
-		end,
+	slog.Info(
+		"delete range",
+		"dry_run", !opts.confirm,
+		"exchange", opts.exchange,
+		"market", opts.market,
+		"symbol", opts.symbol,
+		"interval", opts.interval,
+		"start", start,
+		"end_exclusive", end,
 	)
 	for _, count := range counts {
-		log.Printf("delete target table=%s rows=%d", count.Table, count.Rows)
+		slog.Info("delete target", "table", count.Table, "rows", count.Rows)
 	}
 	if !opts.confirm {
-		log.Printf("delete skipped: pass --confirm to submit ClickHouse mutations")
+		slog.Info("delete skipped", "reason", "pass --confirm to submit ClickHouse mutations")
 		return nil
 	}
 	if err := store.DeleteRange(ctx, opts.exchange, opts.market, opts.symbol, opts.interval, start, end); err != nil {
 		return err
 	}
 	for _, count := range counts {
-		log.Printf("delete submitted table=%s estimated_rows=%d", count.Table, count.Rows)
+		slog.Info("delete submitted", "table", count.Table, "estimated_rows", count.Rows)
 	}
 	return nil
 }

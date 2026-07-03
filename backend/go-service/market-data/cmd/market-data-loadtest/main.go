@@ -4,15 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
-	"log"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/collector"
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
+	"alphaflow/go-service/pkg/logger"
 )
 
 type fakeREST struct {
@@ -116,7 +116,7 @@ func (s *loadStore) write() {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	setupLogger()
 
 	symbolCount := flag.Int("symbols", 50, "number of symbols to simulate")
 	duration := flag.Duration("duration", 30*time.Second, "load test duration")
@@ -125,13 +125,13 @@ func main() {
 	flag.Parse()
 
 	if *symbolCount <= 0 {
-		log.Fatal("symbols must be positive")
+		exitWithError("symbols must be positive")
 	}
 	if *duration <= 0 {
-		log.Fatal("duration must be positive")
+		exitWithError("duration must be positive")
 	}
 	if *rate <= 0 {
-		log.Fatal("rate must be positive")
+		exitWithError("rate must be positive")
 	}
 
 	symbols := makeSymbols(*symbolCount)
@@ -160,7 +160,7 @@ func main() {
 	cancel()
 	err := <-errCh
 	if err != nil && err != context.Canceled {
-		log.Fatalf("collector stopped: %v", err)
+		exitWithError("collector stopped", "error", err)
 	}
 
 	elapsed := time.Since(startedAt)
@@ -176,6 +176,23 @@ func main() {
 		stats.FlushedLatestEvents,
 	)
 	fmt.Printf("queue_len=%d queue_cap=%d queue_peak=%d\n", stats.QueueLen, stats.QueueCap, stats.QueuePeak)
+}
+
+func setupLogger() {
+	if err := logger.Setup(logger.Config{
+		Service: "market-data-loadtest",
+		Level:   "error",
+		Format:  "text",
+		Output:  "stderr",
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "setup logger: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func exitWithError(message string, attrs ...any) {
+	slog.Error(message, attrs...)
+	os.Exit(1)
 }
 
 func runLoad(
