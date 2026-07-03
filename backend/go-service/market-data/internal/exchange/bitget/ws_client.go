@@ -9,6 +9,7 @@ import (
 
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
+	exchangebitget "alphaflow/go-service/pkg/exchangeclient/bitget"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -83,7 +84,7 @@ func (c *WSClient) Run(
 		case exchange.StreamTypeKline:
 			args = appendChannel(args, seen, channel{
 				InstType: c.productType,
-				Channel:  "candle" + bitgetInterval(stream.Interval),
+				Channel:  "candle" + exchangebitget.Interval(stream.Interval),
 				InstID:   stream.Symbol,
 			})
 		case exchange.StreamTypeAggTrade:
@@ -164,9 +165,8 @@ func (c *WSClient) dispatchKlines(ctx context.Context, msg message, handler exch
 		return fmt.Errorf("decode kline data: %w", err)
 	}
 
-	restClient := RESTClient{productType: c.productType}
 	for _, item := range data {
-		kline, err := restClient.klineFromRaw(msg.Arg.InstID, interval, item)
+		kline, err := exchangebitget.KlineFromRaw(c.productType, msg.Arg.InstID, interval, item)
 		if err != nil {
 			return err
 		}

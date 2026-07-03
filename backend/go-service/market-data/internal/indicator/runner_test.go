@@ -2,13 +2,14 @@ package indicator
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"alphaflow/go-service/market-data/internal/indicatorwindow"
 	"alphaflow/go-service/market-data/internal/model"
+	"alphaflow/go-service/pkg/indicatorwindow"
 )
 
 type fakeStore struct {
@@ -610,4 +611,26 @@ func makeTestSymbols(count int) []string {
 		symbols = append(symbols, "TEST"+format(float64(index))+"USDT")
 	}
 	return symbols
+}
+
+func testKline(index int64, price float64, closed bool) model.Kline {
+	return model.Kline{
+		Exchange:    "binance",
+		Market:      "um",
+		Symbol:      "ETHUSDT",
+		Interval:    "1m",
+		OpenTime:    index * 1000,
+		CloseTime:   index*1000 + 999,
+		Open:        format(price),
+		High:        format(price + 2),
+		Low:         format(price - 2),
+		Close:       format(price + 1),
+		Volume:      format(10 + float64(index%5)),
+		QuoteVolume: format((10 + float64(index%5)) * price),
+		IsClosed:    closed,
+	}
+}
+
+func format(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }

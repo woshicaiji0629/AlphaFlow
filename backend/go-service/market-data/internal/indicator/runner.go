@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"alphaflow/go-service/market-data/internal/indicatorwindow"
 	"alphaflow/go-service/market-data/internal/model"
+	"alphaflow/go-service/pkg/indicatorcalc"
+	"alphaflow/go-service/pkg/indicatorwindow"
 )
 
 const indicatorWorkerCount = 8
@@ -59,14 +60,14 @@ type RunnerOptions struct {
 	Rules            []Rule
 	ScanInterval     time.Duration
 	LookbackPeriods  int64
-	CalculateOptions Options
+	CalculateOptions indicatorcalc.Options
 }
 
 type Runner struct {
 	store                   Store
 	options                 RunnerOptions
 	mu                      sync.Mutex
-	windows                 map[string]*CalculationWindow
+	windows                 map[string]*indicatorcalc.CalculationWindow
 	lastCalculatedOpenTimes map[string]int64
 	now                     func() time.Time
 }
@@ -87,12 +88,12 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 	if len(options.CalculateOptions.SMAPeriods) == 0 &&
 		len(options.CalculateOptions.EMAPeriods) == 0 &&
 		len(options.CalculateOptions.WMAPeriods) == 0 {
-		options.CalculateOptions = DefaultOptions()
+		options.CalculateOptions = indicatorcalc.DefaultOptions()
 	}
 	return &Runner{
 		store:                   store,
 		options:                 options,
-		windows:                 map[string]*CalculationWindow{},
+		windows:                 map[string]*indicatorcalc.CalculationWindow{},
 		lastCalculatedOpenTimes: map[string]int64{},
 		now:                     time.Now,
 	}
@@ -217,7 +218,7 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 	if !kline.IsClosed {
 		calcWindow = windowWithTemporaryKline(window, kline, int(r.options.LookbackPeriods))
 	}
-	result, err := CalculateWindow(calcWindow, r.options.CalculateOptions)
+	result, err := indicatorcalc.CalculateWindow(calcWindow, r.options.CalculateOptions)
 	if err != nil {
 		return err
 	}
@@ -316,7 +317,7 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err != nil {
 		return err
 	}
-	result, err := CalculateWindow(window, r.options.CalculateOptions)
+	result, err := indicatorcalc.CalculateWindow(window, r.options.CalculateOptions)
 	if err != nil {
 		return err
 	}
@@ -358,7 +359,7 @@ func (r *Runner) indicatorWindowSnapshot(
 	rule Rule,
 	symbol string,
 	interval string,
-	window *CalculationWindow,
+	window *indicatorcalc.CalculationWindow,
 	updatedAt int64,
 ) (model.IndicatorWindowSnapshot, error) {
 	snapshots, err := r.indicatorSnapshotsForWindow(window)
@@ -384,7 +385,7 @@ func (r *Runner) indicatorWindowSnapshot(
 }
 
 func (r *Runner) indicatorSnapshotsForWindow(
-	window *CalculationWindow,
+	window *indicatorcalc.CalculationWindow,
 ) ([]model.IndicatorSnapshot, error) {
 	if window == nil {
 		return nil, fmt.Errorf("nil calculation window")
@@ -400,7 +401,7 @@ func (r *Runner) indicatorSnapshotsForWindow(
 	start := len(closed) - lookback
 	snapshots := make([]model.IndicatorSnapshot, 0, lookback)
 	for index := start; index < len(closed); index++ {
-		result, err := Calculate(closed[:index+1], r.options.CalculateOptions)
+		result, err := indicatorcalc.Calculate(closed[:index+1], r.options.CalculateOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -440,7 +441,7 @@ func (r *Runner) windowForKline(
 	rule Rule,
 	kline model.Kline,
 	intervalMillis int64,
-) (*CalculationWindow, error) {
+) (*indicatorcalc.CalculationWindow, error) {
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
 	r.mu.Lock()
 	cached := r.windows[key]
@@ -477,7 +478,7 @@ func (r *Runner) updateWindow(
 	interval string,
 	intervalMillis int64,
 	lastOpenTime int64,
-) (*CalculationWindow, error) {
+) (*indicatorcalc.CalculationWindow, error) {
 	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
 	r.mu.Lock()
 	cached := r.windows[key]
@@ -550,7 +551,7 @@ func (r *Runner) updateWindow(
 	if err != nil {
 		return nil, err
 	}
-	window := NewCalculationWindowFromKlines(klines, int(r.options.LookbackPeriods))
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, int(r.options.LookbackPeriods))
 	return r.rememberWindow(key, window), nil
 }
 
@@ -579,7 +580,7 @@ func normalizeIncrementalKlines(klines []model.Kline, afterOpenTime int64) []mod
 	return normalized
 }
 
-func (r *Runner) rememberWindow(key string, window *CalculationWindow) *CalculationWindow {
+func (r *Runner) rememberWindow(key string, window *indicatorcalc.CalculationWindow) *indicatorcalc.CalculationWindow {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -624,7 +625,7 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-func windowWithTemporaryKline(window *CalculationWindow, kline model.Kline, limit int) *CalculationWindow {
+func windowWithTemporaryKline(window *indicatorcalc.CalculationWindow, kline model.Kline, limit int) *indicatorcalc.CalculationWindow {
 	klines := append([]model.Kline(nil), window.Klines()...)
 	temporary := kline
 	temporary.IsClosed = true
@@ -633,7 +634,7 @@ func windowWithTemporaryKline(window *CalculationWindow, kline model.Kline, limi
 	} else {
 		klines = append(klines, temporary)
 	}
-	return NewCalculationWindowFromKlines(klines, limit)
+	return indicatorcalc.NewCalculationWindowFromKlines(klines, limit)
 }
 
 func isContiguous(previous model.Kline, next model.Kline, intervalMillis int64) bool {
