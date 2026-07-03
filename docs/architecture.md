@@ -9,6 +9,7 @@ AlphaFlow 当前处于行情数据基础设施和策略框架原型阶段。
 已实现：
 
 - Go `market-data` 服务，用于交易所行情采集。
+- Go 公共包层，用于承载可被实时服务、历史回填和未来回测复用的模型、交易所 REST 客户端、ClickHouse 历史读写、指标计算和窗口分析。
 - Redis 缓存和服务交接层。
 - ClickHouse 历史存储，用于已闭合 K 线和指标快照。
 - 派生 K 线聚合，用于补齐交易所未直接提供的周期，例如 `10m`。
@@ -40,7 +41,7 @@ AlphaFlow/
       alphaflow-core/               # 当前 Python 策略框架，使用 uv 管理
     go-service/                     # Go 服务，位于同一个 Go module 下
       market-data/                  # 当前活跃的行情数据服务
-      pkg/                          # 共享 logger、Redis、HTTP、常量包
+      pkg/                          # 共享 logger、Redis、HTTP、常量、市场模型、交易所客户端、ClickHouse 历史和纯计算包
   docs/                             # 项目架构和服务说明
 ```
 
@@ -66,7 +67,8 @@ Go 适合承担：
 - 低延迟 IO。
 - 行情数据采集。
 - K 线聚合和派生行情数据。
-- 指标计算和指标窗口聚合。
+- 指标计算和指标窗口聚合。纯计算能力位于 `backend/go-service/pkg/indicatorcalc` 和 `backend/go-service/pkg/indicatorwindow`，不依赖 `market-data` 的存储、runner 或 Redis/ClickHouse。
+- 可复用的历史数据基础能力位于 `backend/go-service/pkg/exchangeclient` 和 `backend/go-service/pkg/clickhousemarket`，用于后续历史回填和回测服务。
 - 面向实时策略的低延迟特征发布。
 - 未来执行服务、实时风控和流式网关服务。
 
@@ -84,10 +86,22 @@ Go `market-data` 服务当前包含以下内部职责：
 
 - `collector`：交易所 REST 初始化、WebSocket 同步、重连循环、轮询数据同步。
 - `aggregator`：为交易所未直接提供的周期生成派生 K 线。
-- `indicator`：基于已闭合 K 线计算技术指标。
-- `indicatorwindow`：基于最近指标序列生成窗口特征和策略语义字段。
+- `indicator`：实时指标 runner，负责从存储读取 K 线、调用公共计算包并写入结果。
+- `pkg/indicatorcalc`：基于已闭合 K 线计算技术指标的纯计算包。
+- `pkg/indicatorwindow`：基于最近指标序列生成窗口特征和策略语义字段的纯计算包。
+- `pkg/exchangeclient`：交易所 REST K 线请求客户端，可被实时采集和历史回填复用。
+- `pkg/clickhousemarket`：ClickHouse K 线和指标历史读写。
+- `pkg/marketmodel`：跨实时服务、历史回填和回测服务复用的 K 线、指标快照和持仓量模型。
 - `store`：Redis 实时读写边界、ClickHouse 已闭合 K 线和指标历史写入、基于 Redis 的 ClickHouse 重试队列。
 - `exchange`：支持交易所的 REST/WebSocket 适配器。
+
+当前 `market-data/internal` 只保留服务级编排和适配边界：
+
+- `internal/exchange/*/rest_client.go` 对 `pkg/exchangeclient/*` 做兼容封装，WebSocket 适配仍留在 `market-data` 内部。
+- `internal/store/clickhouse_store.go` 委托 `pkg/clickhousemarket`，保留原有构造函数形态。
+- `internal/model` 通过 type alias 复用 `pkg/marketmodel`，并保留 Redis key、交易所缩写和服务内辅助函数。
+
+这样可以避免未来历史回填、回测或分析服务导入 `market-data/internal`，同时保持当前实时服务的目录边界稳定。
 
 详细服务行为见 [market-data.md](market-data.md)。
 
