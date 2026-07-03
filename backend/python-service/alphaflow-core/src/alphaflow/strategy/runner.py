@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Protocol
 
-from alphaflow.market_data.clickhouse_reader import AsyncClickHouseIndicatorReader
 from alphaflow.market_data.reader import AsyncMarketDataReader, MarketDataNotReadyError
 from alphaflow.strategy.engine import StrategyEngine
 from alphaflow.strategy.models import (
@@ -315,25 +314,10 @@ class StrategyRunner:
 def build_default_runner(
     redis_url: str,
     postgres_dsn: str = "",
-    clickhouse_url: str = "",
-    clickhouse_username: str = "alphaflow",
-    clickhouse_password: str = "alphaflow",
 ) -> StrategyRunner:
     history_store = PostgresPositionHistoryStore(postgres_dsn) if postgres_dsn else None
-    indicator_history_reader = (
-        AsyncClickHouseIndicatorReader(
-            clickhouse_url,
-            username=clickhouse_username,
-            password=clickhouse_password,
-        )
-        if clickhouse_url
-        else None
-    )
     return StrategyRunner(
-        AsyncMarketDataReader.from_url(
-            redis_url,
-            indicator_history_reader=indicator_history_reader,
-        ),
+        AsyncMarketDataReader.from_url(redis_url),
         position_store=RedisPositionStore.from_url(redis_url),
         history_store=history_store,
     )

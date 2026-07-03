@@ -11,7 +11,7 @@ AlphaFlow 当前处于行情数据基础设施和策略框架原型阶段。
 - Go `market-data` 服务，用于交易所行情采集。
 - Go 公共包层，用于承载可被实时服务、历史回填和未来回测复用的模型、交易所 REST 客户端、ClickHouse 历史读写、指标计算和窗口分析。
 - Redis 缓存和服务交接层。
-- ClickHouse 历史存储，用于已闭合 K 线和指标快照。
+- ClickHouse 历史存储，用于已闭合 K 线。
 - 派生 K 线聚合，用于补齐交易所未直接提供的周期，例如 `10m`。
 - 基于已闭合 K 线的技术指标计算。
 - 基于底层指标序列的 Go 指标窗口聚合。
@@ -90,9 +90,9 @@ Go `market-data` 服务当前包含以下内部职责：
 - `pkg/indicatorcalc`：基于已闭合 K 线计算技术指标的纯计算包。
 - `pkg/indicatorwindow`：基于最近指标序列生成窗口特征和策略语义字段的纯计算包。
 - `pkg/exchangeclient`：交易所 REST K 线请求客户端，可被实时采集和历史回填复用。
-- `pkg/clickhousemarket`：ClickHouse K 线和指标历史读写。
+- `pkg/clickhousemarket`：ClickHouse K 线历史读写。
 - `pkg/marketmodel`：跨实时服务、历史回填和回测服务复用的 K 线、指标快照和持仓量模型。
-- `store`：Redis 实时读写边界、ClickHouse 已闭合 K 线和指标历史写入、基于 Redis 的 ClickHouse 重试队列。
+- `store`：Redis 实时读写边界、ClickHouse 已闭合 K 线写入、基于 Redis 的 ClickHouse 重试队列。
 - `exchange`：支持交易所的 REST/WebSocket 适配器。
 
 当前 `market-data/internal` 只保留服务级编排和适配边界：
@@ -123,7 +123,7 @@ Redis 当前 K 线实时特征 indrt
 
 ```text
 Redis 最新指标、健康状态、最近 K 线
-ClickHouse 最近指标快照
+Redis 最近 K 线
   -> Python 本地窗口分析
   -> StrategyEngine
   -> Redis 活跃仓位状态
@@ -177,16 +177,15 @@ Redis 当前用于：
 - 当前 K 线实时指标特征存储。
 - 活跃策略仓位存储。
 
-Redis 不是最终的长期历史行情存储。ClickHouse 负责存储已闭合 K 线和底层指标历史，供分析类消费者使用。窗口特征属于可重算的二级数据，实时策略只需要读取最新一份。
+Redis 不是最终的长期历史行情存储。ClickHouse 负责存储已闭合 K 线，供分析类消费者、回测和指标重算使用。指标和窗口特征都属于可重算的二级数据，实时策略只需要读取 Redis 中的最新缓存。
 
 ## ClickHouse 职责
 
 ClickHouse 当前用于：
 
 - 已闭合 K 线历史。
-- 指标快照历史。
 - 未来研究、回测、报表和 API 工作流的分析读取。
-- 窗口聚合口径调整后的重新计算和问题追溯。
+- 指标和窗口聚合口径调整后的重新计算和问题追溯。
 
 ClickHouse 写入失败会通过 Redis pending 和 processing 队列补偿，因此临时 ClickHouse 故障不会直接破坏实时 Redis 路径。
 
@@ -243,17 +242,17 @@ backend/python-service/
 ## 当前决策
 
 - `market-data` 将实时行情模型写入 Redis。
-- `market-data` 在启用 ClickHouse 时写入已闭合 K 线和指标快照。
+- `market-data` 在启用 ClickHouse 时只写入已闭合 K 线。
 - `market-data` 在 Go 内部基于底层指标序列生成窗口特征。
 - 实时策略消费者优先从 Redis 读取 `indwin` 和 `indrt` 特征 hash。
 - Python 侧不再要求每次策略评估都读取几十到几百根历史指标。
-- 历史研究、回测、API 消费者应从 ClickHouse 读取历史数据。
+- 历史研究、回测、API 消费者应从 ClickHouse 读取 K 线历史，并按需计算指标。
 - 活跃策略仓位存储在 Redis。
 - 已平仓策略仓位存储在 PostgreSQL。
 - 派生 `10m` K 线在 Go 内部由更小周期生成。
 - 指标计算只使用已闭合 K 线。
 - 指标计算会跳过同一个已闭合 K 线的重复工作，并输出基础数据质量字段。
-- 最新底层指标快照以 Redis string JSON 保存，并在 ClickHouse 中保留历史。
+- 最新底层指标快照以 Redis string JSON 保存；指标历史不再写入 ClickHouse。
 - 指标窗口特征和当前实时指标特征以 Redis hash 保存，并携带时间版本信息。
 - Python 策略决策使用特征 freshness 判断数据是否还可用。
 

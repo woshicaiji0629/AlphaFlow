@@ -46,7 +46,7 @@ func HealthGapLookback() int64 {
 }
 
 func IndicatorLookbackPeriods() int64 {
-	return 200
+	return KlineLimit()
 }
 
 func ClickHouseDialTimeout(cfg Config) (time.Duration, error) {

@@ -14,6 +14,7 @@ help:
 	@echo "  make py-test          Run pytest"
 	@echo "  make py-check         Run Python lint, format check, typecheck, and tests"
 	@echo "  make go-market-data-run"
+	@echo "  make go-market-data-admin"
 	@echo "  make go-market-data-test"
 	@echo "  make go-market-data-tidy"
 	@echo "  make go-market-data-check"
@@ -69,6 +70,10 @@ py-check: py-lint py-format-check py-typecheck py-test
 .PHONY: go-market-data-run
 go-market-data-run:
 	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data -config market-data/configs/local.toml
+
+.PHONY: go-market-data-admin
+go-market-data-admin:
+	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data-admin --config market-data/configs/local.toml $(ARGS)
 
 .PHONY: go-market-data-test
 go-market-data-test:

@@ -15,14 +15,13 @@ from alphaflow.market_data import (
     mark_price_key,
 )
 from alphaflow.market_data.reader import AsyncMarketDataReader, MarketDataNotReadyError
-from alphaflow.strategy import IndicatorSnapshot
 
 
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, bytes | str] = {}
         self.zsets: dict[str, list[bytes | str]] = {}
-        self.hashes: dict[str, dict[str, bytes | str]] = {}
+        self.hashes: dict[str, dict[bytes | str, bytes | str]] = {}
         self.closed = False
 
     async def get(self, name: str) -> bytes | str | None:
@@ -41,20 +40,6 @@ class FakeRedis:
 
     async def aclose(self) -> None:
         self.closed = True
-
-
-class FakeIndicatorHistoryReader:
-    def __init__(self, history: tuple[IndicatorSnapshot, ...]) -> None:
-        self.history = history
-
-    async def read_indicator_history(
-        self,
-        exchange: str,
-        market: str,
-        symbol: str,
-        interval: str,
-    ) -> tuple[IndicatorSnapshot, ...]:
-        return self.history
 
 
 def test_reader_decodes_market_snapshot() -> None:
@@ -120,18 +105,7 @@ async def run_reader_decodes_market_snapshot() -> None:
         "2000": json.dumps(kline_payload(2000, "101")),
     }
 
-    history_reader = FakeIndicatorHistoryReader(
-        (
-            indicator_snapshot(500, {"rsi_14": "40", "macd_hist": "-0.2"}),
-            indicator_snapshot(800, {"rsi_14": "45", "macd_hist": "-0.1"}),
-        )
-    )
-
-    snapshot = await AsyncMarketDataReader(
-        redis,
-        kline_limit=2,
-        indicator_history_reader=history_reader,
-    ).read_snapshot(*target)
+    snapshot = await AsyncMarketDataReader(redis, kline_limit=2).read_snapshot(*target)
 
     assert snapshot.indicator.values["rsi_14"] == "32"
     assert snapshot.health.is_ok()
@@ -142,9 +116,11 @@ async def run_reader_decodes_market_snapshot() -> None:
     assert snapshot.mark_price.mark_price == "101.4"
     assert snapshot.window is not None
     assert snapshot.window.sample_count == 2
-    assert [item.open_time for item in snapshot.indicator_history] == [500, 800, 1000]
+    assert [item.open_time for item in snapshot.indicator_history] == [1000]
     assert snapshot.indicator_window is not None
-    assert snapshot.indicator_window.values["macd_hist"].direction == "rising"
+    assert snapshot.indicator_window.sample_count == 1
+    assert "macd_hist" not in snapshot.indicator_window.values
+    assert snapshot.indicator_window.signals["data_quality"].latest == "ok"
 
 
 def test_reader_reports_missing_indicator() -> None:
@@ -286,17 +262,3 @@ def kline_payload(open_time: int, close: str) -> dict[str, object]:
         "volume": "10",
         "is_closed": True,
     }
-
-
-def indicator_snapshot(open_time: int, values: dict[str, str]) -> IndicatorSnapshot:
-    return IndicatorSnapshot(
-        exchange="binance",
-        market="um",
-        symbol="ETHUSDT",
-        interval="1m",
-        open_time=open_time,
-        close_time=open_time + 59999,
-        values=values,
-        signals={"data_quality": "ok"},
-        updated_at=open_time + 60000,
-    )

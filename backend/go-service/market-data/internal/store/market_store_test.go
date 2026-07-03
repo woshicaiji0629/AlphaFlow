@@ -9,10 +9,8 @@ import (
 )
 
 type fakeClickHouseWriter struct {
-	klines            []model.Kline
-	indicators        []model.IndicatorSnapshot
-	writeKlinesErr    error
-	writeIndicatorErr error
+	klines         []model.Kline
+	writeKlinesErr error
 }
 
 func (w *fakeClickHouseWriter) WriteKline(ctx context.Context, kline model.Kline) error {
@@ -24,24 +22,6 @@ func (w *fakeClickHouseWriter) WriteKlines(_ context.Context, klines []model.Kli
 		return w.writeKlinesErr
 	}
 	w.klines = append(w.klines, klines...)
-	return nil
-}
-
-func (w *fakeClickHouseWriter) WriteIndicator(
-	ctx context.Context,
-	snapshot model.IndicatorSnapshot,
-) error {
-	return w.WriteIndicators(ctx, []model.IndicatorSnapshot{snapshot})
-}
-
-func (w *fakeClickHouseWriter) WriteIndicators(
-	_ context.Context,
-	snapshots []model.IndicatorSnapshot,
-) error {
-	if w.writeIndicatorErr != nil {
-		return w.writeIndicatorErr
-	}
-	w.indicators = append(w.indicators, snapshots...)
 	return nil
 }
 
@@ -249,23 +229,12 @@ func TestMarketStoreBuffersClickHouseWrites(t *testing.T) {
 		OpenTime: 1000,
 		IsClosed: true,
 	})
-	s.enqueueClickHouseIndicator(model.IndicatorSnapshot{
-		Exchange: "binance",
-		Market:   "um",
-		Symbol:   "ETHUSDT",
-		Interval: "1m",
-		OpenTime: 1000,
-		Values:   map[string]string{"rsi": "50"},
-	})
 
 	batch := s.drainClickHouse(10)
 	if len(batch.klines) != 1 {
 		t.Fatalf("klines = %d, want 1", len(batch.klines))
 	}
-	if len(batch.indicators) != 1 {
-		t.Fatalf("indicators = %d, want 1", len(batch.indicators))
-	}
-	if batch := s.drainClickHouse(10); len(batch.klines) != 0 || len(batch.indicators) != 0 {
+	if batch := s.drainClickHouse(10); len(batch.klines) != 0 {
 		t.Fatalf("drainClickHouse after drain = %#v, want empty", batch)
 	}
 }
@@ -277,19 +246,12 @@ func TestMarketStoreFlushesClickHouseBatch(t *testing.T) {
 
 	s.enqueueClickHouseKline(model.Kline{Symbol: "ETHUSDT", IsClosed: true})
 	s.enqueueClickHouseKline(model.Kline{Symbol: "BTCUSDT", IsClosed: true})
-	s.enqueueClickHouseIndicator(model.IndicatorSnapshot{
-		Symbol: "ETHUSDT",
-		Values: map[string]string{"rsi": "50"},
-	})
 
 	if err := s.flushAllClickHouse(context.Background()); err != nil {
 		t.Fatalf("flushAllClickHouse: %v", err)
 	}
 	if len(writer.klines) != 2 {
 		t.Fatalf("written klines = %d, want 2", len(writer.klines))
-	}
-	if len(writer.indicators) != 1 {
-		t.Fatalf("written indicators = %d, want 1", len(writer.indicators))
 	}
 }
 

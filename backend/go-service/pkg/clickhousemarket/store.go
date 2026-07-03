@@ -3,7 +3,6 @@ package clickhousemarket
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -120,55 +119,6 @@ func (s *Store) WriteKlines(ctx context.Context, klines []marketmodel.Kline) err
 	return nil
 }
 
-func (s *Store) WriteIndicator(ctx context.Context, snapshot marketmodel.IndicatorSnapshot) error {
-	return s.WriteIndicators(ctx, []marketmodel.IndicatorSnapshot{snapshot})
-}
-
-func (s *Store) WriteIndicators(ctx context.Context, snapshots []marketmodel.IndicatorSnapshot) error {
-	if s == nil {
-		return nil
-	}
-	if len(snapshots) == 0 {
-		return nil
-	}
-
-	rows := make([]string, 0, len(snapshots))
-	args := make([]any, 0, len(snapshots)*9)
-	for _, snapshot := range snapshots {
-		valuesJSON, err := json.Marshal(snapshot.Values)
-		if err != nil {
-			return fmt.Errorf("marshal indicator values: %w", err)
-		}
-		signalsJSON, err := json.Marshal(snapshot.Signals)
-		if err != nil {
-			return fmt.Errorf("marshal indicator signals: %w", err)
-		}
-		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		args = append(args,
-			snapshot.Exchange,
-			snapshot.Market,
-			snapshot.Symbol,
-			snapshot.Interval,
-			snapshot.OpenTime,
-			snapshot.CloseTime,
-			string(valuesJSON),
-			string(signalsJSON),
-			snapshot.UpdatedAt,
-		)
-	}
-
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO indicator_snapshots (
-			exchange, market, symbol, interval,
-			open_time_ms, close_time_ms,
-			values_json, signals_json, updated_at_ms
-		) VALUES `+strings.Join(rows, ", "), args...)
-	if err != nil {
-		return fmt.Errorf("insert clickhouse indicator: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) RangeKlines(
 	ctx context.Context,
 	exchange string,
@@ -238,69 +188,6 @@ func (s *Store) RangeKlines(
 	return klines, nil
 }
 
-func (s *Store) RangeIndicators(
-	ctx context.Context,
-	exchange string,
-	market string,
-	symbol string,
-	interval string,
-	start int64,
-	end int64,
-) ([]marketmodel.IndicatorSnapshot, error) {
-	if s == nil {
-		return nil, nil
-	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT
-			exchange, market, symbol, interval,
-			open_time_ms, close_time_ms,
-			values_json, signals_json, updated_at_ms
-		FROM indicator_snapshots FINAL
-		WHERE exchange = ?
-			AND market = ?
-			AND symbol = ?
-			AND interval = ?
-			AND open_time_ms >= ?
-			AND open_time_ms <= ?
-		ORDER BY open_time_ms ASC
-	`, exchange, market, symbol, interval, start, end)
-	if err != nil {
-		return nil, fmt.Errorf("query clickhouse indicators: %w", err)
-	}
-	defer rows.Close()
-
-	snapshots := []marketmodel.IndicatorSnapshot{}
-	for rows.Next() {
-		var snapshot marketmodel.IndicatorSnapshot
-		var valuesJSON string
-		var signalsJSON string
-		if err := rows.Scan(
-			&snapshot.Exchange,
-			&snapshot.Market,
-			&snapshot.Symbol,
-			&snapshot.Interval,
-			&snapshot.OpenTime,
-			&snapshot.CloseTime,
-			&valuesJSON,
-			&signalsJSON,
-			&snapshot.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan clickhouse indicator: %w", err)
-		}
-		if err := json.Unmarshal([]byte(valuesJSON), &snapshot.Values); err != nil {
-			return nil, fmt.Errorf("decode indicator values: %w", err)
-		}
-		if err := json.Unmarshal([]byte(signalsJSON), &snapshot.Signals); err != nil {
-			return nil, fmt.Errorf("decode indicator signals: %w", err)
-		}
-		snapshots = append(snapshots, snapshot)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate clickhouse indicators: %w", err)
-	}
-	return snapshots, nil
-}
-
 func (s *Store) initSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS market_klines (
@@ -332,24 +219,6 @@ func (s *Store) initSchema(ctx context.Context) error {
 		return fmt.Errorf("create market_klines table: %w", err)
 	}
 
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS indicator_snapshots (
-			exchange LowCardinality(String),
-			market LowCardinality(String),
-			symbol LowCardinality(String),
-			interval LowCardinality(String),
-			open_time_ms Int64,
-			close_time_ms Int64,
-			values_json String,
-			signals_json String,
-			updated_at_ms Int64
-		)
-		ENGINE = ReplacingMergeTree(updated_at_ms)
-		PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(open_time_ms))
-		ORDER BY (exchange, market, symbol, interval, open_time_ms)
-	`); err != nil {
-		return fmt.Errorf("create indicator_snapshots table: %w", err)
-	}
 	return nil
 }
 

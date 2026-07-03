@@ -9,7 +9,6 @@ import (
 func TestSplitClaimedRecordsGroupsByKind(t *testing.T) {
 	claims := []claimedPendingRecord{
 		{payload: "kline-1", record: pendingClickHouseRecord{Kind: pendingKindKline}},
-		{payload: "indicator-1", record: pendingClickHouseRecord{Kind: pendingKindIndicator}},
 		{payload: "kline-2", record: pendingClickHouseRecord{Kind: pendingKindKline}},
 	}
 
@@ -20,14 +19,20 @@ func TestSplitClaimedRecordsGroupsByKind(t *testing.T) {
 	if len(batch.klineClaims) != 2 {
 		t.Fatalf("kline claims = %d, want 2", len(batch.klineClaims))
 	}
-	if len(batch.indicatorClaims) != 1 {
-		t.Fatalf("indicator claims = %d, want 1", len(batch.indicatorClaims))
-	}
 	if batch.klineClaims[0].payload != "kline-1" || batch.klineClaims[1].payload != "kline-2" {
 		t.Fatalf("kline claim order = %#v, want kline payload order preserved", batch.klineClaims)
 	}
-	if batch.indicatorClaims[0].payload != "indicator-1" {
-		t.Fatalf("indicator payload = %q, want indicator-1", batch.indicatorClaims[0].payload)
+}
+
+func TestSplitClaimedRecordsSkipsLegacyIndicatorKind(t *testing.T) {
+	batch, err := splitClaimedRecords([]claimedPendingRecord{
+		{payload: "indicator-1", record: pendingClickHouseRecord{Kind: "indicator"}},
+	})
+	if err != nil {
+		t.Fatalf("splitClaimedRecords: %v", err)
+	}
+	if len(batch.klineClaims) != 0 {
+		t.Fatalf("kline claims = %d, want 0", len(batch.klineClaims))
 	}
 }
 

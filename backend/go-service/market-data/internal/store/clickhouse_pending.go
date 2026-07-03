@@ -16,7 +16,6 @@ const (
 	clickHousePendingKey    = "market-data:clickhouse:pending"
 	clickHouseProcessingKey = "market-data:clickhouse:processing"
 	pendingKindKline        = "kline"
-	pendingKindIndicator    = "indicator"
 	pendingFlushDebounce    = 50 * time.Millisecond
 )
 
@@ -48,8 +47,7 @@ type claimedPendingRecord struct {
 }
 
 type pendingRecordBatch struct {
-	klineClaims     []claimedPendingRecord
-	indicatorClaims []claimedPendingRecord
+	klineClaims []claimedPendingRecord
 }
 
 func NewClickHousePendingWriter(
@@ -94,42 +92,6 @@ func (w *ClickHousePendingWriter) EnqueueKlines(ctx context.Context, klines []mo
 		records = append(records, pendingClickHouseRecord{
 			Kind:      pendingKindKline,
 			Kline:     kline,
-			Attempts:  1,
-			LastError: errorString(writeErr),
-			UpdatedAt: updatedAt,
-		})
-	}
-	return w.enqueueMany(ctx, records)
-}
-
-func (w *ClickHousePendingWriter) EnqueueIndicator(
-	ctx context.Context,
-	snapshot model.IndicatorSnapshot,
-	writeErr error,
-) error {
-	return w.enqueueMany(ctx, []pendingClickHouseRecord{{
-		Kind:      pendingKindIndicator,
-		Indicator: snapshot,
-		Attempts:  1,
-		LastError: errorString(writeErr),
-		UpdatedAt: time.Now().UnixMilli(),
-	}})
-}
-
-func (w *ClickHousePendingWriter) EnqueueIndicators(
-	ctx context.Context,
-	snapshots []model.IndicatorSnapshot,
-	writeErr error,
-) error {
-	if len(snapshots) == 0 {
-		return nil
-	}
-	updatedAt := time.Now().UnixMilli()
-	records := make([]pendingClickHouseRecord, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		records = append(records, pendingClickHouseRecord{
-			Kind:      pendingKindIndicator,
-			Indicator: snapshot,
 			Attempts:  1,
 			LastError: errorString(writeErr),
 			UpdatedAt: updatedAt,
@@ -303,8 +265,6 @@ func (w *ClickHousePendingWriter) writeRecord(ctx context.Context, record pendin
 	switch record.Kind {
 	case pendingKindKline:
 		return w.clickhouse.WriteKline(ctx, record.Kline)
-	case pendingKindIndicator:
-		return w.clickhouse.WriteIndicator(ctx, record.Indicator)
 	default:
 		return fmt.Errorf("unsupported clickhouse pending kind %q", record.Kind)
 	}
@@ -330,26 +290,19 @@ func (w *ClickHousePendingWriter) writeClaimedRecords(
 		}
 		flushed += len(batch.klineClaims)
 	}
-	if len(batch.indicatorClaims) > 0 {
-		if err := w.writeIndicatorClaims(ctx, batch.indicatorClaims); err != nil {
-			return flushed, err
-		}
-		flushed += len(batch.indicatorClaims)
-	}
 	return flushed, nil
 }
 
 func splitClaimedRecords(claims []claimedPendingRecord) (pendingRecordBatch, error) {
 	batch := pendingRecordBatch{
-		klineClaims:     make([]claimedPendingRecord, 0, len(claims)),
-		indicatorClaims: make([]claimedPendingRecord, 0, len(claims)),
+		klineClaims: make([]claimedPendingRecord, 0, len(claims)),
 	}
 	for _, claim := range claims {
 		switch claim.record.Kind {
 		case pendingKindKline:
 			batch.klineClaims = append(batch.klineClaims, claim)
-		case pendingKindIndicator:
-			batch.indicatorClaims = append(batch.indicatorClaims, claim)
+		case "indicator":
+			slog.Info("drop legacy clickhouse indicator pending record")
 		default:
 			return pendingRecordBatch{}, fmt.Errorf("unsupported clickhouse pending kind %q", claim.record.Kind)
 		}
@@ -365,22 +318,6 @@ func (w *ClickHousePendingWriter) writeKlineClaims(ctx context.Context, claims [
 		payloads = append(payloads, claim.payload)
 	}
 	if err := w.clickhouse.WriteKlines(ctx, klines); err != nil {
-		if requeueErr := w.requeueClaims(ctx, claims, err); requeueErr != nil {
-			return requeueErr
-		}
-		return err
-	}
-	return w.removeProcessingBatch(ctx, payloads)
-}
-
-func (w *ClickHousePendingWriter) writeIndicatorClaims(ctx context.Context, claims []claimedPendingRecord) error {
-	indicators := make([]model.IndicatorSnapshot, 0, len(claims))
-	payloads := make([]string, 0, len(claims))
-	for _, claim := range claims {
-		indicators = append(indicators, claim.record.Indicator)
-		payloads = append(payloads, claim.payload)
-	}
-	if err := w.clickhouse.WriteIndicators(ctx, indicators); err != nil {
 		if requeueErr := w.requeueClaims(ctx, claims, err); requeueErr != nil {
 			return requeueErr
 		}
@@ -454,7 +391,7 @@ func decodePendingRecord(payload string) (pendingClickHouseRecord, error) {
 	if record.Kind == "" {
 		return pendingClickHouseRecord{}, fmt.Errorf("pending record kind cannot be empty")
 	}
-	if record.Kind != pendingKindKline && record.Kind != pendingKindIndicator {
+	if record.Kind != pendingKindKline && record.Kind != "indicator" {
 		return pendingClickHouseRecord{}, fmt.Errorf("unsupported clickhouse pending kind %q", record.Kind)
 	}
 	return record, nil

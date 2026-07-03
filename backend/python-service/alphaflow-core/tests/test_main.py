@@ -26,14 +26,11 @@ def test_main_builds_default_runner(monkeypatch) -> None:  # type: ignore[no-unt
     monkeypatch.setattr(
         main_module,
         "build_default_runner",
-        lambda redis_url, postgres_dsn, clickhouse_url, clickhouse_username, clickhouse_password: (
+        lambda redis_url, postgres_dsn: (
             captured.update(
                 {
                     "redis_url": redis_url,
                     "postgres_dsn": postgres_dsn,
-                    "clickhouse_url": clickhouse_url,
-                    "clickhouse_username": clickhouse_username,
-                    "clickhouse_password": clickhouse_password,
                 }
             )
             or fake
@@ -44,7 +41,6 @@ def test_main_builds_default_runner(monkeypatch) -> None:  # type: ignore[no-unt
 
     assert fake.interval_seconds == 10
     assert captured["postgres_dsn"] == ""
-    assert captured["clickhouse_url"] == ""
     assert fake.targets == [
         StrategyTarget(exchange="binance", market="um", symbol="ETHUSDT", interval="3m")
     ]

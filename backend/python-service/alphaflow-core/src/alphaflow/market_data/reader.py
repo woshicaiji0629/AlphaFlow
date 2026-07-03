@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import Any, Callable, Protocol, cast
+from typing import Any, Protocol, cast
 
 from redis.asyncio import Redis
 
@@ -46,16 +46,6 @@ class RedisClient(Protocol):
     async def aclose(self) -> None: ...
 
 
-class IndicatorHistoryReader(Protocol):
-    async def read_indicator_history(
-        self,
-        exchange: str,
-        market: str,
-        symbol: str,
-        interval: str,
-    ) -> tuple[IndicatorSnapshot, ...]: ...
-
-
 class MarketDataNotReadyError(RuntimeError):
     pass
 
@@ -65,12 +55,10 @@ class AsyncMarketDataReader:
         self,
         redis: RedisClient,
         kline_limit: int = 200,
-        indicator_history_reader: IndicatorHistoryReader | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         self._redis = redis
         self._kline_limit = kline_limit
-        self._indicator_history_reader = indicator_history_reader
         self._now_ms = now_ms or current_time_millis
 
     @classmethod
@@ -78,13 +66,11 @@ class AsyncMarketDataReader:
         cls,
         url: str,
         kline_limit: int = 200,
-        indicator_history_reader: IndicatorHistoryReader | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> AsyncMarketDataReader:
         return cls(
             cast(RedisClient, Redis.from_url(url)),
             kline_limit=kline_limit,
-            indicator_history_reader=indicator_history_reader,
             now_ms=now_ms,
         )
 
@@ -124,10 +110,7 @@ class AsyncMarketDataReader:
         last_price_payload = await self._redis.get(last_price_key(exchange, market, symbol))
         mark_price_payload = await self._redis.get(mark_price_key(exchange, market, symbol))
         indicator = decode_indicator(indicator_payload)
-        indicator_history = merge_indicator_history(
-            await self.read_indicator_history(exchange, market, symbol, interval),
-            indicator,
-        )
+        indicator_history = (indicator,)
         return MarketSnapshot(
             indicator=indicator,
             health=decode_health(health_payload),
@@ -199,22 +182,6 @@ class AsyncMarketDataReader:
             freshness=freshness,
         )
 
-    async def read_indicator_history(
-        self,
-        exchange: str,
-        market: str,
-        symbol: str,
-        interval: str,
-    ) -> tuple[IndicatorSnapshot, ...]:
-        if self._indicator_history_reader is None:
-            return ()
-        return await self._indicator_history_reader.read_indicator_history(
-            exchange,
-            market,
-            symbol,
-            interval,
-        )
-
     async def read_many(
         self,
         targets: Sequence[tuple[str, str, str, str]],
@@ -260,16 +227,6 @@ def decode_indicator(payload: bytes | str) -> IndicatorSnapshot:
         signals={str(key): str(value) for key, value in data.get("signals", {}).items()},
         updated_at=int(data.get("updated_at", 0)),
     )
-
-
-def merge_indicator_history(
-    history: tuple[IndicatorSnapshot, ...],
-    current: IndicatorSnapshot,
-) -> tuple[IndicatorSnapshot, ...]:
-    without_current = tuple(
-        snapshot for snapshot in history if snapshot.open_time != current.open_time
-    )
-    return tuple(sorted((*without_current, current), key=lambda snapshot: snapshot.open_time))
 
 
 def decode_health(payload: bytes | str) -> DataHealth:
@@ -535,6 +492,13 @@ def int_string(value: str) -> int:
 
 def float_field(fields: dict[str, str], key: str) -> float:
     return optional_float(fields.get(key, "")) or 0.0
+
+
+def optional_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def bool_field(value: str) -> bool:

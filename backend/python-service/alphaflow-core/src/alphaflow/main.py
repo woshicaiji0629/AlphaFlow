@@ -11,9 +11,6 @@ def main() -> None:
     setup_logging(LoggingConfig())
     redis_url = os.getenv("ALPHAFLOW_REDIS_URL", "redis://localhost:6380/0")
     postgres_dsn = os.getenv("ALPHAFLOW_POSTGRES_DSN", "")
-    clickhouse_url = os.getenv("ALPHAFLOW_CLICKHOUSE_HTTP_URL", "")
-    clickhouse_username = os.getenv("ALPHAFLOW_CLICKHOUSE_USERNAME", "alphaflow")
-    clickhouse_password = os.getenv("ALPHAFLOW_CLICKHOUSE_PASSWORD", "alphaflow")
     interval_seconds = float(os.getenv("ALPHAFLOW_STRATEGY_INTERVAL_SECONDS", "10"))
     targets = [
         StrategyTarget(
@@ -23,13 +20,7 @@ def main() -> None:
             interval=os.getenv("ALPHAFLOW_STRATEGY_KLINE_INTERVAL", "3m"),
         )
     ]
-    runner = build_default_runner(
-        redis_url,
-        postgres_dsn,
-        clickhouse_url,
-        clickhouse_username,
-        clickhouse_password,
-    )
+    runner = build_default_runner(redis_url, postgres_dsn)
     asyncio.run(runner.run_forever(targets, interval_seconds))
 
 

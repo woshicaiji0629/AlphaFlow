@@ -35,7 +35,6 @@ from alphaflow.strategy.position_store import (
     RedisPositionStore,
     position_key,
 )
-from alphaflow.strategy.runner import StrategyRunner
 from alphaflow.strategy.strategies import SupertrendStrategy, SupertrendStrategyConfig
 
 __all__ = [
@@ -66,7 +65,6 @@ __all__ = [
     "StrategyContext",
     "StrategyEngine",
     "StrategyResult",
-    "StrategyRunner",
     "StrategyTarget",
     "SupertrendStrategy",
     "SupertrendStrategyConfig",

@@ -22,8 +22,6 @@ const (
 type clickHouseWriter interface {
 	WriteKline(ctx context.Context, kline model.Kline) error
 	WriteKlines(ctx context.Context, klines []model.Kline) error
-	WriteIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
-	WriteIndicators(ctx context.Context, snapshots []model.IndicatorSnapshot) error
 	Close() error
 }
 
@@ -49,7 +47,6 @@ type MarketStore struct {
 
 	clickHouseMu         sync.Mutex
 	pendingKlines        []model.Kline
-	pendingIndicators    []model.IndicatorSnapshot
 	clickHouseFlushReady chan struct{}
 }
 
@@ -241,14 +238,7 @@ func (s *MarketStore) IsMarketAvailable(ctx context.Context, exchange string, ma
 }
 
 func (s *MarketStore) SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
-	if err := s.redis.SetIndicatorWithOpenTime(ctx, snapshot); err != nil {
-		return err
-	}
-	if s.clickhouse == nil {
-		return nil
-	}
-	s.enqueueClickHouseIndicator(snapshot)
-	return nil
+	return s.redis.SetIndicatorWithOpenTime(ctx, snapshot)
 }
 
 func (s *MarketStore) SetLatestIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
@@ -358,8 +348,7 @@ type latestBatch struct {
 }
 
 type clickHouseBatch struct {
-	klines     []model.Kline
-	indicators []model.IndicatorSnapshot
+	klines []model.Kline
 }
 
 func (s *MarketStore) runLatestFlush(ctx context.Context) error {
@@ -587,17 +576,7 @@ func (s *MarketStore) rememberMarketStatus(status model.MarketStatus) {
 func (s *MarketStore) enqueueClickHouseKline(kline model.Kline) {
 	s.clickHouseMu.Lock()
 	s.pendingKlines = append(s.pendingKlines, kline)
-	ready := len(s.pendingKlines)+len(s.pendingIndicators) >= clickHouseFlushBatch
-	s.clickHouseMu.Unlock()
-	if ready {
-		s.signalClickHouseFlush()
-	}
-}
-
-func (s *MarketStore) enqueueClickHouseIndicator(snapshot model.IndicatorSnapshot) {
-	s.clickHouseMu.Lock()
-	s.pendingIndicators = append(s.pendingIndicators, snapshot)
-	ready := len(s.pendingKlines)+len(s.pendingIndicators) >= clickHouseFlushBatch
+	ready := len(s.pendingKlines) >= clickHouseFlushBatch
 	s.clickHouseMu.Unlock()
 	if ready {
 		s.signalClickHouseFlush()
@@ -639,7 +618,7 @@ func (s *MarketStore) runClickHouseFlush(ctx context.Context) error {
 func (s *MarketStore) flushAllClickHouse(ctx context.Context) error {
 	for {
 		batch := s.drainClickHouse(clickHouseFlushBatch)
-		if len(batch.klines) == 0 && len(batch.indicators) == 0 {
+		if len(batch.klines) == 0 {
 			return nil
 		}
 		if err := s.writeClickHouseBatch(ctx, batch); err != nil {
@@ -661,18 +640,6 @@ func (s *MarketStore) writeClickHouseBatch(ctx context.Context, batch clickHouse
 			)
 		}
 	}
-	if len(batch.indicators) > 0 {
-		if err := s.clickhouse.WriteIndicators(ctx, batch.indicators); err != nil {
-			if enqueueErr := s.enqueuePendingIndicators(ctx, batch.indicators, err); enqueueErr != nil {
-				s.requeueClickHouse(batch)
-				return enqueueErr
-			}
-			slog.Error("write indicator batch to clickhouse failed, enqueue retry",
-				"count", len(batch.indicators),
-				"error", err,
-			)
-		}
-	}
 	return nil
 }
 
@@ -682,20 +649,6 @@ func (s *MarketStore) enqueuePendingKlines(ctx context.Context, klines []model.K
 	}
 	if err := s.pending.EnqueueKlines(ctx, klines, writeErr); err != nil {
 		return fmt.Errorf("enqueue clickhouse kline retry after batch write failure %w: %v", err, writeErr)
-	}
-	return nil
-}
-
-func (s *MarketStore) enqueuePendingIndicators(
-	ctx context.Context,
-	indicators []model.IndicatorSnapshot,
-	writeErr error,
-) error {
-	if s.pending == nil {
-		return writeErr
-	}
-	if err := s.pending.EnqueueIndicators(ctx, indicators, writeErr); err != nil {
-		return fmt.Errorf("enqueue clickhouse indicator retry after batch write failure %w: %v", err, writeErr)
 	}
 	return nil
 }
@@ -714,11 +667,6 @@ func (s *MarketStore) drainClickHouse(limit int) clickHouseBatch {
 		s.pendingKlines = append(s.pendingKlines[:0], s.pendingKlines[count:]...)
 		limit -= count
 	}
-	if limit > 0 && len(s.pendingIndicators) > 0 {
-		count := min(len(s.pendingIndicators), limit)
-		batch.indicators = append(batch.indicators, s.pendingIndicators[:count]...)
-		s.pendingIndicators = append(s.pendingIndicators[:0], s.pendingIndicators[count:]...)
-	}
 	return batch
 }
 
@@ -726,9 +674,6 @@ func (s *MarketStore) requeueClickHouse(batch clickHouseBatch) {
 	s.clickHouseMu.Lock()
 	defer s.clickHouseMu.Unlock()
 
-	if len(batch.indicators) > 0 {
-		s.pendingIndicators = append(batch.indicators, s.pendingIndicators...)
-	}
 	if len(batch.klines) > 0 {
 		s.pendingKlines = append(batch.klines, s.pendingKlines...)
 	}

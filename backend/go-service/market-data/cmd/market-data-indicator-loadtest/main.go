@@ -17,15 +17,13 @@ import (
 )
 
 type loadStore struct {
-	mu                sync.Mutex
-	klines            []model.Kline
-	lastOpenTime      int64
-	redisLatency      time.Duration
-	clickHouseLatency time.Duration
-	rangeReads        atomic.Uint64
-	redisWrites       atomic.Uint64
-	clickHouseWrites  atomic.Uint64
-	lastIndicators    map[string]int64
+	mu             sync.Mutex
+	klines         []model.Kline
+	lastOpenTime   int64
+	redisLatency   time.Duration
+	rangeReads     atomic.Uint64
+	redisWrites    atomic.Uint64
+	lastIndicators map[string]int64
 }
 
 func (s *loadStore) LastOpenTime(context.Context, string, string, string, string) (int64, bool, error) {
@@ -53,10 +51,6 @@ func (s *loadStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 		time.Sleep(s.redisLatency)
 	}
 	s.redisWrites.Add(1)
-	if s.clickHouseLatency > 0 {
-		time.Sleep(s.clickHouseLatency)
-	}
-	s.clickHouseWrites.Add(1)
 	s.mu.Lock()
 	s.lastIndicators[indicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)] = snapshot.OpenTime
 	s.mu.Unlock()
@@ -108,7 +102,6 @@ func main() {
 	lookback := flag.Int("lookback", 200, "closed klines per symbol/interval")
 	runs := flag.Int("runs", 1, "number of RunOnce executions")
 	redisLatency := flag.Duration("redis-latency", 0, "simulated Redis indicator write latency")
-	clickHouseLatency := flag.Duration("clickhouse-latency", 0, "simulated ClickHouse indicator write latency")
 	flag.Parse()
 
 	if *symbolCount <= 0 {
@@ -123,11 +116,10 @@ func main() {
 
 	klines := makeKlines(*lookback)
 	store := &loadStore{
-		klines:            klines,
-		lastOpenTime:      klines[len(klines)-1].OpenTime,
-		redisLatency:      *redisLatency,
-		clickHouseLatency: *clickHouseLatency,
-		lastIndicators:    map[string]int64{},
+		klines:         klines,
+		lastOpenTime:   klines[len(klines)-1].OpenTime,
+		redisLatency:   *redisLatency,
+		lastIndicators: map[string]int64{},
 	}
 	rules := makeRules(*symbolCount)
 	tasks := countTasks(rules)
@@ -145,20 +137,18 @@ func main() {
 	}
 	elapsed := time.Since(startedAt)
 
-	fmt.Printf("exchanges=%d symbols_per_exchange=%d tasks=%d lookback=%d runs=%d redis_latency=%s clickhouse_latency=%s\n",
+	fmt.Printf("exchanges=%d symbols_per_exchange=%d tasks=%d lookback=%d runs=%d redis_latency=%s\n",
 		len(rules),
 		*symbolCount,
 		tasks,
 		*lookback,
 		*runs,
 		*redisLatency,
-		*clickHouseLatency,
 	)
 	fmt.Printf("elapsed=%s throughput=%.2f tasks/s\n", elapsed, float64(tasks*(*runs))/elapsed.Seconds())
-	fmt.Printf("range_reads=%d redis_writes=%d clickhouse_writes=%d\n",
+	fmt.Printf("range_reads=%d redis_writes=%d\n",
 		store.rangeReads.Load(),
 		store.redisWrites.Load(),
-		store.clickHouseWrites.Load(),
 	)
 }
 
