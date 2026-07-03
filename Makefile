@@ -1,5 +1,6 @@
 PY_SERVICE_DIR := backend/python-service/alphaflow-core
 GO_SERVICE_DIR := backend/go-service
+GO_SERVICE_BIN_DIR := $(GO_SERVICE_DIR)/bin
 export GO111MODULE := on
 
 .PHONY: help
@@ -15,6 +16,8 @@ help:
 	@echo "  make py-check         Run Python lint, format check, typecheck, and tests"
 	@echo "  make go-market-data-run"
 	@echo "  make go-market-data-admin"
+	@echo "  make go-market-data-build"
+	@echo "  make go-market-data-clean"
 	@echo "  make go-market-data-test"
 	@echo "  make go-market-data-tidy"
 	@echo "  make go-market-data-check"
@@ -74,6 +77,19 @@ go-market-data-run:
 .PHONY: go-market-data-admin
 go-market-data-admin:
 	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data-admin --config market-data/configs/local.toml $(ARGS)
+
+.PHONY: go-market-data-build
+go-market-data-build:
+	mkdir -p $(GO_SERVICE_BIN_DIR)
+	cd $(GO_SERVICE_DIR) && go build -o bin/market-data ./market-data/cmd/market-data
+	cd $(GO_SERVICE_DIR) && go build -o bin/market-data-admin ./market-data/cmd/market-data-admin
+	cd $(GO_SERVICE_DIR) && go build -o bin/market-data-symbols ./market-data/cmd/market-data-symbols
+	cd $(GO_SERVICE_DIR) && go build -o bin/market-data-loadtest ./market-data/cmd/market-data-loadtest
+	cd $(GO_SERVICE_DIR) && go build -o bin/market-data-indicator-loadtest ./market-data/cmd/market-data-indicator-loadtest
+
+.PHONY: go-market-data-clean
+go-market-data-clean:
+	rm -rf $(GO_SERVICE_BIN_DIR)
 
 .PHONY: go-market-data-test
 go-market-data-test:

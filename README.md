@@ -190,6 +190,24 @@ make go-market-data-admin ARGS='stats --exchange binance --market um --symbol ET
 
 `market-data-admin` 是一次性 CLI，不作为服务常驻。它只维护 ClickHouse 里的已闭合 K 线历史，指标不再写入 ClickHouse，也不由该工具维护。时间参数使用 `YYYYMMDDHHmm`，范围语义统一为左闭右开：`start <= open_time < end`。
 
+需要稳定执行或定时任务时，先编译本地二进制：
+
+```sh
+make go-market-data-build
+```
+
+Go 二进制统一输出到 `backend/go-service/bin/`，例如：
+
+```sh
+backend/go-service/bin/market-data-admin --config backend/go-service/market-data/configs/local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
+```
+
+清理本地编译产物：
+
+```sh
+make go-market-data-clean
+```
+
 常用命令：
 
 - `inventory`：查看库里有什么数据，以及逻辑行、物理行、重复行和首尾 open time。

@@ -413,6 +413,34 @@ make clickhouse-up
 make go-market-data-admin ARGS='stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000'
 ```
 
+开发期可以使用 `make go-market-data-admin` 直接 `go run`。需要稳定执行、手动复用或放进定时任务时，先编译本地二进制：
+
+```sh
+make go-market-data-build
+```
+
+Go 二进制统一输出到 `backend/go-service/bin/`：
+
+```text
+backend/go-service/bin/market-data
+backend/go-service/bin/market-data-admin
+backend/go-service/bin/market-data-symbols
+backend/go-service/bin/market-data-loadtest
+backend/go-service/bin/market-data-indicator-loadtest
+```
+
+编译后可以直接执行：
+
+```sh
+backend/go-service/bin/market-data-admin --config backend/go-service/market-data/configs/local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
+```
+
+清理本地编译产物：
+
+```sh
+make go-market-data-clean
+```
+
 所有时间参数使用分钟精度：
 
 ```text
