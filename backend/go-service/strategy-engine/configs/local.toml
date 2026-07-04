@@ -1,0 +1,54 @@
+[runtime]
+scan_interval = "5s"
+
+[redis]
+addr = "localhost:6380"
+password = ""
+db = 0
+pool_size = 20
+min_idle_conns = 5
+
+[position]
+scope = "paper"
+account = "default"
+run_id = ""
+backtest_ttl = "24h"
+
+[sizing]
+margin_quote = 100
+leverage = 100
+max_position_size = 1
+min_open_confidence = 0.65
+disable_short_exposure = false
+
+[fee]
+fee_rate = 0.0006
+rebate_pct = 0
+
+[clickhouse]
+enabled = true
+addr = "localhost:9000"
+database = "alphaflow"
+username = "alphaflow"
+password = "alphaflow"
+dial_timeout = "5s"
+read_timeout = "30s"
+
+[[targets]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "3m"
+confirm_intervals = ["5m", "10m", "15m", "30m"]
+
+[logging]
+service = "strategy-engine"
+level = "info"
+format = "json"
+output = "file"
+dir = "../../logs/go-service"
+filename = "strategy-engine.log"
+max_size_mb = 100
+max_backups = 10
+max_age_days = 30
+compress = true

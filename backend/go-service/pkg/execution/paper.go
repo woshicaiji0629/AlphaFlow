@@ -30,7 +30,8 @@ func (b *PaperBroker) Execute(ctx context.Context, intent OrderIntent) (Executio
 	if intent.Quantity <= 0 {
 		return rejectedReport(intent, b.now(), "quantity must be positive"), nil
 	}
-	if b.price == "" {
+	price := b.fillPrice(intent)
+	if price == "" {
 		return rejectedReport(intent, b.now(), "fill price is required"), nil
 	}
 	return ExecutionReport{
@@ -38,9 +39,16 @@ func (b *PaperBroker) Execute(ctx context.Context, intent OrderIntent) (Executio
 		ExchangeOrderID: fmt.Sprintf("paper:%s", intent.IntentID),
 		Status:          ExecutionStatusFilled,
 		FilledQuantity:  intent.Quantity,
-		AveragePrice:    b.price,
+		AveragePrice:    price,
 		UpdatedAt:       b.now(),
 	}, nil
+}
+
+func (b *PaperBroker) fillPrice(intent OrderIntent) string {
+	if b.price != "" {
+		return b.price
+	}
+	return intent.ReferencePrice
 }
 
 func rejectedReport(intent OrderIntent, updatedAt int64, reason string) ExecutionReport {

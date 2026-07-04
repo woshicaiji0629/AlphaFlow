@@ -16,6 +16,24 @@ type fixedStrategy struct {
 	seenPosition *strategy.Position
 }
 
+type captureBroker struct {
+	intent execution.OrderIntent
+}
+
+func (b *captureBroker) Execute(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, error) {
+	if err := ctx.Err(); err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	b.intent = intent
+	return execution.ExecutionReport{
+		IntentID:       intent.IntentID,
+		Status:         execution.ExecutionStatusFilled,
+		FilledQuantity: intent.Quantity,
+		AveragePrice:   intent.ReferencePrice,
+		UpdatedAt:      2000,
+	}, nil
+}
+
 func (s *fixedStrategy) Name() string {
 	return s.name
 }
@@ -123,6 +141,58 @@ func TestRunnerHandleExecutesPaperIntentAndAppendsEvents(t *testing.T) {
 	}
 	if currentPosition.EntryPrice != "101" {
 		t.Fatalf("entry price = %q, want 101", currentPosition.EntryPrice)
+	}
+}
+
+func TestRunnerHandlePassesReferencePriceToBroker(t *testing.T) {
+	target := strategy.Target{
+		Scope:    strategy.PositionScopePaper,
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "3m",
+	}
+	item := &fixedStrategy{
+		name: "supertrend",
+		result: strategy.Result{
+			StrategyName: "supertrend",
+			Signal: strategy.Signal{
+				Strategy:   "supertrend",
+				Side:       strategy.SignalSideBuy,
+				Confidence: 0.9,
+				Reason:     "trend up",
+				OpenTime:   1000,
+			},
+		},
+	}
+	broker := &captureBroker{}
+	store := position.NewMemoryStore()
+	runner, err := New(Options{
+		Engine:          strategy.NewEngine([]strategy.Strategy{item}),
+		PositionManager: position.NewManager(position.ManagerConfig{}),
+		PositionStore:   store,
+		Broker:          broker,
+		Now:             func() int64 { return 2000 },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runner.Handle(context.Background(), strategy.Context{
+		Target: target,
+		Snapshots: map[string]strategy.Snapshot{
+			"3m": {
+				Price: strategy.PriceView{LastPrice: "101.25"},
+				Current: marketmodel.Kline{
+					Close: "100",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if broker.intent.ReferencePrice != "101.25" {
+		t.Fatalf("reference price = %q, want 101.25", broker.intent.ReferencePrice)
 	}
 }
 

@@ -16,6 +16,7 @@ type IntentRequest struct {
 	Plan           strategy.OrderPlan
 	Position       *strategy.Position
 	BarOpenTime    int64
+	ReferencePrice string
 	CreatedAt      int64
 }
 
@@ -53,6 +54,7 @@ func BuildOrderIntent(request IntentRequest) (OrderIntent, bool, error) {
 		Side:           side,
 		Type:           OrderTypeMarket,
 		Quantity:       quantity,
+		ReferencePrice: request.ReferencePrice,
 		ReduceOnly:     reduceOnly,
 		Reason:         request.Plan.Reason,
 		CreatedAt:      request.CreatedAt,

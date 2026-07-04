@@ -48,6 +48,7 @@ type OrderIntent struct {
 	Side           OrderSide
 	Type           OrderType
 	Quantity       float64
+	ReferencePrice string
 	LimitPrice     string
 	StopPrice      string
 	ReduceOnly     bool

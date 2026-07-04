@@ -121,12 +121,13 @@ func (r *Runner) handleResult(ctx context.Context, input strategy.Context, resul
 		return fmt.Errorf("build order quantity for strategy %s: %w", result.StrategyName, err)
 	}
 	intent, ok, err := execution.BuildOrderIntent(execution.IntentRequest{
-		Target:       input.Target,
-		StrategyName: result.StrategyName,
-		Plan:         orderPlan,
-		Position:     currentPosition,
-		BarOpenTime:  result.Signal.OpenTime,
-		CreatedAt:    now,
+		Target:         input.Target,
+		StrategyName:   result.StrategyName,
+		Plan:           orderPlan,
+		Position:       currentPosition,
+		BarOpenTime:    result.Signal.OpenTime,
+		ReferencePrice: price,
+		CreatedAt:      now,
 	})
 	if err != nil {
 		return fmt.Errorf("build order intent for strategy %s: %w", result.StrategyName, err)

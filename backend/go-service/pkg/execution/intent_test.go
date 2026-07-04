@@ -22,7 +22,8 @@ func TestBuildOrderIntentOpenLong(t *testing.T) {
 			TargetSize: 1.5,
 			Reason:     "open long",
 		},
-		CreatedAt: 123,
+		ReferencePrice: "100.5",
+		CreatedAt:      123,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -36,6 +37,9 @@ func TestBuildOrderIntentOpenLong(t *testing.T) {
 	}
 	if intent.StrategyName != "keltner" {
 		t.Fatalf("strategy = %q, want keltner", intent.StrategyName)
+	}
+	if intent.ReferencePrice != "100.5" {
+		t.Fatalf("reference price = %q, want 100.5", intent.ReferencePrice)
 	}
 }
 

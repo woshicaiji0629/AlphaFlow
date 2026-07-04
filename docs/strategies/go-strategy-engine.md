@@ -9,6 +9,11 @@
 - 公共策略模型和策略引擎：`pkg/strategy`
 - 独立仓位管理、Redis 当前态、ClickHouse 事件态：`pkg/position`
 - 订单意图、执行报告和 paper broker：`pkg/execution`
+- Supertrend 策略 Go 实现：`pkg/strategies/supertrend`
+- 在线服务入口：`strategy-engine/cmd/strategy-engine`
+- 在线配置加载：`strategy-engine/internal/config`
+- Redis snapshot reader：`strategy-engine/internal/reader`
+- 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - `bt` / `paper` 本地策略仓位隔离
 - 止盈、止损、移动止损、分批退出
@@ -19,13 +24,12 @@
 
 尚未实现：
 
-- `cmd/strategy-engine/main.go` 服务入口
-- 在线配置加载
-- Redis snapshot reader
 - 真实交易所 order executor
 - 回测 CLI / 批处理入口
 - ClickHouse 历史 K 线回测读取编排
 - 交易所账户级风控和 symbol 下单能力换算
+- 在线幂等落库和重复订单意图拦截
+- HTTP 健康检查接口
 
 ## 目标边界
 
@@ -144,21 +148,27 @@ backend/go-service/strategy-engine/
 当前只实现了：
 
 ```text
+backend/go-service/strategy-engine/cmd/strategy-engine/
+backend/go-service/strategy-engine/configs/
+backend/go-service/strategy-engine/internal/app/
+backend/go-service/strategy-engine/internal/config/
+backend/go-service/strategy-engine/internal/reader/
 backend/go-service/strategy-engine/internal/runner/
 ```
 
-在线路径目标：
+当前在线路径：
 
 ```text
 Redis indwin / indrt
   -> strategy-engine/internal/reader
   -> strategy.Snapshot
-  -> strategy.Engine
+  -> strategy.Engine(Supertrend)
   -> strategy-engine/internal/runner
   -> position.Manager
   -> execution.OrderIntent
-  -> order-executor 或 PaperBroker
-  -> position.EventStore
+  -> PaperBroker
+  -> position.RedisStore
+  -> position.ClickHouseStore
 ```
 
 在线引擎职责：
@@ -169,8 +179,13 @@ Redis indwin / indrt
 - 调用公共 `strategy.Engine`。
 - 生成信号、仓位计划和订单意图。
 - 写入事件历史和当前仓位。
-- 做在线幂等控制，避免同一根 K 线重复开仓。
-- 暴露健康检查和运行日志。
+- 输出运行日志。
+
+尚未完成的在线职责：
+
+- 做在线幂等控制，避免同一根 K 线重复开仓或重复生成订单意图。
+- 暴露 HTTP 健康检查接口。
+- 接入真实交易所 order executor。
 
 ### 回测批处理
 
@@ -611,11 +626,11 @@ position_side
 
 ## 当前限制
 
-- 还没有在线服务入口。
-- 还没有 Redis snapshot reader。
 - 还没有回测 CLI。
 - 还没有真实交易所订单服务。
 - 还没有交易所精度、张数、最小下单量换算。
+- 还没有在线幂等落库和重复订单意图拦截。
+- 还没有 HTTP 健康检查接口。
 - runner 当前只对 `bt` / `paper` 更新本地仓位。
 - `testnet` / `live` 当前只记录事件，不修改交易所账户级仓位。
 - ClickHouse 表通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
@@ -625,10 +640,9 @@ position_side
 
 建议按以下顺序推进：
 
-1. 实现 Redis snapshot reader。
-2. 实现 `strategy-engine` 服务入口和配置。
-3. 实现回测 CLI，复用公共策略和仓位逻辑。
-4. 增加交易所 symbol capability 缓存和数量换算。
-5. 拆出 order executor 服务。
-6. 接入 testnet。
-7. 接入 live。
+1. 实现在线幂等落库和重复订单意图拦截。
+2. 实现回测 CLI，复用公共策略和仓位逻辑。
+3. 增加交易所 symbol capability 缓存和数量换算。
+4. 拆出 order executor 服务。
+5. 接入 testnet。
+6. 接入 live。

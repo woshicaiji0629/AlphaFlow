@@ -21,6 +21,8 @@ help:
 	@echo "  make go-market-data-test"
 	@echo "  make go-market-data-tidy"
 	@echo "  make go-market-data-check"
+	@echo "  make go-strategy-engine-run"
+	@echo "  make go-strategy-engine-build"
 	@echo "  make redis-up          Start local Redis with Docker"
 	@echo "  make redis-down        Stop local Redis"
 	@echo "  make redis-logs        Tail Redis logs"
@@ -101,6 +103,15 @@ go-market-data-tidy:
 
 .PHONY: go-market-data-check
 go-market-data-check: go-market-data-test
+
+.PHONY: go-strategy-engine-run
+go-strategy-engine-run:
+	cd $(GO_SERVICE_DIR) && go run ./strategy-engine/cmd/strategy-engine -config strategy-engine/configs/local.toml
+
+.PHONY: go-strategy-engine-build
+go-strategy-engine-build:
+	mkdir -p $(GO_SERVICE_BIN_DIR)
+	cd $(GO_SERVICE_DIR) && go build -o bin/strategy-engine ./strategy-engine/cmd/strategy-engine
 
 .PHONY: redis-up
 redis-up:
