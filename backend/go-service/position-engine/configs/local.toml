@@ -1,0 +1,59 @@
+[runtime]
+service = "position-engine"
+
+[redis]
+addr = "localhost:6380"
+password = ""
+db = 0
+pool_size = 20
+min_idle_conns = 5
+
+[input]
+stream = "st:decision:stream"
+group = "position-engine"
+consumer = "local"
+block = "5s"
+batch = 10
+default_ttl = "60s"
+pending_idle = "30s"
+dead_letter_stream = "st:decision:stream:dead"
+max_deliveries = 5
+
+[position]
+scope = "paper"
+account = "paper-default"
+
+[sizing]
+margin_quote = 100
+leverage = 100
+max_position_size = 1
+min_open_confidence = 0.65
+disable_short_exposure = false
+
+[fee]
+fee_rate = 0.0006
+rebate_pct = 0
+
+[[routes]]
+strategy = "supertrend"
+sink = "paper"
+account = "paper-default"
+enabled = true
+
+[[routes]]
+strategy = "breakout-alert"
+sink = "notify"
+notifier = "dingtalk-alpha"
+enabled = false
+
+[logging]
+service = "position-engine"
+level = "info"
+format = "json"
+output = "file"
+dir = "../../logs/go-service"
+filename = "position-engine.log"
+max_size_mb = 100
+max_backups = 10
+max_age_days = 30
+compress = true

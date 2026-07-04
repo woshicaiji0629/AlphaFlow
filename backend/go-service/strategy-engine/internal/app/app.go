@@ -35,13 +35,7 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}()
 
-	backtestTTL, err := config.BacktestTTL(cfg)
-	if err != nil {
-		return err
-	}
-	positionStore := position.NewRedisStore(redisClient, position.RedisStoreOptions{
-		BacktestTTL: backtestTTL,
-	})
+	positionStore := position.NewRedisStore(redisClient, position.RedisStoreOptions{})
 	eventStore, closeEventStore, err := buildEventStore(ctx, cfg)
 	if err != nil {
 		return err

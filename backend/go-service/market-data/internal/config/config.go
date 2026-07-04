@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BurntSushi/toml"
+	"alphaflow/go-service/pkg/configutil"
 )
 
 type Config struct {
@@ -72,11 +72,7 @@ func Load(configPath string) (Config, error) {
 	path := resolvePath(configPath)
 	cfg := defaultConfig()
 
-	metadata, err := toml.DecodeFile(path, &cfg)
-	if err != nil {
-		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
-	}
-	if err := validateDecodedFields(path, metadata); err != nil {
+	if err := configutil.DecodeTOMLFileStrict(path, &cfg); err != nil {
 		return Config{}, err
 	}
 
@@ -144,18 +140,6 @@ func validate(cfg Config) error {
 		}
 	}
 	return nil
-}
-
-func validateDecodedFields(path string, metadata toml.MetaData) error {
-	undecoded := metadata.Undecoded()
-	if len(undecoded) == 0 {
-		return nil
-	}
-	fields := make([]string, 0, len(undecoded))
-	for _, key := range undecoded {
-		fields = append(fields, key.String())
-	}
-	return fmt.Errorf("decode config %s: unknown fields: %s", path, strings.Join(fields, ", "))
 }
 
 func validateExchangeSymbols(cfg Config) error {

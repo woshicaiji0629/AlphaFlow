@@ -8,39 +8,34 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/configutil"
-	"alphaflow/go-service/pkg/redisclient"
-	"alphaflow/go-service/pkg/strategy"
 )
 
 type Config struct {
 	Runtime    RuntimeConfig    `toml:"runtime"`
-	Redis      RedisConfig      `toml:"redis"`
-	Position   PositionConfig   `toml:"position"`
+	Data       DataConfig       `toml:"data"`
 	Sizing     SizingConfig     `toml:"sizing"`
 	Fee        FeeConfig        `toml:"fee"`
 	ClickHouse ClickHouseConfig `toml:"clickhouse"`
-	Targets    []TargetConfig   `toml:"targets"`
 	Logging    LoggingConfig    `toml:"logging"`
 }
 
 type RuntimeConfig struct {
-	ScanInterval string `toml:"scan_interval"`
+	RunID       string `toml:"run_id"`
+	StrategySet string `toml:"strategy_set"`
 }
 
-type RedisConfig struct {
-	Addr         string `toml:"addr"`
-	Password     string `toml:"password"`
-	DB           int    `toml:"db"`
-	PoolSize     int    `toml:"pool_size"`
-	MinIdleConns int    `toml:"min_idle_conns"`
-}
-
-type PositionConfig struct {
-	Scope   string `toml:"scope"`
-	Account string `toml:"account"`
+type DataConfig struct {
+	Exchange         string   `toml:"exchange"`
+	Market           string   `toml:"market"`
+	Symbols          []string `toml:"symbols"`
+	Interval         string   `toml:"interval"`
+	ConfirmIntervals []string `toml:"confirm_intervals"`
+	StartTime        string   `toml:"start_time"`
+	EndTime          string   `toml:"end_time"`
 }
 
 type SizingConfig struct {
+	InitialEquity        float64 `toml:"initial_equity"`
 	MarginQuote          float64 `toml:"margin_quote"`
 	Leverage             float64 `toml:"leverage"`
 	MaxPositionSize      float64 `toml:"max_position_size"`
@@ -61,14 +56,6 @@ type ClickHouseConfig struct {
 	Password    string `toml:"password"`
 	DialTimeout string `toml:"dial_timeout"`
 	ReadTimeout string `toml:"read_timeout"`
-}
-
-type TargetConfig struct {
-	Exchange         string   `toml:"exchange"`
-	Market           string   `toml:"market"`
-	Symbol           string   `toml:"symbol"`
-	Interval         string   `toml:"interval"`
-	ConfirmIntervals []string `toml:"confirm_intervals"`
 }
 
 type LoggingConfig struct {
@@ -100,18 +87,18 @@ func Load(configPath string) (Config, error) {
 func defaultConfig() Config {
 	return Config{
 		Runtime: RuntimeConfig{
-			ScanInterval: "5s",
+			RunID:       "local-backtest",
+			StrategySet: "supertrend",
 		},
-		Redis: RedisConfig{
-			Addr:         "localhost:6380",
-			PoolSize:     20,
-			MinIdleConns: 5,
-		},
-		Position: PositionConfig{
-			Scope:   string(strategy.PositionScopePaper),
-			Account: "default",
+		Data: DataConfig{
+			Exchange:         "binance",
+			Market:           "um",
+			Symbols:          []string{"ETHUSDT"},
+			Interval:         "3m",
+			ConfirmIntervals: []string{"5m", "10m", "15m", "30m"},
 		},
 		Sizing: SizingConfig{
+			InitialEquity:     10000,
 			MarginQuote:       100,
 			Leverage:          100,
 			MaxPositionSize:   1,
@@ -129,30 +116,19 @@ func defaultConfig() Config {
 			DialTimeout: "5s",
 			ReadTimeout: "30s",
 		},
-		Targets: []TargetConfig{{
-			Exchange:         "binance",
-			Market:           "um",
-			Symbol:           "ETHUSDT",
-			Interval:         "3m",
-			ConfirmIntervals: []string{"5m", "10m", "15m", "30m"},
-		}},
 		Logging: LoggingConfig{
-			Service:    "strategy-engine",
+			Service:    "backtest-engine",
 			Level:      "info",
 			Format:     "json",
 			Output:     "stdout",
 			Dir:        "logs",
-			Filename:   "strategy-engine.log",
+			Filename:   "backtest-engine.log",
 			MaxSizeMB:  100,
 			MaxBackups: 10,
 			MaxAgeDays: 30,
 			Compress:   true,
 		},
 	}
-}
-
-func ScanInterval(cfg Config) (time.Duration, error) {
-	return parseDuration("runtime.scan_interval", cfg.Runtime.ScanInterval)
 }
 
 func ClickHouseDialTimeout(cfg Config) (time.Duration, error) {
@@ -163,84 +139,49 @@ func ClickHouseReadTimeout(cfg Config) (time.Duration, error) {
 	return parseDuration("clickhouse.read_timeout", cfg.ClickHouse.ReadTimeout)
 }
 
-func RedisClientConfig(cfg Config) redisclient.Config {
-	return redisclient.Config{
-		Addr:         cfg.Redis.Addr,
-		Password:     cfg.Redis.Password,
-		DB:           cfg.Redis.DB,
-		PoolSize:     cfg.Redis.PoolSize,
-		MinIdleConns: cfg.Redis.MinIdleConns,
-	}
+func StartTime(cfg Config) (time.Time, error) {
+	return parseTime("data.start_time", cfg.Data.StartTime)
 }
 
-func PositionScope(cfg Config) strategy.PositionScope {
-	return strategy.PositionScope(cfg.Position.Scope)
-}
-
-func Targets(cfg Config) []strategy.Target {
-	scope := PositionScope(cfg)
-	targets := make([]strategy.Target, 0, len(cfg.Targets))
-	for _, item := range cfg.Targets {
-		targets = append(targets, strategy.Target{
-			Exchange: item.Exchange,
-			Market:   item.Market,
-			Symbol:   item.Symbol,
-			Interval: item.Interval,
-			Account:  cfg.Position.Account,
-			Scope:    scope,
-		})
-	}
-	return targets
-}
-
-func ConfirmIntervals(item TargetConfig) []string {
-	intervals := make([]string, 0, len(item.ConfirmIntervals))
-	for _, interval := range item.ConfirmIntervals {
-		interval = strings.TrimSpace(interval)
-		if interval != "" {
-			intervals = append(intervals, interval)
-		}
-	}
-	return intervals
+func EndTime(cfg Config) (time.Time, error) {
+	return parseTime("data.end_time", cfg.Data.EndTime)
 }
 
 func resolvePath(configPath string) string {
 	value := strings.TrimSpace(configPath)
 	if value == "" {
-		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_STRATEGY_ENGINE_CONFIG"))
+		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_BACKTEST_ENGINE_CONFIG"))
 	}
 	if value == "" {
-		value = "strategy-engine/configs/local.toml"
+		value = "backtest-engine/configs/local.toml"
 	}
 	return filepath.Clean(value)
 }
 
 func normalize(cfg *Config) {
-	cfg.Redis.Addr = envOrValue("ALPHAFLOW_REDIS_ADDR", cfg.Redis.Addr)
-	cfg.Redis.Password = envOrValue("ALPHAFLOW_REDIS_PASSWORD", cfg.Redis.Password)
 	cfg.ClickHouse.Addr = envOrValue("ALPHAFLOW_CLICKHOUSE_ADDR", cfg.ClickHouse.Addr)
 	cfg.ClickHouse.Database = envOrValue("ALPHAFLOW_CLICKHOUSE_DATABASE", cfg.ClickHouse.Database)
 	cfg.ClickHouse.Username = envOrValue("ALPHAFLOW_CLICKHOUSE_USERNAME", cfg.ClickHouse.Username)
 	cfg.ClickHouse.Password = envOrValue("ALPHAFLOW_CLICKHOUSE_PASSWORD", cfg.ClickHouse.Password)
-	for index, item := range cfg.Targets {
-		cfg.Targets[index].Exchange = strings.ToLower(strings.TrimSpace(item.Exchange))
-		cfg.Targets[index].Market = strings.ToLower(strings.TrimSpace(item.Market))
-		cfg.Targets[index].Symbol = strings.ToUpper(strings.TrimSpace(item.Symbol))
-		cfg.Targets[index].Interval = strings.TrimSpace(item.Interval)
-		for intervalIndex, interval := range item.ConfirmIntervals {
-			cfg.Targets[index].ConfirmIntervals[intervalIndex] = strings.TrimSpace(interval)
-		}
+	cfg.Runtime.RunID = strings.TrimSpace(cfg.Runtime.RunID)
+	cfg.Runtime.StrategySet = strings.TrimSpace(cfg.Runtime.StrategySet)
+	cfg.Data.Exchange = strings.ToLower(strings.TrimSpace(cfg.Data.Exchange))
+	cfg.Data.Market = strings.ToLower(strings.TrimSpace(cfg.Data.Market))
+	cfg.Data.Interval = strings.TrimSpace(cfg.Data.Interval)
+	cfg.Data.StartTime = strings.TrimSpace(cfg.Data.StartTime)
+	cfg.Data.EndTime = strings.TrimSpace(cfg.Data.EndTime)
+	for index, symbol := range cfg.Data.Symbols {
+		cfg.Data.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))
 	}
-	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
-	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
+	for index, interval := range cfg.Data.ConfirmIntervals {
+		cfg.Data.ConfirmIntervals[index] = strings.TrimSpace(interval)
+	}
 }
 
 func validate(cfg Config) error {
 	validators := []func(Config) error{
 		validateRuntime,
-		validateRedis,
-		validatePosition,
-		validateTargets,
+		validateData,
 		validateSizing,
 		validateFee,
 		validateClickHouse,
@@ -254,50 +195,57 @@ func validate(cfg Config) error {
 }
 
 func validateRuntime(cfg Config) error {
-	if _, err := ScanInterval(cfg); err != nil {
+	if cfg.Runtime.RunID == "" {
+		return fmt.Errorf("runtime.run_id cannot be empty")
+	}
+	if cfg.Runtime.StrategySet == "" {
+		return fmt.Errorf("runtime.strategy_set cannot be empty")
+	}
+	return nil
+}
+
+func validateData(cfg Config) error {
+	if cfg.Data.Exchange == "" {
+		return fmt.Errorf("data.exchange cannot be empty")
+	}
+	if cfg.Data.Market == "" {
+		return fmt.Errorf("data.market cannot be empty")
+	}
+	if len(cfg.Data.Symbols) == 0 {
+		return fmt.Errorf("data.symbols cannot be empty")
+	}
+	for index, symbol := range cfg.Data.Symbols {
+		if symbol == "" {
+			return fmt.Errorf("data.symbols[%d] cannot be empty", index)
+		}
+	}
+	if cfg.Data.Interval == "" {
+		return fmt.Errorf("data.interval cannot be empty")
+	}
+	if cfg.Data.StartTime == "" {
+		return fmt.Errorf("data.start_time cannot be empty")
+	}
+	if cfg.Data.EndTime == "" {
+		return fmt.Errorf("data.end_time cannot be empty")
+	}
+	startTime, err := StartTime(cfg)
+	if err != nil {
 		return err
 	}
-	return nil
-}
-
-func validateRedis(cfg Config) error {
-	if strings.TrimSpace(cfg.Redis.Addr) == "" {
-		return fmt.Errorf("redis addr cannot be empty")
+	endTime, err := EndTime(cfg)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func validatePosition(cfg Config) error {
-	switch PositionScope(cfg) {
-	case strategy.PositionScopePaper:
-	default:
-		return fmt.Errorf("unsupported online position scope %q", cfg.Position.Scope)
-	}
-	return nil
-}
-
-func validateTargets(cfg Config) error {
-	if len(cfg.Targets) == 0 {
-		return fmt.Errorf("targets cannot be empty")
-	}
-	for index, target := range cfg.Targets {
-		if target.Exchange == "" {
-			return fmt.Errorf("targets[%d].exchange cannot be empty", index)
-		}
-		if target.Market == "" {
-			return fmt.Errorf("targets[%d].market cannot be empty", index)
-		}
-		if target.Symbol == "" {
-			return fmt.Errorf("targets[%d].symbol cannot be empty", index)
-		}
-		if target.Interval == "" {
-			return fmt.Errorf("targets[%d].interval cannot be empty", index)
-		}
+	if !endTime.After(startTime) {
+		return fmt.Errorf("data.end_time must be after data.start_time")
 	}
 	return nil
 }
 
 func validateSizing(cfg Config) error {
+	if cfg.Sizing.InitialEquity <= 0 {
+		return fmt.Errorf("sizing.initial_equity must be positive")
+	}
 	if cfg.Sizing.MarginQuote < 0 {
 		return fmt.Errorf("sizing.margin_quote cannot be negative")
 	}
@@ -343,6 +291,14 @@ func parseDuration(name string, value string) (time.Duration, error) {
 	}
 	if parsed <= 0 {
 		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return parsed, nil
+}
+
+func parseTime(name string, value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return parsed, nil
 }

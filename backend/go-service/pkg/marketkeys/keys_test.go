@@ -44,6 +44,16 @@ func TestKeysUseExistingRedisProtocol(t *testing.T) {
 			want: "bn:um:indrt:ETHUSDT:3m",
 		},
 		{
+			name: "last price",
+			got:  LastPriceKey("binance", "um", "ETHUSDT"),
+			want: "bn:um:lp:ETHUSDT",
+		},
+		{
+			name: "mark price",
+			got:  MarkPriceKey("binance", "um", "ETHUSDT"),
+			want: "bn:um:mp:ETHUSDT",
+		},
+		{
 			name: "non binance exchange",
 			got:  IndicatorRealtimeKey("gate", "um", "ETH_USDT", "3m"),
 			want: "gate:um:indrt:ETH_USDT:3m",

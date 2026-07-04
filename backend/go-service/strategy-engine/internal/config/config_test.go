@@ -20,7 +20,6 @@ addr = "localhost:6380"
 [position]
 scope = "paper"
 account = "demo"
-backtest_ttl = "1h"
 
 [sizing]
 margin_quote = 50

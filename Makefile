@@ -23,6 +23,10 @@ help:
 	@echo "  make go-market-data-check"
 	@echo "  make go-strategy-engine-run"
 	@echo "  make go-strategy-engine-build"
+	@echo "  make go-backtest-engine-run"
+	@echo "  make go-backtest-engine-build"
+	@echo "  make go-position-engine-run"
+	@echo "  make go-position-engine-build"
 	@echo "  make redis-up          Start local Redis with Docker"
 	@echo "  make redis-down        Stop local Redis"
 	@echo "  make redis-logs        Tail Redis logs"
@@ -112,6 +116,24 @@ go-strategy-engine-run:
 go-strategy-engine-build:
 	mkdir -p $(GO_SERVICE_BIN_DIR)
 	cd $(GO_SERVICE_DIR) && go build -o bin/strategy-engine ./strategy-engine/cmd/strategy-engine
+
+.PHONY: go-backtest-engine-run
+go-backtest-engine-run:
+	cd $(GO_SERVICE_DIR) && go run ./backtest-engine/cmd/backtest-engine -config backtest-engine/configs/local.toml
+
+.PHONY: go-backtest-engine-build
+go-backtest-engine-build:
+	mkdir -p $(GO_SERVICE_BIN_DIR)
+	cd $(GO_SERVICE_DIR) && go build -o bin/backtest-engine ./backtest-engine/cmd/backtest-engine
+
+.PHONY: go-position-engine-run
+go-position-engine-run:
+	cd $(GO_SERVICE_DIR) && go run ./position-engine/cmd/position-engine -config position-engine/configs/local.toml
+
+.PHONY: go-position-engine-build
+go-position-engine-build:
+	mkdir -p $(GO_SERVICE_BIN_DIR)
+	cd $(GO_SERVICE_DIR) && go build -o bin/position-engine ./position-engine/cmd/position-engine
 
 .PHONY: redis-up
 redis-up:

@@ -15,6 +15,11 @@
 - Redis snapshot reader：`strategy-engine/internal/reader`
 - 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
+- 独立回测引擎入口和配置骨架：`backtest-engine`
+- 独立仓位/执行路由服务骨架：`position-engine`
+- 策略决策 Redis Stream 协议：`pkg/strategybus`
+- 策略结果路由公共包：`pkg/strategyroute`
+- paper 仓位处理器公共包：`pkg/positionhandler/paper`
 - `bt` / `paper` 本地策略仓位隔离
 - 止盈、止损、移动止损、分批退出
 - 回测和模拟仓 sizing：`margin_quote * leverage`
@@ -25,8 +30,7 @@
 尚未实现：
 
 - 真实交易所 order executor
-- 回测 CLI / 批处理入口
-- ClickHouse 历史 K 线回测读取编排
+- 完整回测历史读取、时间推进、模拟成交和报告输出
 - 交易所账户级风控和 symbol 下单能力换算
 - 在线幂等落库和重复订单意图拦截
 - HTTP 健康检查接口
@@ -37,12 +41,13 @@
 
 - 在线策略引擎是独立常驻服务。
 - 回测是批处理脚本或 CLI。
+- 仓位管理、模拟成交、实盘执行和通知路由由独立 position-engine 承接。
 - 策略实现放在 Go 公共包，供在线引擎和回测共同使用。
 - Python 策略框架只作为旧原型参考，不作为新架构依赖。
 - 策略引擎只产出策略结果、仓位计划和订单意图。
 - 真实订单状态机后续拆到订单服务。
 
-核心要求是在线和回测共享同一套策略逻辑，差异只存在于数据来源、成交模型和持久化范围。
+核心要求是在线和回测共享同一套策略逻辑，入口、配置、数据来源、信号路由、成交模型和持久化范围保持独立。
 
 ## 包职责
 
@@ -114,21 +119,86 @@ backend/go-service/pkg/execution/paper.go
 
 - 从 `PositionStore` 读取每个策略的当前仓位
 - 调用 `strategy.Engine`
+- 将 `strategy.Decision` 交给 `pkg/strategyroute.Dispatcher`
+
+`runner` 不负责：
+
+- 服务配置加载
+- paper / backtest / live / notify 的具体处理逻辑
+- 真实交易所账户仓位修改
+- 交易所订单状态机
+- 交易所精度和张数换算
+
+### `pkg/positionhandler/paper`
+
+职责：
+
 - 每次处理前刷新本地仓位最高价/最低价
 - 调用 `position.Manager` 生成仓位计划
 - 将名义价值 sizing 转成基础资产数量
 - 构造订单意图
-- 调用 broker 执行 paper 成交
+- 调用 paper broker 执行模拟成交
 - 写入 `signal_generated`、`order_intent_created`、`order_filled` 事件
-- 对 `bt` / `paper` 的本地成交结果更新当前仓位
+- 对 `paper` 本地成交结果更新当前仓位
 
-`runner` 不负责：
+关键文件：
 
-- Redis 指标字段读取
-- 服务配置加载
-- 真实交易所账户仓位修改
-- 交易所订单状态机
-- 交易所精度和张数换算
+```text
+backend/go-service/pkg/positionhandler/paper/handler.go
+```
+
+### `pkg/strategyroute`
+
+职责：
+
+- 定义策略结果路由 `Route`
+- 定义结果处理器接口 `ResultHandler`
+- 根据策略名和 sink 分发 `strategy.Result`
+
+关键文件：
+
+```text
+backend/go-service/pkg/strategyroute/route.go
+```
+
+sink 当前预留：
+
+```text
+paper
+backtest
+testnet
+live
+notify
+log
+```
+
+### `pkg/strategybus`
+
+职责：
+
+- 定义跨服务传递的 `strategy.Decision` envelope。
+- 将 `strategy.Decision` 编码为 Redis Stream payload。
+- 提供 `created_at` / `expires_at` 过期边界。
+- 提供 Redis Stream 发布、消费组创建、读取、pending reclaim、dead-letter 和 Ack 能力。
+
+关键文件：
+
+```text
+backend/go-service/pkg/strategybus/decision.go
+backend/go-service/pkg/strategybus/redis.go
+```
+
+当前默认协议：
+
+```text
+stream: st:decision:stream
+field: payload
+group: position-engine
+default_ttl: 60s
+pending_idle: 30s
+dead_letter_stream: st:decision:stream:dead
+max_deliveries: 5
+```
 
 ## 服务形态
 
@@ -189,10 +259,10 @@ Redis indwin / indrt
 
 ### 回测批处理
 
-目标入口：
+当前入口：
 
 ```text
-backend/go-service/scripts/backtest/main.go
+backend/go-service/backtest-engine/cmd/backtest-engine/main.go
 ```
 
 回测路径目标：
@@ -203,9 +273,21 @@ backend/go-service/scripts/backtest/main.go
   -> indicatorwindow.Analyze
   -> strategy.Snapshot
   -> strategy.Engine
-  -> strategy-engine/internal/runner 或 backtest runner
+  -> backtest-engine/internal/simulator
   -> BacktestBroker
   -> ClickHouse / 回测报告
+```
+
+当前 `backtest-engine` 只实现入口、配置加载、app 骨架和包边界：
+
+```text
+backend/go-service/backtest-engine/cmd/backtest-engine/
+backend/go-service/backtest-engine/configs/
+backend/go-service/backtest-engine/internal/app/
+backend/go-service/backtest-engine/internal/config/
+backend/go-service/backtest-engine/internal/reader/
+backend/go-service/backtest-engine/internal/simulator/
+backend/go-service/backtest-engine/internal/report/
 ```
 
 回测职责：
@@ -218,6 +300,41 @@ backend/go-service/scripts/backtest/main.go
 - 输出交易明细、权益曲线、统计摘要和信号诊断。
 
 回测不应复用在线服务的 Redis reader，也不应写在线 paper 仓位状态。
+
+### 仓位/执行路由服务
+
+当前入口：
+
+```text
+backend/go-service/position-engine/cmd/position-engine/main.go
+```
+
+当前 `position-engine` 实现入口、配置加载、Redis Stream 输入、paper route 处理、app 骨架和 route 校验：
+
+```text
+backend/go-service/position-engine/cmd/position-engine/
+backend/go-service/position-engine/configs/
+backend/go-service/position-engine/internal/app/
+backend/go-service/position-engine/internal/config/
+```
+
+目标路径：
+
+```text
+strategy.Decision / strategy.Result
+  -> pkg/strategyroute.Dispatcher
+  -> paper handler / backtest handler / live handler / notify handler
+  -> position.Store / execution.Broker / notification sink
+```
+
+仓位/执行服务职责：
+
+- 按策略名和 sink 路由策略结果。
+- 维护 paper/backtest/testnet/live 各自独立的仓位状态。
+- 生成仓位计划、订单意图、成交事件或通知消息。
+- 允许不同策略使用不同 sink，互不干扰。
+
+在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 Redis Stream 上，`position-engine` 通过消费组读取 decision，先接入 paper handler，并从 Redis `lp/mp` 价格 key 补最新价格上下文，处理成功后 Ack；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的 pending 消息可 reclaim，超过投递上限后进入 dead-letter stream。backtest/live/notify handler 后续补齐。
 
 ## Snapshot
 
@@ -626,7 +743,9 @@ position_side
 
 ## 当前限制
 
-- 还没有回测 CLI。
+- 还没有完整回测时间推进、模拟成交和报告输出。
+- position-engine 已接入 Redis Stream `strategy.Decision` 输入和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；失败消息具备 pending reclaim 和 dead-letter 骨架。
+- 还没有 position-engine 的 backtest/live/notify handler 实现。
 - 还没有真实交易所订单服务。
 - 还没有交易所精度、张数、最小下单量换算。
 - 还没有在线幂等落库和重复订单意图拦截。
@@ -640,9 +759,10 @@ position_side
 
 建议按以下顺序推进：
 
-1. 实现在线幂等落库和重复订单意图拦截。
-2. 实现回测 CLI，复用公共策略和仓位逻辑。
+1. 实现回测时间推进、模拟成交和报告输出。
+2. 实现在线幂等落库和重复订单意图拦截。
 3. 增加交易所 symbol capability 缓存和数量换算。
-4. 拆出 order executor 服务。
-5. 接入 testnet。
-6. 接入 live。
+4. 为过期策略反向退出但无 exit rule 的场景补明确 action 协议。
+5. 拆出 order executor 服务。
+6. 接入 testnet。
+7. 接入 live。
