@@ -2,6 +2,7 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: alphaflow-redis
+    profiles: ["infra", "live"]
     ports:
       - "6380:6380"
     volumes:
@@ -12,6 +13,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.6-alpine
     container_name: alphaflow-clickhouse
+    profiles: ["infra", "live", "jobs"]
     environment:
       CLICKHOUSE_DB: alphaflow
       CLICKHOUSE_USER: alphaflow
@@ -27,6 +29,7 @@ services:
   postgres:
     image: postgres:17-alpine
     container_name: alphaflow-postgres
+    profiles: ["infra"]
     environment:
       POSTGRES_DB: alphaflow
       POSTGRES_USER: alphaflow
@@ -40,8 +43,9 @@ services:
   market-data:
     build:
       context: ./backend/go-service
-      dockerfile: Dockerfile.market-data
+      dockerfile: docker/market-data.Dockerfile
     container_name: alphaflow-market-data
+    profiles: ["live"]
     depends_on:
       - redis
       - clickhouse
@@ -52,5 +56,18 @@ services:
       ALPHAFLOW_CLICKHOUSE_PASSWORD: alphaflow
     volumes:
       - ./logs/go-service:/workspace/logs/go-service
-    command: ["market-data", "-config", "market-data/configs/live-top500.toml"]
+    command: ["market-data", "-config", "configs/market-data.live-top500.toml"]
     restart: unless-stopped
+
+  kline-admin:
+    build:
+      context: ./backend/go-service
+      dockerfile: docker/market-data.Dockerfile
+    profiles: ["jobs"]
+    depends_on:
+      - clickhouse
+    environment:
+      ALPHAFLOW_CLICKHOUSE_ADDR: clickhouse:9000
+      ALPHAFLOW_CLICKHOUSE_USERNAME: alphaflow
+      ALPHAFLOW_CLICKHOUSE_PASSWORD: alphaflow
+    entrypoint: ["market-data-admin", "--config", "configs/market-data.local.toml"]

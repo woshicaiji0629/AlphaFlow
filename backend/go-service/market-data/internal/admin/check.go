@@ -21,6 +21,7 @@ type checkOptions struct {
 func newCheckCommand(ctx context.Context, root *rootOptions) *cobra.Command {
 	opts := checkOptions{}
 	var rawIntervals string
+	var taskConfigPath string
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Check kline completeness for one exchange, market, symbol, interval list, and date range",
@@ -41,8 +42,14 @@ If any kline is missing, the command prints missing open_time values and keeps
 the command successful so batch checks can continue across intervals.
 `),
 		Example: "market-data-admin check --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000\n" +
+			"market-data-admin check --task-config configs/tasks/kline-default.toml\n" +
 			"market-data-admin check --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000 --warmup-bars 300 --max-missing-report 20",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			taskCfg, err := loadTaskConfig(taskConfigPath)
+			if err != nil {
+				return err
+			}
+			applyTaskRangeConfig(cmd, taskCfg, &opts.rangeOptions, &rawIntervals, &opts.warmupBars, &opts.maxMissingReport)
 			normalizeRangeOptions(&opts.rangeOptions)
 			opts.intervals = parseList(rawIntervals)
 			return runCheck(ctx, root.configPath, opts)
@@ -52,6 +59,7 @@ the command successful so batch checks can continue across intervals.
 	cmd.Flags().StringVar(&rawIntervals, "intervals", "", "comma-separated intervals, for example 1m,5m,1h")
 	cmd.Flags().IntVar(&opts.maxMissingReport, "max-missing-report", 200, "maximum missing klines to log")
 	addWarmupFlag(cmd, &opts.warmupBars)
+	addTaskConfigFlag(cmd, &taskConfigPath)
 	return cmd
 }
 

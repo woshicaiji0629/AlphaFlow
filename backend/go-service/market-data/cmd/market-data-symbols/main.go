@@ -30,7 +30,7 @@ func main() {
 	setupLogger()
 
 	limit := flag.Int("limit", 500, "symbols per exchange")
-	output := flag.String("output", "configs/live-top500.toml", "output config path")
+	output := flag.String("output", "configs/market-data.live-top500.toml", "output config path")
 	timeout := flag.Duration("timeout", 30*time.Second, "fetch timeout")
 	binanceBase := flag.String("binance-base", "https://fapi.binance.com", "Binance USDT-M base URL")
 	gateBase := flag.String("gate-base", "https://api.gateio.ws/api/v4", "Gate API base URL")

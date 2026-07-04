@@ -69,12 +69,12 @@ Range semantics are always left-closed and right-open:
 For example, --start 202606010000 --end 202607010000 covers June 2026 and does
 not include the 2026-07-01 00:00 opening kline.
 `),
-		Example: "market-data-admin --config market-data/configs/local.toml inventory --exchange binance --market um --symbol ETHUSDT\n" +
-			"market-data-admin --config market-data/configs/local.toml check --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000\n" +
-			"market-data-admin --config market-data/configs/local.toml backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000\n" +
-			"market-data-admin --config market-data/configs/local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
-			"market-data-admin --config market-data/configs/local.toml duplicates --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
-			"market-data-admin --config market-data/configs/local.toml delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000",
+		Example: "market-data-admin --config configs/market-data.local.toml inventory --exchange binance --market um --symbol ETHUSDT\n" +
+			"market-data-admin --config configs/market-data.local.toml check --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000\n" +
+			"market-data-admin --config configs/market-data.local.toml backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000\n" +
+			"market-data-admin --config configs/market-data.local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
+			"market-data-admin --config configs/market-data.local.toml duplicates --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
+			"market-data-admin --config configs/market-data.local.toml delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000",
 	}
 	cmd.PersistentFlags().StringVar(&opts.configPath, "config", "", "path to market-data config file")
 	cmd.AddCommand(newInventoryCommand(ctx, &opts))

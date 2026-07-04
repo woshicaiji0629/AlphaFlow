@@ -17,7 +17,7 @@ backend/go-service/market-data/cmd/market-data/main.go
 本地配置：
 
 ```text
-backend/go-service/market-data/configs/local.toml
+backend/go-service/configs/market-data.local.toml
 ```
 
 ## 职责
@@ -432,7 +432,7 @@ backend/go-service/bin/market-data-indicator-loadtest
 编译后可以直接执行：
 
 ```sh
-backend/go-service/bin/market-data-admin --config backend/go-service/market-data/configs/local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
+backend/go-service/bin/market-data-admin --config backend/go-service/configs/market-data.local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
 ```
 
 清理本地编译产物：
@@ -525,6 +525,27 @@ make go-market-data-admin ARGS='duplicates --exchange binance --market um --symb
 make go-market-data-admin ARGS='backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000 --warmup-bars 300 --concurrency 2'
 ```
 
+Docker 下可以用短命令跑同一类 K 线维护任务；它们使用 `jobs` profile，只会按需启动 ClickHouse：
+
+```sh
+make kline-check
+make kline-backfill
+make kline-delete-dryrun
+```
+
+短命令默认读取任务配置：
+
+```text
+backend/go-service/configs/tasks/kline-default.toml
+backend/go-service/configs/tasks/kline-delete-default.toml
+```
+
+配置文件用于保存交易所、市场、交易对、周期、时间范围和 `warmup_bars`。需要临时覆盖某个字段时继续使用 CLI 参数，例如：
+
+```sh
+make kline-backfill ARGS='--start 202606010000 --end 202607010000'
+```
+
 默认模式是 `skip-existing`：
 
 - 先查询 ClickHouse 已有 open time。
@@ -533,6 +554,8 @@ make go-market-data-admin ARGS='backfill --exchange binance --symbol ETHUSDT --i
 - 写入后重新校验完整性。
 
 `--warmup-bars` 用于回测指标预热。它会按每个周期自己的长度把实际补数起点前移，例如 `--warmup-bars 300` 对 `1m` 前移 300 分钟，对 `4h` 前移 1200 小时。日志会同时输出 `requested_start`、`effective_start` 和 `warmup_bars`，回测正式统计仍应从原始 `start` 开始。
+
+`backtest-engine` 的 `[data].warmup_bars` 应与历史补数脚本的 `--warmup-bars` 保持一致。回测读取历史 K 线时会从 `effective_start = start_time - warmup_bars * interval` 开始读取，并分别校验 warm-up 区间和正式交易区间；任一段不完整都会拒绝启动回测。
 
 `check` 和 `delete` 也支持同样的 `--warmup-bars` 语义：
 
@@ -705,7 +728,7 @@ docker compose exec clickhouse clickhouse-client --query "SELECT table, sum(rows
 
 ## 配置说明
 
-`configs/local.toml` 当前控制：
+`backend/go-service/configs/market-data.local.toml` 当前控制：
 
 - 启用的交易所。
 - ClickHouse 地址、数据库、凭证、超时和重试设置。

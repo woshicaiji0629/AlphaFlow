@@ -23,7 +23,7 @@ func TestReadKlinesUsesStore(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	klines, err := item.ReadKlines(context.Background(), Request{
+	result, err := item.ReadKlines(context.Background(), Request{
 		Exchange: "binance",
 		Market:   "um",
 		Symbol:   "ETHUSDT",
@@ -34,11 +34,74 @@ func TestReadKlinesUsesStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadKlines() error = %v", err)
 	}
-	if len(klines) != 1 {
-		t.Fatalf("klines len = %d, want 1", len(klines))
+	if len(result.Klines) != 1 {
+		t.Fatalf("klines len = %d, want 1", len(result.Klines))
 	}
 	if store.request.Symbol != "ETHUSDT" {
 		t.Fatalf("symbol = %q, want ETHUSDT", store.request.Symbol)
+	}
+}
+
+func TestReadKlinesAppliesWarmupAndValidatesBothPhases(t *testing.T) {
+	const minute = int64(60_000)
+	store := &fakeKlineStore{
+		klines: []marketmodel.Kline{
+			{OpenTime: 0},
+			{OpenTime: minute},
+			{OpenTime: 2 * minute},
+			{OpenTime: 3 * minute},
+		},
+	}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := item.ReadKlines(context.Background(), Request{
+		Exchange:   "binance",
+		Market:     "um",
+		Symbol:     "ETHUSDT",
+		Interval:   "1m",
+		Start:      2 * minute,
+		End:        4 * minute,
+		WarmupBars: 2,
+	})
+	if err != nil {
+		t.Fatalf("ReadKlines() error = %v", err)
+	}
+	if store.request.Start != 0 {
+		t.Fatalf("store start = %d, want 0", store.request.Start)
+	}
+	if result.WarmupCount != 2 || result.TradingCount != 2 {
+		t.Fatalf("counts warmup=%d trading=%d, want 2/2", result.WarmupCount, result.TradingCount)
+	}
+}
+
+func TestReadKlinesRejectsMissingWarmup(t *testing.T) {
+	const minute = int64(60_000)
+	store := &fakeKlineStore{
+		klines: []marketmodel.Kline{
+			{OpenTime: minute},
+			{OpenTime: 2 * minute},
+			{OpenTime: 3 * minute},
+		},
+	}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = item.ReadKlines(context.Background(), Request{
+		Exchange:   "binance",
+		Market:     "um",
+		Symbol:     "ETHUSDT",
+		Interval:   "1m",
+		Start:      2 * minute,
+		End:        4 * minute,
+		WarmupBars: 2,
+	})
+	if err == nil {
+		t.Fatal("ReadKlines() error = nil, want missing warmup error")
 	}
 }
 
@@ -54,6 +117,24 @@ func TestReadKlinesRejectsInvalidRequest(t *testing.T) {
 		Interval: "3m",
 		Start:    2000,
 		End:      1000,
+	})
+	if err == nil {
+		t.Fatal("ReadKlines() error = nil, want validation error")
+	}
+}
+
+func TestReadKlinesRejectsNegativeWarmup(t *testing.T) {
+	item, err := New(&fakeKlineStore{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = item.ReadKlines(context.Background(), Request{
+		Exchange:   "binance",
+		Market:     "um",
+		Symbol:     "ETHUSDT",
+		Interval:   "1m",
+		WarmupBars: -1,
 	})
 	if err == nil {
 		t.Fatal("ReadKlines() error = nil, want validation error")

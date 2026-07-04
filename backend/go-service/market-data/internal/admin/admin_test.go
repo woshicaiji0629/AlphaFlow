@@ -1,10 +1,13 @@
 package admin
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"alphaflow/go-service/pkg/marketmodel"
+	"github.com/spf13/cobra"
 )
 
 func TestTimeRangeUsesMinutePrecisionAndRightOpenEnd(t *testing.T) {
@@ -56,6 +59,80 @@ func TestParseListTrimsAndDeduplicates(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("parseList[%d] = %q, want %q", index, got[index], want[index])
 		}
+	}
+}
+
+func TestLoadTaskConfigRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task.toml")
+	content := `
+exchange = "binance"
+unknown = true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write task config: %v", err)
+	}
+
+	if _, err := loadTaskConfig(path); err == nil {
+		t.Fatal("loadTaskConfig() error = nil, want unknown field error")
+	}
+}
+
+func TestApplyBackfillTaskConfigKeepsExplicitFlags(t *testing.T) {
+	cmd := &cobra.Command{}
+	opts := backfillOptions{}
+	rawIntervals := "1m"
+	cmd.Flags().StringVar(&opts.exchange, "exchange", "binance", "")
+	cmd.Flags().StringVar(&opts.symbol, "symbol", "", "")
+	cmd.Flags().StringVar(&rawIntervals, "intervals", "1m", "")
+	cmd.Flags().StringVar(&opts.start, "start", "", "")
+	cmd.Flags().StringVar(&opts.end, "end", "", "")
+	cmd.Flags().StringVar(&opts.timezone, "timezone", "Asia/Shanghai", "")
+	cmd.Flags().StringVar(&opts.mode, "mode", "skip-existing", "")
+	cmd.Flags().IntVar(&opts.limit, "limit", 1000, "")
+	cmd.Flags().IntVar(&opts.batchSize, "batch-size", 1000, "")
+	cmd.Flags().IntVar(&opts.concurrency, "concurrency", 2, "")
+	cmd.Flags().IntVar(&opts.fetchRetries, "fetch-retries", 3, "")
+	cmd.Flags().IntVar(&opts.writeRetries, "write-retries", 3, "")
+	cmd.Flags().DurationVar(&opts.retryDelay, "retry-delay", time.Second, "")
+	cmd.Flags().IntVar(&opts.maxMissingReport, "max-missing-report", 200, "")
+	cmd.Flags().Int64Var(&opts.warmupBars, "warmup-bars", 0, "")
+	if err := cmd.Flags().Set("symbol", "BTCUSDT"); err != nil {
+		t.Fatalf("set symbol: %v", err)
+	}
+
+	err := applyBackfillTaskConfig(cmd, taskConfig{
+		Exchange:         "gate",
+		Symbol:           "ETHUSDT",
+		Intervals:        []string{"1m", "3m"},
+		Start:            "202605010000",
+		End:              "202607010000",
+		Timezone:         "UTC",
+		Mode:             "overwrite",
+		Concurrency:      4,
+		RetryDelay:       "2s",
+		MaxMissingReport: 20,
+		WarmupBars:       300,
+	}, &opts, &rawIntervals)
+	if err != nil {
+		t.Fatalf("applyBackfillTaskConfig() error = %v", err)
+	}
+	if opts.exchange != "gate" {
+		t.Fatalf("exchange = %q, want gate", opts.exchange)
+	}
+	if opts.symbol != "BTCUSDT" {
+		t.Fatalf("symbol = %q, want explicit BTCUSDT", opts.symbol)
+	}
+	if rawIntervals != "1m,3m" {
+		t.Fatalf("intervals = %q, want 1m,3m", rawIntervals)
+	}
+	if opts.concurrency != 4 {
+		t.Fatalf("concurrency = %d, want 4", opts.concurrency)
+	}
+	if opts.retryDelay != 2*time.Second {
+		t.Fatalf("retry delay = %s, want 2s", opts.retryDelay)
+	}
+	if opts.warmupBars != 300 {
+		t.Fatalf("warmup bars = %d, want 300", opts.warmupBars)
 	}
 }
 

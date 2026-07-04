@@ -1,0 +1,8 @@
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "1m"
+start = "202605010000"
+end = "202607010000"
+timezone = "Asia/Shanghai"
+warmup_bars = 300

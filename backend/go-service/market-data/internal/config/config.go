@@ -194,7 +194,7 @@ func resolvePath(configPath string) string {
 		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_MARKET_CONFIG"))
 	}
 	if value == "" {
-		value = "configs/local.toml"
+		value = "configs/market-data.local.toml"
 	}
 	return filepath.Clean(value)
 }

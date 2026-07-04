@@ -226,7 +226,7 @@ func resolvePath(configPath string) string {
 		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_STRATEGY_ENGINE_CONFIG"))
 	}
 	if value == "" {
-		value = "strategy-engine/configs/local.toml"
+		value = "configs/strategy-engine.local.toml"
 	}
 	return filepath.Clean(value)
 }

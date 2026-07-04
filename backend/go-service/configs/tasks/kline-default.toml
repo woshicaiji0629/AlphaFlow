@@ -1,0 +1,11 @@
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+intervals = ["1m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h"]
+start = "202605010000"
+end = "202607010000"
+timezone = "Asia/Shanghai"
+warmup_bars = 300
+mode = "skip-existing"
+concurrency = 2
+max_missing_report = 200

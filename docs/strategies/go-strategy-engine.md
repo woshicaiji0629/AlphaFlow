@@ -249,7 +249,7 @@ backend/go-service/strategy-engine/
 
 ```text
 backend/go-service/strategy-engine/cmd/strategy-engine/
-backend/go-service/strategy-engine/configs/
+backend/go-service/configs/strategy-engine.local.toml
 backend/go-service/strategy-engine/internal/app/
 backend/go-service/strategy-engine/internal/config/
 backend/go-service/strategy-engine/internal/reader/
@@ -307,7 +307,7 @@ backend/go-service/backtest-engine/cmd/backtest-engine/main.go
 
 ```text
 backend/go-service/backtest-engine/cmd/backtest-engine/
-backend/go-service/backtest-engine/configs/
+backend/go-service/configs/backtest-engine.local.toml
 backend/go-service/backtest-engine/internal/app/
 backend/go-service/backtest-engine/internal/config/
 backend/go-service/backtest-engine/internal/reader/
@@ -338,7 +338,7 @@ backend/go-service/position-engine/cmd/position-engine/main.go
 
 ```text
 backend/go-service/position-engine/cmd/position-engine/
-backend/go-service/position-engine/configs/
+backend/go-service/configs/position-engine.local.toml
 backend/go-service/position-engine/internal/app/
 backend/go-service/position-engine/internal/config/
 ```

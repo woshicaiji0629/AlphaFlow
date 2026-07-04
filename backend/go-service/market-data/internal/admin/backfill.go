@@ -57,6 +57,7 @@ type klineKey struct {
 func newBackfillCommand(ctx context.Context, root *rootOptions) *cobra.Command {
 	opts := backfillOptions{}
 	var rawIntervals string
+	var taskConfigPath string
 	cmd := &cobra.Command{
 		Use:   "backfill",
 		Short: "Backfill missing historical klines into ClickHouse and verify completeness",
@@ -89,9 +90,17 @@ The command exits with a non-zero status if any requested interval is still
 missing K lines after backfill.
 `),
 		Example: "market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000 --warmup-bars 300\n" +
+			"market-data-admin backfill --task-config configs/tasks/kline-default.toml\n" +
 			"market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000 --limit 1000\n" +
 			"market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 10m --start 202606010000 --end 202607010000",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			taskCfg, err := loadTaskConfig(taskConfigPath)
+			if err != nil {
+				return err
+			}
+			if err := applyBackfillTaskConfig(cmd, taskCfg, &opts, &rawIntervals); err != nil {
+				return err
+			}
 			opts.exchange = strings.ToLower(strings.TrimSpace(opts.exchange))
 			opts.symbol = strings.ToUpper(strings.TrimSpace(opts.symbol))
 			opts.intervals = parseList(rawIntervals)
@@ -115,6 +124,7 @@ missing K lines after backfill.
 	cmd.Flags().DurationVar(&opts.retryDelay, "retry-delay", time.Second, "base retry delay")
 	cmd.Flags().IntVar(&opts.maxMissingReport, "max-missing-report", 200, "maximum missing klines to log per interval")
 	cmd.Flags().Int64Var(&opts.warmupBars, "warmup-bars", 0, "extra kline bars to fetch before start for indicator warm-up")
+	addTaskConfigFlag(cmd, &taskConfigPath)
 	return cmd
 }
 

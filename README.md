@@ -236,7 +236,7 @@ make go-market-data-run
 make go-strategy-engine-run
 ```
 
-`strategy-engine/configs/local.toml` 默认启用 ClickHouse 事件存储，因此本地运行策略引擎前需要先启动 Redis 和 ClickHouse。
+`configs/strategy-engine.local.toml` 默认启用 ClickHouse 事件存储，因此本地运行策略引擎前需要先启动 Redis 和 ClickHouse。
 
 构建 Go 策略引擎：
 
@@ -274,6 +274,18 @@ make go-position-engine-build
 make stack-up
 ```
 
+只启动基础设施：
+
+```sh
+make infra-up
+```
+
+只启动在线行情栈：
+
+```sh
+make live-up
+```
+
 本地运行 Python 策略服务：
 
 ```sh
@@ -292,6 +304,20 @@ make go-market-data-test
 make go-market-data-admin ARGS='stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000'
 ```
 
+Docker 下只跑 K 线维护脚本时，可以使用 jobs profile；它只依赖 ClickHouse，不会拉起 Redis、PostgreSQL 或 market-data：
+
+```sh
+make kline-check
+make kline-backfill
+make kline-delete-dryrun
+```
+
+这些命令默认读取 `backend/go-service/configs/tasks/kline-default.toml`；删除命令默认读取 `backend/go-service/configs/tasks/kline-delete-default.toml`。临时覆盖日期或其他 CLI 参数时使用 `ARGS`：
+
+```sh
+make kline-check ARGS='--start 202606010000 --end 202607010000'
+```
+
 `market-data-admin` 是一次性 CLI，不作为服务常驻。它只维护 ClickHouse 里的已闭合 K 线历史，指标不再写入 ClickHouse，也不由该工具维护。时间参数使用 `YYYYMMDDHHmm`，范围语义统一为左闭右开：`start <= open_time < end`。
 
 需要稳定执行或定时任务时，先编译本地二进制：
@@ -303,7 +329,16 @@ make go-market-data-build
 Go 二进制统一输出到 `backend/go-service/bin/`，例如：
 
 ```sh
-backend/go-service/bin/market-data-admin --config backend/go-service/market-data/configs/local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
+backend/go-service/bin/market-data-admin --config backend/go-service/configs/market-data.local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000
+```
+
+Go 工程运行资产统一收口：
+
+```text
+backend/go-service/bin/      # Go 编译产物，按二进制文件名区分服务
+backend/go-service/configs/  # Go 服务配置，按 {service}.{env}.toml 命名
+backend/go-service/docker/   # Go 服务镜像构建文件，按 {service}.Dockerfile 命名
+logs/go-service/             # Go 服务日志，按日志文件名区分服务
 ```
 
 清理本地编译产物：

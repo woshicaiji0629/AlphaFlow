@@ -30,6 +30,7 @@ type DataConfig struct {
 	Symbols          []string `toml:"symbols"`
 	Interval         string   `toml:"interval"`
 	ConfirmIntervals []string `toml:"confirm_intervals"`
+	WarmupBars       int64    `toml:"warmup_bars"`
 	StartTime        string   `toml:"start_time"`
 	EndTime          string   `toml:"end_time"`
 }
@@ -96,6 +97,7 @@ func defaultConfig() Config {
 			Symbols:          []string{"ETHUSDT"},
 			Interval:         "3m",
 			ConfirmIntervals: []string{"5m", "10m", "15m", "30m"},
+			WarmupBars:       300,
 		},
 		Sizing: SizingConfig{
 			InitialEquity:     10000,
@@ -153,7 +155,7 @@ func resolvePath(configPath string) string {
 		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_BACKTEST_ENGINE_CONFIG"))
 	}
 	if value == "" {
-		value = "backtest-engine/configs/local.toml"
+		value = "configs/backtest-engine.local.toml"
 	}
 	return filepath.Clean(value)
 }
@@ -221,6 +223,9 @@ func validateData(cfg Config) error {
 	}
 	if cfg.Data.Interval == "" {
 		return fmt.Errorf("data.interval cannot be empty")
+	}
+	if cfg.Data.WarmupBars < 0 {
+		return fmt.Errorf("data.warmup_bars cannot be negative")
 	}
 	if cfg.Data.StartTime == "" {
 		return fmt.Errorf("data.start_time cannot be empty")

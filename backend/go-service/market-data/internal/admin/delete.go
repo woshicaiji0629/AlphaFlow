@@ -16,6 +16,7 @@ type deleteOptions struct {
 
 func newDeleteCommand(ctx context.Context, root *rootOptions) *cobra.Command {
 	opts := deleteOptions{}
+	var taskConfigPath string
 	cmd := &cobra.Command{
 		Use:   "delete",
 		Short: "Delete kline history for one exchange, market, symbol, interval, and date range",
@@ -37,8 +38,14 @@ Time ranges use kline open_time with left-closed, right-open semantics:
   start <= open_time < end
 `),
 		Example: "market-data-admin delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000\n" +
+			"market-data-admin delete --task-config configs/tasks/kline-delete-default.toml\n" +
 			"market-data-admin delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000 --warmup-bars 300 --confirm",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			taskCfg, err := loadTaskConfig(taskConfigPath)
+			if err != nil {
+				return err
+			}
+			applyTaskRangeConfig(cmd, taskCfg, &opts.rangeOptions, nil, &opts.warmupBars, nil)
 			normalizeRangeOptions(&opts.rangeOptions)
 			return runDelete(ctx, root.configPath, opts)
 		},
@@ -46,6 +53,7 @@ Time ranges use kline open_time with left-closed, right-open semantics:
 	addRangeFlags(cmd, &opts.rangeOptions)
 	addWarmupFlag(cmd, &opts.warmupBars)
 	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "submit ClickHouse delete mutations; without this flag the command is dry-run")
+	addTaskConfigFlag(cmd, &taskConfigPath)
 	return cmd
 }
 

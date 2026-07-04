@@ -243,7 +243,7 @@ func resolvePath(configPath string) string {
 		value = strings.TrimSpace(os.Getenv("ALPHAFLOW_POSITION_ENGINE_CONFIG"))
 	}
 	if value == "" {
-		value = "position-engine/configs/local.toml"
+		value = "configs/position-engine.local.toml"
 	}
 	return filepath.Clean(value)
 }

@@ -54,13 +54,14 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	symbol := cfg.Data.Symbols[0]
-	klines, err := klineReader.ReadKlines(ctx, reader.Request{
-		Exchange: cfg.Data.Exchange,
-		Market:   cfg.Data.Market,
-		Symbol:   symbol,
-		Interval: cfg.Data.Interval,
-		Start:    startTime.UnixMilli(),
-		End:      endTime.UnixMilli(),
+	klineResult, err := klineReader.ReadKlines(ctx, reader.Request{
+		Exchange:   cfg.Data.Exchange,
+		Market:     cfg.Data.Market,
+		Symbol:     symbol,
+		Interval:   cfg.Data.Interval,
+		Start:      startTime.UnixMilli(),
+		End:        endTime.UnixMilli(),
+		WarmupBars: cfg.Data.WarmupBars,
 	})
 	if err != nil {
 		return err
@@ -73,7 +74,13 @@ func Run(ctx context.Context, configPath string) error {
 		"market", cfg.Data.Market,
 		"symbol", symbol,
 		"interval", cfg.Data.Interval,
-		"klines", len(klines),
+		"klines", len(klineResult.Klines),
+		"requested_start", klineResult.RequestedStart,
+		"effective_start", klineResult.EffectiveStart,
+		"end_exclusive", klineResult.End,
+		"warmup_bars", klineResult.WarmupBars,
+		"warmup_klines", klineResult.WarmupCount,
+		"trading_klines", klineResult.TradingCount,
 	)
 	return nil
 }
