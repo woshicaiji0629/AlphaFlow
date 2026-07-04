@@ -10,6 +10,12 @@
 | --- | --- | --- |
 | SuperTrend | [supertrend.md](supertrend.md) | 3 分钟入场，多周期确认，消费 Go 聚合后的 Redis 特征 hash。 |
 
+## 设计文档
+
+| 文档 | 文件 | 说明 |
+| --- | --- | --- |
+| Go 策略引擎 | [go-strategy-engine.md](go-strategy-engine.md) | Go-only 在线策略引擎、回测批处理和公共策略包边界设计。 |
+
 ## 通用约定
 
 - 策略引擎只负责编排、调用策略和应用仓位计划。

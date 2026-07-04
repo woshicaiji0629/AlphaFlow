@@ -1,0 +1,187 @@
+package position
+
+import (
+	"context"
+	"sync"
+
+	"alphaflow/go-service/pkg/strategy"
+)
+
+type MemoryStore struct {
+	mu                sync.RWMutex
+	positions         map[string]strategy.Position
+	events            []strategy.StrategyEvent
+	backtestSummaries map[string]strategy.BacktestRunSummary
+	tempKeys          map[string]map[string]struct{}
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		positions:         map[string]strategy.Position{},
+		backtestSummaries: map[string]strategy.BacktestRunSummary{},
+		tempKeys:          map[string]map[string]struct{}{},
+	}
+}
+
+func (s *MemoryStore) GetPosition(ctx context.Context, key Key) (*strategy.Position, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	positionKey, err := RedisKey(key)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	currentPosition, ok := s.positions[positionKey]
+	if !ok {
+		return nil, nil
+	}
+	copied := copyPosition(currentPosition)
+	return &copied, nil
+}
+
+func (s *MemoryStore) SavePosition(ctx context.Context, currentPosition strategy.Position) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	positionKey, err := RedisKey(KeyFromPosition(currentPosition))
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.positions[positionKey] = copyPosition(currentPosition)
+	return nil
+}
+
+func (s *MemoryStore) DeletePosition(ctx context.Context, key Key) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	positionKey, err := RedisKey(key)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.positions, positionKey)
+	return nil
+}
+
+func (s *MemoryStore) AppendEvent(ctx context.Context, event strategy.StrategyEvent) error {
+	return s.AppendEvents(ctx, []strategy.StrategyEvent{event})
+}
+
+func (s *MemoryStore) AppendEvents(ctx context.Context, events []strategy.StrategyEvent) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, event := range events {
+		s.events = append(s.events, copyStrategyEvent(event))
+	}
+	return nil
+}
+
+func (s *MemoryStore) SaveBacktestRunSummary(ctx context.Context, summary strategy.BacktestRunSummary) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.backtestSummaries[summary.RunID] = copyBacktestRunSummary(summary)
+	return nil
+}
+
+func (s *MemoryStore) RegisterTempKey(ctx context.Context, runID string, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := BacktestTempKeysKey(runID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tempKeys[runID] == nil {
+		s.tempKeys[runID] = map[string]struct{}{}
+	}
+	s.tempKeys[runID][key] = struct{}{}
+	return nil
+}
+
+func (s *MemoryStore) CleanupTempKeys(ctx context.Context, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := BacktestTempKeysKey(runID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.tempKeys[runID] {
+		delete(s.positions, key)
+	}
+	delete(s.tempKeys, runID)
+	return nil
+}
+
+func (s *MemoryStore) Events() []strategy.StrategyEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	events := make([]strategy.StrategyEvent, 0, len(s.events))
+	for _, event := range s.events {
+		events = append(events, copyStrategyEvent(event))
+	}
+	return events
+}
+
+func (s *MemoryStore) BacktestRunSummary(runID string) (strategy.BacktestRunSummary, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	summary, ok := s.backtestSummaries[runID]
+	if !ok {
+		return strategy.BacktestRunSummary{}, false
+	}
+	return copyBacktestRunSummary(summary), true
+}
+
+func copyPosition(currentPosition strategy.Position) strategy.Position {
+	currentPosition.ExitRules = copyExitRules(currentPosition.ExitRules)
+	return currentPosition
+}
+
+func copyExitRules(rules []strategy.ExitRule) []strategy.ExitRule {
+	if rules == nil {
+		return nil
+	}
+	copied := make([]strategy.ExitRule, len(rules))
+	for index, rule := range rules {
+		copied[index] = rule
+		copied[index].Metadata = copyStringMap(rule.Metadata)
+	}
+	return copied
+}
+
+func copyStrategyEvent(event strategy.StrategyEvent) strategy.StrategyEvent {
+	event.Metadata = copyStringMap(event.Metadata)
+	return event
+}
+
+func copyBacktestRunSummary(summary strategy.BacktestRunSummary) strategy.BacktestRunSummary {
+	summary.Symbols = append([]string(nil), summary.Symbols...)
+	summary.Metadata = copyStringMap(summary.Metadata)
+	return summary
+}
+
+func copyStringMap(items map[string]string) map[string]string {
+	if items == nil {
+		return nil
+	}
+	copied := make(map[string]string, len(items))
+	for key, value := range items {
+		copied[key] = value
+	}
+	return copied
+}
