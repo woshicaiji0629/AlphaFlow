@@ -112,6 +112,19 @@ symbols = []
 	}
 }
 
+func TestRejectsUnknownFields(t *testing.T) {
+	path := writeConfig(t, `
+[binance]
+enabled = true
+symbols = ["ethusdt"]
+unknown = true
+`)
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected unknown field to be rejected")
+	}
+}
+
 func TestDefaultMarketPolicy(t *testing.T) {
 	if RESTLimit() != 200 {
 		t.Fatalf("RESTLimit = %d, want 200", RESTLimit())

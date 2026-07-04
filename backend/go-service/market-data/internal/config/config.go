@@ -72,8 +72,12 @@ func Load(configPath string) (Config, error) {
 	path := resolvePath(configPath)
 	cfg := defaultConfig()
 
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if err := validateDecodedFields(path, metadata); err != nil {
+		return Config{}, err
 	}
 
 	normalize(&cfg)
@@ -130,6 +134,31 @@ func defaultConfig() Config {
 }
 
 func validate(cfg Config) error {
+	validators := []func(Config) error{
+		validateExchangeSymbols,
+		validateClickHouse,
+	}
+	for _, validator := range validators {
+		if err := validator(cfg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDecodedFields(path string, metadata toml.MetaData) error {
+	undecoded := metadata.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(undecoded))
+	for _, key := range undecoded {
+		fields = append(fields, key.String())
+	}
+	return fmt.Errorf("decode config %s: unknown fields: %s", path, strings.Join(fields, ", "))
+}
+
+func validateExchangeSymbols(cfg Config) error {
 	if cfg.Binance.Enabled {
 		if len(cfg.Binance.Symbols) == 0 {
 			return fmt.Errorf("binance symbols cannot be empty when enabled")
@@ -150,22 +179,27 @@ func validate(cfg Config) error {
 			return fmt.Errorf("bybit symbols cannot be empty when enabled")
 		}
 	}
-	if cfg.ClickHouse.Enabled {
-		if strings.TrimSpace(cfg.ClickHouse.Addr) == "" {
-			return fmt.Errorf("clickhouse addr cannot be empty when enabled")
-		}
-		if strings.TrimSpace(cfg.ClickHouse.Database) == "" {
-			return fmt.Errorf("clickhouse database cannot be empty when enabled")
-		}
-		if _, err := ClickHouseDialTimeout(cfg); err != nil {
-			return err
-		}
-		if _, err := ClickHouseReadTimeout(cfg); err != nil {
-			return err
-		}
-		if _, err := ClickHouseRetryInterval(cfg); err != nil {
-			return err
-		}
+	return nil
+}
+
+func validateClickHouse(cfg Config) error {
+	if !cfg.ClickHouse.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.ClickHouse.Addr) == "" {
+		return fmt.Errorf("clickhouse addr cannot be empty when enabled")
+	}
+	if strings.TrimSpace(cfg.ClickHouse.Database) == "" {
+		return fmt.Errorf("clickhouse database cannot be empty when enabled")
+	}
+	if _, err := ClickHouseDialTimeout(cfg); err != nil {
+		return err
+	}
+	if _, err := ClickHouseReadTimeout(cfg); err != nil {
+		return err
+	}
+	if _, err := ClickHouseRetryInterval(cfg); err != nil {
+		return err
 	}
 	return nil
 }

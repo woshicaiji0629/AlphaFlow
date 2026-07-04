@@ -89,8 +89,12 @@ type LoggingConfig struct {
 func Load(configPath string) (Config, error) {
 	path := resolvePath(configPath)
 	cfg := defaultConfig()
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if err := validateDecodedFields(path, metadata); err != nil {
+		return Config{}, err
 	}
 	normalize(&cfg)
 	if err := validate(cfg); err != nil {
@@ -245,14 +249,52 @@ func normalize(cfg *Config) {
 }
 
 func validate(cfg Config) error {
+	validators := []func(Config) error{
+		validateRuntime,
+		validateRedis,
+		validatePosition,
+		validateTargets,
+		validateSizing,
+		validateFee,
+		validateClickHouse,
+	}
+	for _, validator := range validators {
+		if err := validator(cfg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDecodedFields(path string, metadata toml.MetaData) error {
+	undecoded := metadata.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(undecoded))
+	for _, key := range undecoded {
+		fields = append(fields, key.String())
+	}
+	return fmt.Errorf("decode config %s: unknown fields: %s", path, strings.Join(fields, ", "))
+}
+
+func validateRuntime(cfg Config) error {
 	if _, err := ScanInterval(cfg); err != nil {
 		return err
 	}
-	if _, err := BacktestTTL(cfg); err != nil {
-		return err
-	}
+	return nil
+}
+
+func validateRedis(cfg Config) error {
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		return fmt.Errorf("redis addr cannot be empty")
+	}
+	return nil
+}
+
+func validatePosition(cfg Config) error {
+	if _, err := BacktestTTL(cfg); err != nil {
+		return err
 	}
 	switch PositionScope(cfg) {
 	case strategy.PositionScopeBacktest:
@@ -263,6 +305,10 @@ func validate(cfg Config) error {
 	default:
 		return fmt.Errorf("unsupported position scope %q", cfg.Position.Scope)
 	}
+	return nil
+}
+
+func validateTargets(cfg Config) error {
 	if len(cfg.Targets) == 0 {
 		return fmt.Errorf("targets cannot be empty")
 	}
@@ -280,31 +326,44 @@ func validate(cfg Config) error {
 			return fmt.Errorf("targets[%d].interval cannot be empty", index)
 		}
 	}
+	return nil
+}
+
+func validateSizing(cfg Config) error {
 	if cfg.Sizing.MarginQuote < 0 {
 		return fmt.Errorf("sizing.margin_quote cannot be negative")
 	}
 	if cfg.Sizing.Leverage < 0 {
 		return fmt.Errorf("sizing.leverage cannot be negative")
 	}
+	return nil
+}
+
+func validateFee(cfg Config) error {
 	if cfg.Fee.FeeRate < 0 {
 		return fmt.Errorf("fee.fee_rate cannot be negative")
 	}
 	if cfg.Fee.RebatePct < 0 || cfg.Fee.RebatePct > 100 {
 		return fmt.Errorf("fee.rebate_pct must be between 0 and 100")
 	}
-	if cfg.ClickHouse.Enabled {
-		if strings.TrimSpace(cfg.ClickHouse.Addr) == "" {
-			return fmt.Errorf("clickhouse addr cannot be empty when enabled")
-		}
-		if strings.TrimSpace(cfg.ClickHouse.Database) == "" {
-			return fmt.Errorf("clickhouse database cannot be empty when enabled")
-		}
-		if _, err := ClickHouseDialTimeout(cfg); err != nil {
-			return err
-		}
-		if _, err := ClickHouseReadTimeout(cfg); err != nil {
-			return err
-		}
+	return nil
+}
+
+func validateClickHouse(cfg Config) error {
+	if !cfg.ClickHouse.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.ClickHouse.Addr) == "" {
+		return fmt.Errorf("clickhouse addr cannot be empty when enabled")
+	}
+	if strings.TrimSpace(cfg.ClickHouse.Database) == "" {
+		return fmt.Errorf("clickhouse database cannot be empty when enabled")
+	}
+	if _, err := ClickHouseDialTimeout(cfg); err != nil {
+		return err
+	}
+	if _, err := ClickHouseReadTimeout(cfg); err != nil {
+		return err
 	}
 	return nil
 }

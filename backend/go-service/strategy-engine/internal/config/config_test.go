@@ -116,3 +116,26 @@ interval = "3m"
 		t.Fatal("Load() error = nil, want clickhouse validation error")
 	}
 }
+
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[runtime]
+scan_interval = "2s"
+unknown = true
+
+[[targets]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "3m"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want unknown field error")
+	}
+}
