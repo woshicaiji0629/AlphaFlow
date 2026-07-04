@@ -16,10 +16,11 @@
 - 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - 独立回测引擎入口和配置骨架：`backtest-engine`
-- 独立仓位/执行路由服务骨架：`position-engine`
+- 独立仓位/执行路由服务：`position-engine`
 - 策略决策 Redis Stream 协议：`pkg/strategybus`
 - 策略结果路由公共包：`pkg/strategyroute`
 - paper 仓位处理器公共包：`pkg/positionhandler/paper`
+- Redis 幂等状态存储：`pkg/idempotency`
 - `bt` / `paper` 本地策略仓位隔离
 - 止盈、止损、移动止损、分批退出
 - 回测和模拟仓 sizing：`margin_quote * leverage`
@@ -32,7 +33,7 @@
 - 真实交易所 order executor
 - 完整回测历史读取、时间推进、模拟成交和报告输出
 - 交易所账户级风控和 symbol 下单能力换算
-- 在线幂等落库和重复订单意图拦截
+- 订单服务级幂等落库和重复订单意图拦截
 - HTTP 健康检查接口
 
 ## 目标边界
@@ -44,7 +45,7 @@
 - 仓位管理、模拟成交、实盘执行和通知路由由独立 position-engine 承接。
 - 策略实现放在 Go 公共包，供在线引擎和回测共同使用。
 - Python 策略框架只作为旧原型参考，不作为新架构依赖。
-- 策略引擎只产出策略结果、仓位计划和订单意图。
+- 策略引擎只产出策略结果，并通过策略决策总线交给下游路由服务。
 - 真实订单状态机后续拆到订单服务。
 
 核心要求是在线和回测共享同一套策略逻辑，入口、配置、数据来源、信号路由、成交模型和持久化范围保持独立。
@@ -119,12 +120,13 @@ backend/go-service/pkg/execution/paper.go
 
 - 从 `PositionStore` 读取每个策略的当前仓位
 - 调用 `strategy.Engine`
-- 将 `strategy.Decision` 交给 `pkg/strategyroute.Dispatcher`
+- 将 `strategy.Decision` 交给 decision publisher
 
 `runner` 不负责：
 
 - 服务配置加载
 - paper / backtest / live / notify 的具体处理逻辑
+- 仓位计划、订单意图和成交处理
 - 真实交易所账户仓位修改
 - 交易所订单状态机
 - 交易所精度和张数换算
@@ -178,7 +180,7 @@ log
 
 - 定义跨服务传递的 `strategy.Decision` envelope。
 - 将 `strategy.Decision` 编码为 Redis Stream payload。
-- 提供 `created_at` / `expires_at` 过期边界。
+- 提供 `trace_id`、`signal_id`、result-level signal id 和 `created_at` / `expires_at` 过期边界。
 - 提供 Redis Stream 发布、消费组创建、读取、pending reclaim、dead-letter 和 Ack 能力。
 
 关键文件：
@@ -198,6 +200,34 @@ default_ttl: 60s
 pending_idle: 30s
 dead_letter_stream: st:decision:stream:dead
 max_deliveries: 5
+```
+
+当前 envelope JSON 字段包括：
+
+```text
+target
+results
+trace_id
+signal_id
+created_at
+expires_at
+```
+
+`signal_id` 是 envelope 级幂等和追踪标识，基于 target 以及每个 result 的 `strategy_name`、`signal.strategy`、`signal.side`、`signal.open_time` 生成；result 顺序变化不会改变 envelope 级 `signal_id`。`position-engine` 处理时会进一步使用 `NewResultSignalID(target, result)` 生成 result-level 幂等 key。
+
+### `pkg/idempotency`
+
+职责：
+
+- 提供幂等状态接口。
+- 提供 Redis 实现。
+- 使用 `processing` 和 `completed` 状态区分“正在处理”和“已经完成”。
+- 通过 TTL 回收异常中断的 processing key 和已完成 key。
+
+关键文件：
+
+```text
+backend/go-service/pkg/idempotency/store.go
 ```
 
 ## 服务形态
@@ -234,11 +264,8 @@ Redis indwin / indrt
   -> strategy.Snapshot
   -> strategy.Engine(Supertrend)
   -> strategy-engine/internal/runner
-  -> position.Manager
-  -> execution.OrderIntent
-  -> PaperBroker
-  -> position.RedisStore
-  -> position.ClickHouseStore
+  -> pkg/strategybus.RedisPublisher
+  -> Redis Stream st:decision:stream
 ```
 
 在线引擎职责：
@@ -247,15 +274,13 @@ Redis indwin / indrt
 - 从 Redis 读取实时指标特征和已收盘窗口特征。
 - 构造公共 `strategy.Snapshot`。
 - 调用公共 `strategy.Engine`。
-- 生成信号、仓位计划和订单意图。
-- 写入事件历史和当前仓位。
+- 发布 `strategy.Decision`。
 - 输出运行日志。
 
 尚未完成的在线职责：
 
-- 做在线幂等控制，避免同一根 K 线重复开仓或重复生成订单意图。
 - 暴露 HTTP 健康检查接口。
-- 接入真实交易所 order executor。
+- 接入更多策略配置。
 
 ### 回测批处理
 
@@ -309,7 +334,7 @@ backend/go-service/backtest-engine/internal/report/
 backend/go-service/position-engine/cmd/position-engine/main.go
 ```
 
-当前 `position-engine` 实现入口、配置加载、Redis Stream 输入、paper route 处理、app 骨架和 route 校验：
+当前 `position-engine` 实现入口、配置加载、Redis Stream 输入、长驻消费、pending reclaim、dead-letter、result-level 幂等、paper route 处理和 route 校验：
 
 ```text
 backend/go-service/position-engine/cmd/position-engine/
@@ -322,6 +347,7 @@ backend/go-service/position-engine/internal/config/
 
 ```text
 strategy.Decision / strategy.Result
+  -> pkg/idempotency.Store
   -> pkg/strategyroute.Dispatcher
   -> paper handler / backtest handler / live handler / notify handler
   -> position.Store / execution.Broker / notification sink
@@ -333,8 +359,9 @@ strategy.Decision / strategy.Result
 - 维护 paper/backtest/testnet/live 各自独立的仓位状态。
 - 生成仓位计划、订单意图、成交事件或通知消息。
 - 允许不同策略使用不同 sink，互不干扰。
+- 对 Redis Stream 消息和 result-level signal 做幂等控制。
 
-在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 Redis Stream 上，`position-engine` 通过消费组读取 decision，先接入 paper handler，并从 Redis `lp/mp` 价格 key 补最新价格上下文，处理成功后 Ack；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的 pending 消息可 reclaim，超过投递上限后进入 dead-letter stream。backtest/live/notify handler 后续补齐。
+在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 Redis Stream 上，`position-engine` 通过消费组长驻读取 decision，并从 Redis `lp/mp` 价格 key 补最新价格上下文。处理成功后 Ack；空批次带 backoff；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的 pending 消息可 reclaim，超过投递上限后进入 dead-letter stream。幂等优先使用 result-level signal id，兼容旧消息的 envelope signal id 或 message id。backtest/live/notify handler 后续补齐。
 
 ## Snapshot
 
@@ -722,7 +749,44 @@ updated_at
 
 ## 幂等要求
 
-在线服务必须生成稳定幂等键。当前 `execution.IntentIdempotencyKey` 包含：
+策略决策总线和仓位路由服务必须生成稳定幂等键。
+
+当前 `pkg/strategybus` 会为每个 `DecisionEnvelope` 生成：
+
+```text
+trace_id
+signal_id
+```
+
+`signal_id` 基于 target 和 results 生成，用于整包级追踪和兼容。`position-engine` 处理时优先使用 result-level signal id：
+
+```text
+result:{rsig_xxx}
+```
+
+result-level id 基于：
+
+```text
+exchange
+market
+symbol
+interval
+scope
+account
+run_id
+strategy_name
+signal.strategy
+signal.side
+signal.open_time
+```
+
+同一个 result-level 幂等键重复出现时，`position-engine` 不能重复执行该 result。当前 `pkg/idempotency` 使用 Redis `processing` / `completed` 状态控制：
+
+- `started`：当前实例获得处理权。
+- `processing`：其他实例或前一次处理仍可能在执行，不 Ack，保持 pending。
+- `completed`：已处理完成，直接 Ack 当前消息并跳过。
+
+后续订单服务还需要自己的订单意图幂等键。当前 `execution.IntentIdempotencyKey` 包含：
 
 ```text
 intent
@@ -739,19 +803,18 @@ side
 position_side
 ```
 
-同一个幂等键重复出现时，在线引擎不能重复写入新的订单意图。
+同一个订单意图幂等键重复出现时，订单服务不能重复写入新的订单意图或重复向交易所下单。
 
 ## 当前限制
 
 - 还没有完整回测时间推进、模拟成交和报告输出。
-- position-engine 已接入 Redis Stream `strategy.Decision` 输入和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；失败消息具备 pending reclaim 和 dead-letter 骨架。
+- position-engine 已接入 Redis Stream `strategy.Decision` 输入、长驻消费、空批次 backoff、pending reclaim、dead-letter、result-level 幂等和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决。
 - 还没有 position-engine 的 backtest/live/notify handler 实现。
 - 还没有真实交易所订单服务。
 - 还没有交易所精度、张数、最小下单量换算。
-- 还没有在线幂等落库和重复订单意图拦截。
+- 还没有订单服务级幂等落库和重复订单意图拦截。
 - 还没有 HTTP 健康检查接口。
-- runner 当前只对 `bt` / `paper` 更新本地仓位。
-- `testnet` / `live` 当前只记录事件，不修改交易所账户级仓位。
+- `testnet` / `live` handler 尚未接入真实交易所账户级仓位。
 - ClickHouse 表通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
 - 当前 PnL 估算适用于模拟和回测；实盘以交易所成交和手续费为准。
 
@@ -760,7 +823,7 @@ position_side
 建议按以下顺序推进：
 
 1. 实现回测时间推进、模拟成交和报告输出。
-2. 实现在线幂等落库和重复订单意图拦截。
+2. 实现 position-engine 的 notify handler。
 3. 增加交易所 symbol capability 缓存和数量换算。
 4. 为过期策略反向退出但无 exit rule 的场景补明确 action 协议。
 5. 拆出 order executor 服务。
