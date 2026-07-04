@@ -73,3 +73,34 @@ type BacktestRunSummary struct {
 	CreatedAt     int64
 	UpdatedAt     int64
 }
+
+type BacktestTrade struct {
+	TradeID              string
+	RunID                string
+	Account              string
+	Exchange             string
+	Market               string
+	Symbol               string
+	StrategyName         string
+	PositionSide         ExchangePositionSide
+	EntryTime            int64
+	EntryBarOpenTime     int64
+	EntryPrice           string
+	EntrySize            float64
+	EntryReason          string
+	ExitTime             int64
+	ExitBarOpenTime      int64
+	ExitPrice            string
+	ExitSize             float64
+	ExitReason           string
+	PnL                  string
+	Fee                  string
+	ReturnPct            string
+	ReturnOnMarginPct    string
+	EntryEventID         string
+	ExitEventID          string
+	EntryExchangeOrderID string
+	ExitExchangeOrderID  string
+	Metadata             map[string]string
+	CreatedAt            int64
+}

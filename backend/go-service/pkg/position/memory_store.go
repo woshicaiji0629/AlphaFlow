@@ -12,6 +12,7 @@ type MemoryStore struct {
 	positions         map[string]strategy.Position
 	events            []strategy.StrategyEvent
 	backtestSummaries map[string]strategy.BacktestRunSummary
+	backtestTrades    []strategy.BacktestTrade
 	tempKeys          map[string]map[string]struct{}
 }
 
@@ -69,6 +70,25 @@ func (s *MemoryStore) DeletePosition(ctx context.Context, key Key) error {
 	return nil
 }
 
+func (s *MemoryStore) ListPositions(ctx context.Context, filter Filter) ([]strategy.Position, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateListFilter(filter); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	positions := make([]strategy.Position, 0, len(s.positions))
+	for _, currentPosition := range s.positions {
+		if !positionMatchesFilter(currentPosition, filter) {
+			continue
+		}
+		positions = append(positions, copyPosition(currentPosition))
+	}
+	return positions, nil
+}
+
 func (s *MemoryStore) AppendEvent(ctx context.Context, event strategy.StrategyEvent) error {
 	return s.AppendEvents(ctx, []strategy.StrategyEvent{event})
 }
@@ -92,6 +112,18 @@ func (s *MemoryStore) SaveBacktestRunSummary(ctx context.Context, summary strate
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.backtestSummaries[summary.RunID] = copyBacktestRunSummary(summary)
+	return nil
+}
+
+func (s *MemoryStore) SaveBacktestTrades(ctx context.Context, trades []strategy.BacktestTrade) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, trade := range trades {
+		s.backtestTrades = append(s.backtestTrades, copyBacktestTrade(trade))
+	}
 	return nil
 }
 
@@ -147,6 +179,16 @@ func (s *MemoryStore) BacktestRunSummary(runID string) (strategy.BacktestRunSumm
 	return copyBacktestRunSummary(summary), true
 }
 
+func (s *MemoryStore) BacktestTrades() []strategy.BacktestTrade {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	trades := make([]strategy.BacktestTrade, 0, len(s.backtestTrades))
+	for _, trade := range s.backtestTrades {
+		trades = append(trades, copyBacktestTrade(trade))
+	}
+	return trades
+}
+
 func copyPosition(currentPosition strategy.Position) strategy.Position {
 	currentPosition.ExitRules = copyExitRules(currentPosition.ExitRules)
 	return currentPosition
@@ -173,6 +215,11 @@ func copyBacktestRunSummary(summary strategy.BacktestRunSummary) strategy.Backte
 	summary.Symbols = append([]string(nil), summary.Symbols...)
 	summary.Metadata = copyStringMap(summary.Metadata)
 	return summary
+}
+
+func copyBacktestTrade(trade strategy.BacktestTrade) strategy.BacktestTrade {
+	trade.Metadata = copyStringMap(trade.Metadata)
+	return trade
 }
 
 func copyStringMap(items map[string]string) map[string]string {

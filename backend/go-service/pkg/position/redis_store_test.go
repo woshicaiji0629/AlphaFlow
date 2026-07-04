@@ -104,6 +104,13 @@ func TestRedisStoreNilClientNoops(t *testing.T) {
 	if err := store.DeletePosition(ctx, key); err != nil {
 		t.Fatalf("DeletePosition() error = %v", err)
 	}
+	positions, err := store.ListPositions(ctx, Filter{Scope: strategy.PositionScopePaper})
+	if err != nil {
+		t.Fatalf("ListPositions() error = %v", err)
+	}
+	if len(positions) != 0 {
+		t.Fatalf("ListPositions() len = %d, want 0", len(positions))
+	}
 	if err := store.RegisterTempKey(ctx, "run-1", "key-1"); err != nil {
 		t.Fatalf("RegisterTempKey() error = %v", err)
 	}

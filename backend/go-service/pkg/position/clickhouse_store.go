@@ -95,6 +95,20 @@ func (s *ClickHouseStore) SaveBacktestRunSummary(ctx context.Context, summary st
 	return nil
 }
 
+func (s *ClickHouseStore) SaveBacktestTrades(ctx context.Context, trades []strategy.BacktestTrade) error {
+	if s == nil || s.db == nil || len(trades) == 0 {
+		return nil
+	}
+	query, args, err := buildBacktestTradesInsert(trades)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("insert backtest trades: %w", err)
+	}
+	return nil
+}
+
 func (s *ClickHouseStore) initSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS strategy_events (
@@ -131,6 +145,43 @@ func (s *ClickHouseStore) initSchema(ctx context.Context) error {
 		ORDER BY (scope, exchange, market, symbol, strategy_name, event_time_ms, event_id)
 	`); err != nil {
 		return fmt.Errorf("create strategy_events table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS backtest_trades (
+			trade_id String,
+			run_id String,
+			account String,
+			exchange LowCardinality(String),
+			market LowCardinality(String),
+			symbol LowCardinality(String),
+			strategy_name LowCardinality(String),
+			position_side LowCardinality(String),
+			entry_time_ms Int64,
+			entry_bar_open_time_ms Int64,
+			entry_price String,
+			entry_size Float64,
+			entry_reason String,
+			exit_time_ms Int64,
+			exit_bar_open_time_ms Int64,
+			exit_price String,
+			exit_size Float64,
+			exit_reason String,
+			pnl String,
+			fee String,
+			return_pct String,
+			return_on_margin_pct String,
+			entry_event_id String,
+			exit_event_id String,
+			entry_exchange_order_id String,
+			exit_exchange_order_id String,
+			metadata_json String,
+			created_at_ms Int64
+		)
+		ENGINE = ReplacingMergeTree(created_at_ms)
+		PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(exit_time_ms))
+		ORDER BY (run_id, exchange, market, symbol, strategy_name, exit_time_ms, trade_id)
+	`); err != nil {
+		return fmt.Errorf("create backtest_trades table: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS backtest_run_summary (
@@ -253,6 +304,62 @@ func buildBacktestRunSummaryInsert(summary strategy.BacktestRunSummary) (string,
 			summary.CreatedAt,
 			summary.UpdatedAt,
 		}, nil
+}
+
+func buildBacktestTradesInsert(trades []strategy.BacktestTrade) (string, []any, error) {
+	if len(trades) == 0 {
+		return "", nil, nil
+	}
+	rows := make([]string, 0, len(trades))
+	args := make([]any, 0, len(trades)*28)
+	for _, trade := range trades {
+		metadata, err := encodeStringMap(trade.Metadata)
+		if err != nil {
+			return "", nil, fmt.Errorf("encode trade metadata: %w", err)
+		}
+		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			trade.TradeID,
+			trade.RunID,
+			trade.Account,
+			trade.Exchange,
+			trade.Market,
+			trade.Symbol,
+			trade.StrategyName,
+			string(trade.PositionSide),
+			trade.EntryTime,
+			trade.EntryBarOpenTime,
+			trade.EntryPrice,
+			trade.EntrySize,
+			trade.EntryReason,
+			trade.ExitTime,
+			trade.ExitBarOpenTime,
+			trade.ExitPrice,
+			trade.ExitSize,
+			trade.ExitReason,
+			trade.PnL,
+			trade.Fee,
+			trade.ReturnPct,
+			trade.ReturnOnMarginPct,
+			trade.EntryEventID,
+			trade.ExitEventID,
+			trade.EntryExchangeOrderID,
+			trade.ExitExchangeOrderID,
+			metadata,
+			trade.CreatedAt,
+		)
+	}
+	return `
+		INSERT INTO backtest_trades (
+			trade_id, run_id, account,
+			exchange, market, symbol, strategy_name, position_side,
+			entry_time_ms, entry_bar_open_time_ms, entry_price, entry_size, entry_reason,
+			exit_time_ms, exit_bar_open_time_ms, exit_price, exit_size, exit_reason,
+			pnl, fee, return_pct, return_on_margin_pct,
+			entry_event_id, exit_event_id,
+			entry_exchange_order_id, exit_exchange_order_id,
+			metadata_json, created_at_ms
+		) VALUES ` + strings.Join(rows, ", "), args, nil
 }
 
 func encodeStringMap(items map[string]string) (string, error) {

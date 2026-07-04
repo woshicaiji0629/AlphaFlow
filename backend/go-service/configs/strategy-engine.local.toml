@@ -17,6 +17,9 @@ default_ttl = "30s"
 scope = "paper"
 account = "default"
 
+[strategies]
+enabled = ["supertrend"]
+
 [sizing]
 margin_quote = 100
 leverage = 100

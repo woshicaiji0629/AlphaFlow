@@ -74,6 +74,30 @@ enabled = true
 	if completedTTL <= 0 {
 		t.Fatalf("completed ttl = %s, want positive", completedTTL)
 	}
+	scannerInterval, err := ScannerInterval(cfg)
+	if err != nil {
+		t.Fatalf("ScannerInterval() error = %v", err)
+	}
+	if scannerInterval <= 0 {
+		t.Fatalf("scanner interval = %s, want positive", scannerInterval)
+	}
+}
+
+func TestLoadValidatesEnabledScannerInterval(t *testing.T) {
+	path := writeConfig(t, `
+[position_scanner]
+enabled = true
+interval = "0s"
+
+[[routes]]
+strategy = "supertrend"
+sink = "paper"
+`)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want scanner interval error")
+	}
 }
 
 func TestLoadRejectsUnsupportedSink(t *testing.T) {

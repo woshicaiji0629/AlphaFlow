@@ -101,6 +101,77 @@ func (s *RedisStore) DeletePosition(ctx context.Context, key Key) error {
 	return nil
 }
 
+func (s *RedisStore) ListPositions(ctx context.Context, filter Filter) ([]strategy.Position, error) {
+	if s == nil || s.client == nil {
+		return nil, nil
+	}
+	if err := validateListFilter(filter); err != nil {
+		return nil, err
+	}
+	keys, err := s.positionKeys(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	positions := make([]strategy.Position, 0, len(keys))
+	for _, key := range keys {
+		payload, err := s.client.Get(ctx, key).Bytes()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get redis position %s: %w", key, err)
+		}
+		currentPosition, err := decodePosition(payload)
+		if err != nil {
+			return nil, err
+		}
+		if !positionMatchesFilter(currentPosition, filter) {
+			continue
+		}
+		positions = append(positions, copyPosition(currentPosition))
+	}
+	return positions, nil
+}
+
+func (s *RedisStore) positionKeys(ctx context.Context, filter Filter) ([]string, error) {
+	switch filter.Scope {
+	case strategy.PositionScopePaper:
+		return s.scanKeys(ctx, joinKey(redisKeyPrefix, "pos", string(strategy.PositionScopePaper), "*"))
+	case strategy.PositionScopeBacktest:
+		if filter.RunID == "" {
+			return nil, fmt.Errorf("run_id is required for backtest position listing")
+		}
+		registryKey, err := BacktestTempKeysKey(filter.RunID)
+		if err != nil {
+			return nil, err
+		}
+		keys, err := s.client.SMembers(ctx, registryKey).Result()
+		if err != nil {
+			return nil, fmt.Errorf("read redis backtest position registry: %w", err)
+		}
+		return keys, nil
+	default:
+		return nil, fmt.Errorf("unsupported position scope %q for listing", filter.Scope)
+	}
+}
+
+func (s *RedisStore) scanKeys(ctx context.Context, pattern string) ([]string, error) {
+	keys := []string{}
+	var cursor uint64
+	for {
+		batch, nextCursor, err := s.client.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan redis positions: %w", err)
+		}
+		keys = append(keys, batch...)
+		if nextCursor == 0 {
+			break
+		}
+		cursor = nextCursor
+	}
+	return keys, nil
+}
+
 func (s *RedisStore) RegisterTempKey(ctx context.Context, runID string, key string) error {
 	if s == nil || s.client == nil {
 		return nil

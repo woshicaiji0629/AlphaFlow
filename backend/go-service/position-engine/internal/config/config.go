@@ -20,6 +20,7 @@ type Config struct {
 	Input       InputConfig       `toml:"input"`
 	Idempotency IdempotencyConfig `toml:"idempotency"`
 	Position    PositionConfig    `toml:"position"`
+	Scanner     ScannerConfig     `toml:"position_scanner"`
 	Sizing      SizingConfig      `toml:"sizing"`
 	Fee         FeeConfig         `toml:"fee"`
 	Routes      []RouteConfig     `toml:"routes"`
@@ -59,6 +60,11 @@ type IdempotencyConfig struct {
 type PositionConfig struct {
 	Scope   string `toml:"scope"`
 	Account string `toml:"account"`
+}
+
+type ScannerConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Interval string `toml:"interval"`
 }
 
 type SizingConfig struct {
@@ -163,6 +169,10 @@ func PositionScope(cfg Config) strategy.PositionScope {
 	return strategy.PositionScope(cfg.Position.Scope)
 }
 
+func ScannerInterval(cfg Config) (time.Duration, error) {
+	return parseDuration("position_scanner.interval", cfg.Scanner.Interval)
+}
+
 func InputDefaultTTL(cfg Config) (time.Duration, error) {
 	return parseDuration("input.default_ttl", cfg.Input.DefaultTTL)
 }
@@ -212,6 +222,10 @@ func defaultConfig() Config {
 		Position: PositionConfig{
 			Scope:   string(strategy.PositionScopePaper),
 			Account: "paper-default",
+		},
+		Scanner: ScannerConfig{
+			Enabled:  false,
+			Interval: "5s",
 		},
 		Sizing: SizingConfig{
 			MarginQuote:       100,
@@ -264,6 +278,7 @@ func normalize(cfg *Config) {
 	cfg.Idempotency.CompletedTTL = strings.TrimSpace(cfg.Idempotency.CompletedTTL)
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
+	cfg.Scanner.Interval = strings.TrimSpace(cfg.Scanner.Interval)
 	for index, route := range cfg.Routes {
 		cfg.Routes[index].Strategy = strings.TrimSpace(route.Strategy)
 		cfg.Routes[index].Sink = strings.ToLower(strings.TrimSpace(route.Sink))
@@ -324,6 +339,11 @@ func validate(cfg Config) error {
 	}
 	if cfg.Position.Account == "" {
 		return fmt.Errorf("position.account cannot be empty")
+	}
+	if cfg.Scanner.Enabled {
+		if _, err := ScannerInterval(cfg); err != nil {
+			return err
+		}
 	}
 	if cfg.Sizing.MarginQuote <= 0 {
 		return fmt.Errorf("sizing.margin_quote must be positive")

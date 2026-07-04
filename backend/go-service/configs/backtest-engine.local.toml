@@ -24,6 +24,10 @@ disable_short_exposure = false
 fee_rate = 0.0006
 rebate_pct = 0
 
+[result]
+event_batch_size = 1000
+trade_batch_size = 1000
+
 [clickhouse]
 enabled = true
 addr = "localhost:9000"

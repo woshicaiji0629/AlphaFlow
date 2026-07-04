@@ -30,6 +30,10 @@ leverage = 20
 [fee]
 fee_rate = 0.001
 rebate_pct = 10
+
+[result]
+event_batch_size = 123
+trade_batch_size = 45
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -58,6 +62,41 @@ rebate_pct = 10
 	}
 	if !endTime.After(startTime) {
 		t.Fatal("end time should be after start time")
+	}
+	if cfg.Result.EventBatchSize != 123 {
+		t.Fatalf("event batch size = %d, want 123", cfg.Result.EventBatchSize)
+	}
+	if cfg.Result.TradeBatchSize != 45 {
+		t.Fatalf("trade batch size = %d, want 45", cfg.Result.TradeBatchSize)
+	}
+}
+
+func TestLoadRejectsInvalidResultBatchSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[runtime]
+run_id = "run-1"
+strategy_set = "supertrend"
+
+[data]
+exchange = "binance"
+market = "um"
+symbols = ["ETHUSDT"]
+interval = "3m"
+start_time = "2026-01-01T00:00:00Z"
+end_time = "2026-01-02T00:00:00Z"
+
+[result]
+event_batch_size = 0
+trade_batch_size = 100
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want result batch validation error")
 	}
 }
 

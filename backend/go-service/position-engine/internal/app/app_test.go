@@ -321,6 +321,80 @@ func TestIdleBackoffUsesShortInputBlock(t *testing.T) {
 	}
 }
 
+func TestMaybeScanPositionsRunsWhenDue(t *testing.T) {
+	nextScanAt := time.Unix(10, 0)
+	scanner := &fakeScannerProcessor{}
+	scanned, err := maybeScanPositions(
+		context.Background(),
+		config.Config{Scanner: config.ScannerConfig{Enabled: true, Interval: "5s"}},
+		scanner,
+		time.Unix(11, 0),
+		&nextScanAt,
+	)
+	if err != nil {
+		t.Fatalf("maybeScanPositions() error = %v", err)
+	}
+	if scanned != 1 {
+		t.Fatalf("scanned = %d, want 1", scanned)
+	}
+	if scanner.scans != 1 {
+		t.Fatalf("scanner calls = %d, want 1", scanner.scans)
+	}
+	if !nextScanAt.Equal(time.Unix(16, 0)) {
+		t.Fatalf("next scan = %s, want %s", nextScanAt, time.Unix(16, 0))
+	}
+}
+
+func TestMaybeScanPositionsSkipsWhenDisabled(t *testing.T) {
+	nextScanAt := time.Unix(10, 0)
+	scanner := &fakeScannerProcessor{}
+	scanned, err := maybeScanPositions(
+		context.Background(),
+		config.Config{Scanner: config.ScannerConfig{Enabled: false, Interval: "5s"}},
+		scanner,
+		time.Unix(11, 0),
+		&nextScanAt,
+	)
+	if err != nil {
+		t.Fatalf("maybeScanPositions() error = %v", err)
+	}
+	if scanned != 0 {
+		t.Fatalf("scanned = %d, want 0", scanned)
+	}
+	if scanner.scans != 0 {
+		t.Fatalf("scanner calls = %d, want 0", scanner.scans)
+	}
+}
+
+func TestPaperDecisionProcessorScanPositionsClosesTriggeredRiskExit(t *testing.T) {
+	store := position.NewMemoryStore()
+	processor := newTestPaperDecisionProcessor(t, store, strategy.PriceView{LastPrice: "94"})
+	currentPosition := testLongPosition()
+	currentPosition.ExitRules = []strategy.ExitRule{{
+		Type:         strategy.ExitReasonStopLoss,
+		Reason:       "stop loss",
+		TriggerPrice: "95",
+	}}
+	if err := store.SavePosition(context.Background(), currentPosition); err != nil {
+		t.Fatalf("SavePosition() error = %v", err)
+	}
+
+	scanned, err := processor.ScanPositions(context.Background())
+	if err != nil {
+		t.Fatalf("ScanPositions() error = %v", err)
+	}
+	if scanned != 1 {
+		t.Fatalf("scanned = %d, want 1", scanned)
+	}
+	got, err := store.GetPosition(context.Background(), position.KeyFromPosition(currentPosition))
+	if err != nil {
+		t.Fatalf("GetPosition() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("position = %#v, want closed", got)
+	}
+}
+
 func TestProcessDecisionBatchAcksCompletedIdempotencyKey(t *testing.T) {
 	reader := &fakeDecisionReader{
 		messages: []strategybus.DecisionMessage{{ID: "1-0"}},
@@ -638,6 +712,25 @@ func (p *fakeDecisionProcessor) ProcessDecision(ctx context.Context, message str
 	}
 	p.messages = append(p.messages, message)
 	return true, nil
+}
+
+type fakeScannerProcessor struct {
+	scans int
+}
+
+func (p *fakeScannerProcessor) ProcessDecision(ctx context.Context, message strategybus.DecisionMessage) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *fakeScannerProcessor) ScanPositions(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	p.scans++
+	return 1, nil
 }
 
 type failingDecisionProcessor struct{}

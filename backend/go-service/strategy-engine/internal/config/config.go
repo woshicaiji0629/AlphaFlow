@@ -17,6 +17,7 @@ type Config struct {
 	Redis      RedisConfig      `toml:"redis"`
 	Output     OutputConfig     `toml:"output"`
 	Position   PositionConfig   `toml:"position"`
+	Strategies StrategiesConfig `toml:"strategies"`
 	Sizing     SizingConfig     `toml:"sizing"`
 	Fee        FeeConfig        `toml:"fee"`
 	ClickHouse ClickHouseConfig `toml:"clickhouse"`
@@ -45,6 +46,10 @@ type OutputConfig struct {
 type PositionConfig struct {
 	Scope   string `toml:"scope"`
 	Account string `toml:"account"`
+}
+
+type StrategiesConfig struct {
+	Enabled []string `toml:"enabled"`
 }
 
 type SizingConfig struct {
@@ -122,6 +127,9 @@ func defaultConfig() Config {
 		Position: PositionConfig{
 			Scope:   string(strategy.PositionScopePaper),
 			Account: "default",
+		},
+		Strategies: StrategiesConfig{
+			Enabled: []string{"supertrend"},
 		},
 		Sizing: SizingConfig{
 			MarginQuote:       100,
@@ -247,6 +255,9 @@ func normalize(cfg *Config) {
 			cfg.Targets[index].ConfirmIntervals[intervalIndex] = strings.TrimSpace(interval)
 		}
 	}
+	for index, name := range cfg.Strategies.Enabled {
+		cfg.Strategies.Enabled[index] = strings.ToLower(strings.TrimSpace(name))
+	}
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
 	cfg.Output.Mode = strings.ToLower(strings.TrimSpace(cfg.Output.Mode))
@@ -259,6 +270,7 @@ func validate(cfg Config) error {
 		validateRedis,
 		validateOutput,
 		validatePosition,
+		validateStrategies,
 		validateTargets,
 		validateSizing,
 		validateFee,
@@ -306,6 +318,18 @@ func validatePosition(cfg Config) error {
 	case strategy.PositionScopePaper:
 	default:
 		return fmt.Errorf("unsupported online position scope %q", cfg.Position.Scope)
+	}
+	return nil
+}
+
+func validateStrategies(cfg Config) error {
+	if len(cfg.Strategies.Enabled) == 0 {
+		return fmt.Errorf("strategies.enabled cannot be empty")
+	}
+	for index, name := range cfg.Strategies.Enabled {
+		if name == "" {
+			return fmt.Errorf("strategies.enabled[%d] cannot be empty", index)
+		}
 	}
 	return nil
 }

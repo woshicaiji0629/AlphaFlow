@@ -105,6 +105,81 @@ func TestReadKlinesRejectsMissingWarmup(t *testing.T) {
 	}
 }
 
+func TestReadDatasetLoadsSymbolsAndConfirmIntervals(t *testing.T) {
+	const minute = int64(60_000)
+	store := &fakeKlineStore{
+		klinesBySeries: map[SeriesKey][]marketmodel.Kline{
+			{Symbol: "ETHUSDT", Interval: "1m"}: datasetTestKlines(8*minute, 20*minute, minute),
+			{Symbol: "ETHUSDT", Interval: "5m"}: datasetTestKlines(0, 20*minute, 5*minute),
+			{Symbol: "BTCUSDT", Interval: "1m"}: datasetTestKlines(8*minute, 20*minute, minute),
+			{Symbol: "BTCUSDT", Interval: "5m"}: datasetTestKlines(0, 20*minute, 5*minute),
+		},
+	}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := item.ReadDataset(context.Background(), DatasetRequest{
+		Exchange:         "binance",
+		Market:           "um",
+		Symbols:          []string{"ETHUSDT", "BTCUSDT"},
+		Interval:         "1m",
+		ConfirmIntervals: []string{"5m", "1m"},
+		Start:            10 * minute,
+		End:              20 * minute,
+		WarmupBars:       2,
+	})
+	if err != nil {
+		t.Fatalf("ReadDataset() error = %v", err)
+	}
+	if len(result.Series) != 4 {
+		t.Fatalf("series len = %d, want 4", len(result.Series))
+	}
+	wantRequests := []SeriesKey{
+		{Symbol: "ETHUSDT", Interval: "1m"},
+		{Symbol: "ETHUSDT", Interval: "5m"},
+		{Symbol: "BTCUSDT", Interval: "1m"},
+		{Symbol: "BTCUSDT", Interval: "5m"},
+	}
+	for index, want := range wantRequests {
+		if store.requests[index].Symbol != want.Symbol || store.requests[index].Interval != want.Interval {
+			t.Fatalf("request[%d] = %s/%s, want %s/%s", index, store.requests[index].Symbol, store.requests[index].Interval, want.Symbol, want.Interval)
+		}
+	}
+	if result.TotalKlines() == 0 {
+		t.Fatal("total klines = 0, want loaded klines")
+	}
+}
+
+func TestReadDatasetRejectsMissingConfirmInterval(t *testing.T) {
+	const minute = int64(60_000)
+	store := &fakeKlineStore{
+		klinesBySeries: map[SeriesKey][]marketmodel.Kline{
+			{Symbol: "ETHUSDT", Interval: "1m"}: datasetTestKlines(0, 4*minute, minute),
+			{Symbol: "ETHUSDT", Interval: "5m"}: datasetTestKlines(5*minute, 20*minute, 5*minute),
+		},
+	}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = item.ReadDataset(context.Background(), DatasetRequest{
+		Exchange:         "binance",
+		Market:           "um",
+		Symbols:          []string{"ETHUSDT"},
+		Interval:         "1m",
+		ConfirmIntervals: []string{"5m"},
+		Start:            10 * minute,
+		End:              20 * minute,
+		WarmupBars:       2,
+	})
+	if err == nil {
+		t.Fatal("ReadDataset() error = nil, want missing confirm interval error")
+	}
+}
+
 func TestReadKlinesRejectsInvalidRequest(t *testing.T) {
 	item, err := New(&fakeKlineStore{})
 	if err != nil {
@@ -159,9 +234,11 @@ func TestReadKlinesWrapsStoreError(t *testing.T) {
 }
 
 type fakeKlineStore struct {
-	request Request
-	klines  []marketmodel.Kline
-	err     error
+	request        Request
+	requests       []Request
+	klines         []marketmodel.Kline
+	klinesBySeries map[SeriesKey][]marketmodel.Kline
+	err            error
 }
 
 func (s *fakeKlineStore) RangeKlines(
@@ -184,5 +261,17 @@ func (s *fakeKlineStore) RangeKlines(
 		Start:    start,
 		End:      end,
 	}
+	s.requests = append(s.requests, s.request)
+	if s.klinesBySeries != nil {
+		return s.klinesBySeries[SeriesKey{Symbol: symbol, Interval: interval}], s.err
+	}
 	return s.klines, s.err
+}
+
+func datasetTestKlines(start int64, end int64, intervalMillis int64) []marketmodel.Kline {
+	klines := []marketmodel.Kline{}
+	for openTime := start; openTime < end; openTime += intervalMillis {
+		klines = append(klines, marketmodel.Kline{OpenTime: openTime})
+	}
+	return klines
 }

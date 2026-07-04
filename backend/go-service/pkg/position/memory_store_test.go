@@ -82,6 +82,84 @@ func TestMemoryStoreCleanupTempKeysDeletesBacktestPositions(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreListPositionsFiltersAndCopies(t *testing.T) {
+	store := NewMemoryStore()
+	positions := []strategy.Position{
+		{
+			Scope:        strategy.PositionScopePaper,
+			Account:      "paper-a",
+			Exchange:     "binance",
+			Market:       "um",
+			Symbol:       "ETHUSDT",
+			StrategyName: "supertrend",
+			Side:         strategy.PositionSideLong,
+			Size:         1,
+			ExitRules: []strategy.ExitRule{{
+				Type:     strategy.ExitReasonTakeProfit,
+				Metadata: map[string]string{"source": "test"},
+			}},
+		},
+		{
+			Scope:        strategy.PositionScopePaper,
+			Account:      "paper-a",
+			Exchange:     "binance",
+			Market:       "um",
+			Symbol:       "BTCUSDT",
+			StrategyName: "supertrend",
+			Side:         strategy.PositionSideLong,
+			Size:         1,
+		},
+		{
+			Scope:        strategy.PositionScopePaper,
+			Account:      "paper-b",
+			Exchange:     "binance",
+			Market:       "um",
+			Symbol:       "ETHUSDT",
+			StrategyName: "breakout",
+			Side:         strategy.PositionSideLong,
+			Size:         1,
+		},
+	}
+	for _, currentPosition := range positions {
+		if err := store.SavePosition(context.Background(), currentPosition); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.ListPositions(context.Background(), Filter{
+		Scope:    strategy.PositionScopePaper,
+		Account:  "paper-a",
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("positions len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].StrategyName != "supertrend" {
+		t.Fatalf("strategy = %q, want supertrend", got[0].StrategyName)
+	}
+	got[0].ExitRules[0].Metadata["source"] = "mutated"
+	again, err := store.GetPosition(context.Background(), KeyFromPosition(positions[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ExitRules[0].Metadata["source"] != "test" {
+		t.Fatalf("stored metadata mutated: %#v", again.ExitRules[0].Metadata)
+	}
+}
+
+func TestMemoryStoreListBacktestRequiresRunID(t *testing.T) {
+	store := NewMemoryStore()
+	_, err := store.ListPositions(context.Background(), Filter{Scope: strategy.PositionScopeBacktest})
+	if err == nil {
+		t.Fatal("ListPositions() error = nil, want run_id error")
+	}
+}
+
 func TestMemoryStoreAppendsEventsAndSavesSummary(t *testing.T) {
 	store := NewMemoryStore()
 	event := strategy.StrategyEvent{

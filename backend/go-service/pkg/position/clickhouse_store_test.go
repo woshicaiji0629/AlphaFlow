@@ -117,6 +117,58 @@ func TestBuildBacktestRunSummaryInsert(t *testing.T) {
 	}
 }
 
+func TestBuildBacktestTradesInsert(t *testing.T) {
+	trades := []strategy.BacktestTrade{{
+		TradeID:              "trade-1",
+		RunID:                "run-1",
+		Account:              "paper-default",
+		Exchange:             "binance",
+		Market:               "um",
+		Symbol:               "ETHUSDT",
+		StrategyName:         "supertrend",
+		PositionSide:         strategy.ExchangePositionSideLong,
+		EntryTime:            1000,
+		EntryBarOpenTime:     900,
+		EntryPrice:           "100",
+		EntrySize:            1,
+		EntryReason:          "entry",
+		ExitTime:             2000,
+		ExitBarOpenTime:      1900,
+		ExitPrice:            "110",
+		ExitSize:             1,
+		ExitReason:           "strategy",
+		PnL:                  "9.4",
+		Fee:                  "0.6",
+		ReturnPct:            "9.4",
+		ReturnOnMarginPct:    "9.4",
+		EntryEventID:         "entry-event",
+		ExitEventID:          "exit-event",
+		EntryExchangeOrderID: "entry-order",
+		ExitExchangeOrderID:  "exit-order",
+		Metadata: map[string]string{
+			"gross_pnl": "10",
+		},
+		CreatedAt: 2001,
+	}}
+
+	query, args, err := buildBacktestTradesInsert(trades)
+	if err != nil {
+		t.Fatalf("buildBacktestTradesInsert() error = %v", err)
+	}
+	if !strings.Contains(query, "INSERT INTO backtest_trades") {
+		t.Fatalf("query missing insert target: %s", query)
+	}
+	if got, want := len(args), 28; got != want {
+		t.Fatalf("len(args) = %d, want %d", got, want)
+	}
+	if got := args[0]; got != "trade-1" {
+		t.Fatalf("trade id arg = %v, want trade-1", got)
+	}
+	if got := args[26]; got != `{"gross_pnl":"10"}` {
+		t.Fatalf("metadata arg = %v, want metadata json", got)
+	}
+}
+
 func TestClickHouseDSN(t *testing.T) {
 	dsn := clickHouseDSN(ClickHouseOptions{
 		Addr:        "127.0.0.1:9000",

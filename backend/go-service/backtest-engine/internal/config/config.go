@@ -15,6 +15,7 @@ type Config struct {
 	Data       DataConfig       `toml:"data"`
 	Sizing     SizingConfig     `toml:"sizing"`
 	Fee        FeeConfig        `toml:"fee"`
+	Result     ResultConfig     `toml:"result"`
 	ClickHouse ClickHouseConfig `toml:"clickhouse"`
 	Logging    LoggingConfig    `toml:"logging"`
 }
@@ -47,6 +48,11 @@ type SizingConfig struct {
 type FeeConfig struct {
 	FeeRate   float64 `toml:"fee_rate"`
 	RebatePct float64 `toml:"rebate_pct"`
+}
+
+type ResultConfig struct {
+	EventBatchSize int `toml:"event_batch_size"`
+	TradeBatchSize int `toml:"trade_batch_size"`
 }
 
 type ClickHouseConfig struct {
@@ -108,6 +114,10 @@ func defaultConfig() Config {
 		},
 		Fee: FeeConfig{
 			FeeRate: 0.0006,
+		},
+		Result: ResultConfig{
+			EventBatchSize: 1000,
+			TradeBatchSize: 1000,
 		},
 		ClickHouse: ClickHouseConfig{
 			Enabled:     false,
@@ -186,6 +196,7 @@ func validate(cfg Config) error {
 		validateData,
 		validateSizing,
 		validateFee,
+		validateResult,
 		validateClickHouse,
 	}
 	for _, validator := range validators {
@@ -266,6 +277,16 @@ func validateFee(cfg Config) error {
 	}
 	if cfg.Fee.RebatePct < 0 || cfg.Fee.RebatePct > 100 {
 		return fmt.Errorf("fee.rebate_pct must be between 0 and 100")
+	}
+	return nil
+}
+
+func validateResult(cfg Config) error {
+	if cfg.Result.EventBatchSize <= 0 {
+		return fmt.Errorf("result.event_batch_size must be positive")
+	}
+	if cfg.Result.TradeBatchSize <= 0 {
+		return fmt.Errorf("result.trade_batch_size must be positive")
 	}
 	return nil
 }

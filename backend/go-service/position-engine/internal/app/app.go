@@ -30,6 +30,10 @@ type decisionProcessor interface {
 	ProcessDecision(ctx context.Context, message strategybus.DecisionMessage) (bool, error)
 }
 
+type positionScanner interface {
+	ScanPositions(ctx context.Context) (int, error)
+}
+
 var buildDecisionReader = buildRedisDecisionReader
 var buildDecisionProcessor = buildPaperDecisionProcessor
 var buildIdempotencyStore = buildRedisIdempotencyStore
@@ -83,6 +87,7 @@ type processingStats struct {
 	processed    int
 	acked        int
 	deadLettered int
+	scanned      int
 }
 
 func runLoop(
@@ -93,6 +98,18 @@ func runLoop(
 	processor decisionProcessor,
 	idempotencyStore idempotency.Store,
 ) error {
+	var scanner positionScanner
+	if cfg.Scanner.Enabled {
+		item, ok := processor.(positionScanner)
+		if !ok {
+			return fmt.Errorf("position scanner is enabled but processor does not support scanning")
+		}
+		scanner = item
+	}
+	nextScanAt, err := initialScanTime(cfg, time.Now())
+	if err != nil {
+		return err
+	}
 	enabledRoutes := 0
 	for _, route := range routes {
 		if route.Enabled {
@@ -104,6 +121,11 @@ func runLoop(
 		if err != nil {
 			return err
 		}
+		scanned, err := maybeScanPositions(ctx, cfg, scanner, time.Now(), &nextScanAt)
+		if err != nil {
+			return err
+		}
+		stats.scanned = scanned
 		slog.Info(
 			"position-engine decisions processed",
 			"routes", len(routes),
@@ -112,6 +134,7 @@ func runLoop(
 			"processed", stats.processed,
 			"acked", stats.acked,
 			"dead_lettered", stats.deadLettered,
+			"positions_scanned", stats.scanned,
 		)
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -126,6 +149,42 @@ func runLoop(
 			}
 		}
 	}
+}
+
+func initialScanTime(cfg config.Config, now time.Time) (time.Time, error) {
+	if !cfg.Scanner.Enabled {
+		return time.Time{}, nil
+	}
+	interval, err := config.ScannerInterval(cfg)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return now.Add(interval), nil
+}
+
+func maybeScanPositions(
+	ctx context.Context,
+	cfg config.Config,
+	scanner positionScanner,
+	now time.Time,
+	nextScanAt *time.Time,
+) (int, error) {
+	if !cfg.Scanner.Enabled || scanner == nil {
+		return 0, nil
+	}
+	if nextScanAt == nil || nextScanAt.IsZero() || now.Before(*nextScanAt) {
+		return 0, nil
+	}
+	interval, err := config.ScannerInterval(cfg)
+	if err != nil {
+		return 0, err
+	}
+	scanned, err := scanner.ScanPositions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	*nextScanAt = now.Add(interval)
+	return scanned, nil
 }
 
 func idleBackoff(cfg config.Config) (time.Duration, error) {
@@ -481,6 +540,16 @@ func (p *paperDecisionProcessor) ProcessDecision(ctx context.Context, message st
 		return false, err
 	}
 	return true, nil
+}
+
+func (p *paperDecisionProcessor) ScanPositions(ctx context.Context) (int, error) {
+	if p == nil {
+		return 0, nil
+	}
+	return scanOpenPositions(ctx, p.positionStore, p.prices, p.dispatcher, position.Filter{
+		Scope:   p.defaultScope,
+		Account: p.defaultAccount,
+	})
 }
 
 func (p *paperDecisionProcessor) normalizeTarget(target strategy.Target) strategy.Target {

@@ -10,9 +10,9 @@ import (
 	"alphaflow/go-service/pkg/logger"
 	"alphaflow/go-service/pkg/position"
 	"alphaflow/go-service/pkg/redisclient"
-	"alphaflow/go-service/pkg/strategies/supertrend"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategybus"
+	"alphaflow/go-service/pkg/strategyregistry"
 	"alphaflow/go-service/strategy-engine/internal/config"
 	"alphaflow/go-service/strategy-engine/internal/reader"
 	"alphaflow/go-service/strategy-engine/internal/runner"
@@ -86,8 +86,12 @@ func buildRuntime(
 		MinOpenConfidence:    cfg.Sizing.MinOpenConfidence,
 		DisableShortExposure: cfg.Sizing.DisableShortExposure,
 	})
+	strategies, err := strategyregistry.BuildSet(cfg.Strategies.Enabled)
+	if err != nil {
+		return runtimeState{}, err
+	}
 	strategyRunner, err := runner.New(runner.Options{
-		Engine:          strategy.NewEngine([]strategy.Strategy{supertrend.New(supertrend.Config{})}),
+		Engine:          strategy.NewEngine(strategies),
 		Publisher:       publisher,
 		PositionManager: positionManager,
 		PositionStore:   positionStore,

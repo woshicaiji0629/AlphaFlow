@@ -28,6 +28,10 @@ completed_ttl = "24h"
 scope = "paper"
 account = "paper-default"
 
+[position_scanner]
+enabled = true
+interval = "5s"
+
 [sizing]
 margin_quote = 100
 leverage = 100

@@ -26,6 +26,9 @@ default_ttl = "45s"
 scope = "paper"
 account = "demo"
 
+[strategies]
+enabled = [" SuperTrend "]
+
 [sizing]
 margin_quote = 50
 leverage = 20
@@ -68,6 +71,9 @@ confirm_intervals = ["5m", "10m"]
 	if got := Targets(cfg)[0].Account; got != "demo" {
 		t.Fatalf("account = %q, want demo", got)
 	}
+	if len(cfg.Strategies.Enabled) != 1 || cfg.Strategies.Enabled[0] != "supertrend" {
+		t.Fatalf("strategies enabled = %#v, want [supertrend]", cfg.Strategies.Enabled)
+	}
 	if ttl, err := OutputDefaultTTL(cfg); err != nil {
 		t.Fatalf("OutputDefaultTTL() error = %v", err)
 	} else if ttl.String() != "45s" {
@@ -100,6 +106,28 @@ interval = "3m"
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load() error = nil, want unsupported scope error")
+	}
+}
+
+func TestLoadRejectsEmptyStrategies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[strategies]
+enabled = []
+
+[[targets]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "3m"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want strategies validation error")
 	}
 }
 

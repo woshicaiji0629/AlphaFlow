@@ -28,6 +28,39 @@ type Result struct {
 	TradingCount   int
 }
 
+type DatasetRequest struct {
+	Exchange         string
+	Market           string
+	Symbols          []string
+	Interval         string
+	ConfirmIntervals []string
+	Start            int64
+	End              int64
+	WarmupBars       int64
+}
+
+type SeriesKey struct {
+	Symbol   string
+	Interval string
+}
+
+type SeriesResult struct {
+	Key    SeriesKey
+	Result Result
+}
+
+type Dataset struct {
+	Series []SeriesResult
+}
+
+func (d Dataset) TotalKlines() int {
+	total := 0
+	for _, series := range d.Series {
+		total += len(series.Result.Klines)
+	}
+	return total
+}
+
 type KlineStore interface {
 	RangeKlines(
 		ctx context.Context,
@@ -49,6 +82,40 @@ func New(store KlineStore) (*Reader, error) {
 		return nil, fmt.Errorf("kline store is required")
 	}
 	return &Reader{store: store}, nil
+}
+
+func (r *Reader) ReadDataset(ctx context.Context, request DatasetRequest) (Dataset, error) {
+	if err := validateDatasetRequest(request); err != nil {
+		return Dataset{}, err
+	}
+	intervals := datasetIntervals(request.Interval, request.ConfirmIntervals)
+	dataset := Dataset{
+		Series: make([]SeriesResult, 0, len(request.Symbols)*len(intervals)),
+	}
+	for _, symbol := range request.Symbols {
+		for _, interval := range intervals {
+			result, err := r.ReadKlines(ctx, Request{
+				Exchange:   request.Exchange,
+				Market:     request.Market,
+				Symbol:     symbol,
+				Interval:   interval,
+				Start:      request.Start,
+				End:        request.End,
+				WarmupBars: request.WarmupBars,
+			})
+			if err != nil {
+				return Dataset{}, fmt.Errorf("read dataset %s %s: %w", symbol, interval, err)
+			}
+			dataset.Series = append(dataset.Series, SeriesResult{
+				Key: SeriesKey{
+					Symbol:   symbol,
+					Interval: interval,
+				},
+				Result: result,
+			})
+		}
+	}
+	return dataset, nil
 }
 
 func (r *Reader) ReadKlines(ctx context.Context, request Request) (Result, error) {
@@ -93,6 +160,41 @@ func (r *Reader) ReadKlines(ctx context.Context, request Request) (Result, error
 	}, nil
 }
 
+func validateDatasetRequest(request DatasetRequest) error {
+	if request.Exchange == "" {
+		return fmt.Errorf("exchange cannot be empty")
+	}
+	if request.Market == "" {
+		return fmt.Errorf("market cannot be empty")
+	}
+	if len(request.Symbols) == 0 {
+		return fmt.Errorf("symbols cannot be empty")
+	}
+	for index, symbol := range request.Symbols {
+		if symbol == "" {
+			return fmt.Errorf("symbols[%d] cannot be empty", index)
+		}
+	}
+	if request.Interval == "" {
+		return fmt.Errorf("interval cannot be empty")
+	}
+	if _, err := marketmodel.IntervalMillis(request.Interval); err != nil {
+		return err
+	}
+	for _, interval := range request.ConfirmIntervals {
+		if _, err := marketmodel.IntervalMillis(interval); err != nil {
+			return err
+		}
+	}
+	if request.End < request.Start {
+		return fmt.Errorf("end must be greater than or equal to start")
+	}
+	if request.WarmupBars < 0 {
+		return fmt.Errorf("warmup bars cannot be negative")
+	}
+	return nil
+}
+
 func validateRequest(request Request) error {
 	if request.Exchange == "" {
 		return fmt.Errorf("exchange cannot be empty")
@@ -116,6 +218,19 @@ func validateRequest(request Request) error {
 		return fmt.Errorf("warmup bars cannot be negative")
 	}
 	return nil
+}
+
+func datasetIntervals(interval string, confirmIntervals []string) []string {
+	intervals := make([]string, 0, 1+len(confirmIntervals))
+	seen := map[string]struct{}{}
+	for _, value := range append([]string{interval}, confirmIntervals...) {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		intervals = append(intervals, value)
+	}
+	return intervals
 }
 
 func normalizeKlines(klines []marketmodel.Kline, start int64, end int64) []marketmodel.Kline {
