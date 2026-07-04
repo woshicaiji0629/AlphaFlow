@@ -6,7 +6,7 @@ import (
 )
 
 func KlineLimit() int64 {
-	return 250
+	return 300
 }
 
 func KlineTTL() time.Duration {

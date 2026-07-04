@@ -522,7 +522,7 @@ make go-market-data-admin ARGS='duplicates --exchange binance --market um --symb
 `backfill` 用于补齐历史 K 线：
 
 ```sh
-make go-market-data-admin ARGS='backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000 --concurrency 2'
+make go-market-data-admin ARGS='backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202605010000 --end 202607010000 --warmup-bars 300 --concurrency 2'
 ```
 
 默认模式是 `skip-existing`：
@@ -531,6 +531,21 @@ make go-market-data-admin ARGS='backfill --exchange binance --symbol ETHUSDT --i
 - 只为缺失区间生成远端请求。
 - 请求结果写入前按 `exchange/market/symbol/interval/open_time` 去重。
 - 写入后重新校验完整性。
+
+`--warmup-bars` 用于回测指标预热。它会按每个周期自己的长度把实际补数起点前移，例如 `--warmup-bars 300` 对 `1m` 前移 300 分钟，对 `4h` 前移 1200 小时。日志会同时输出 `requested_start`、`effective_start` 和 `warmup_bars`，回测正式统计仍应从原始 `start` 开始。
+
+`check` 和 `delete` 也支持同样的 `--warmup-bars` 语义：
+
+```sh
+make go-market-data-admin ARGS='check --exchange binance --market um --symbol ETHUSDT --intervals 1m,5m,4h --start 202605010000 --end 202607010000 --warmup-bars 300'
+```
+
+校验时会把范围拆成两段分别检查：
+
+- `warm-up`：`effective_start <= open_time < start`
+- `trading`：`start <= open_time < end`
+
+两段都完整才算整体完整。缺失明细会带上 `phase=warmup` 或 `phase=trading`，方便区分是预热数据不足，还是正式交易区间 K 线缺失。
 
 如果数据已经完整，原生周期会显示 `fetch_jobs=0 fetched=0 written=0`，不会再扫远端。需要重写已有逻辑行时可以使用：
 
@@ -557,6 +572,14 @@ make go-market-data-admin ARGS='delete --exchange binance --market um --symbol E
 ```
 
 删除只针对 `market_klines`。指标是 Redis 缓存和运行时状态，不再写入 ClickHouse，也不由数据维护 CLI 管理。
+
+如果这些 K 线用于回测，删除前需要确认是否包含 warm-up 区间。回测补数通常使用 `effective_start = start - warmup_bars * interval`，删除时应明确区分正式回测 `start` 和实际补数 `effective_start`，避免删掉后续回测第一根 K 线所需的指标预热数据。
+
+```sh
+make go-market-data-admin ARGS='delete --exchange binance --market um --symbol ETHUSDT --interval 4h --start 202605010000 --end 202607010000 --warmup-bars 300'
+```
+
+不带 `--confirm` 时仍是 dry-run。日志会输出 `requested_start`、`effective_start`、`warmup_bars` 和预计删除行数。
 
 启动用于策略仓位历史的 PostgreSQL：
 
@@ -631,7 +654,7 @@ go run ./cmd/market-data-loadtest -symbols=50 -duration=30s -rate=5000 -store-la
 
 ```sh
 cd backend/go-service/market-data
-go run ./cmd/market-data-indicator-loadtest -symbols=500 -lookback=200 -runs=2
+go run ./cmd/market-data-indicator-loadtest -symbols=500 -lookback=300 -runs=2
 ```
 
 指标负载测试会使用服务当前周期集合和假的 K 线/store 数据模拟四个交易所。它会衡量指标 runner 吞吐和模拟的 Redis 指标写入次数，不会写入真实存储。

@@ -10,7 +10,8 @@ import (
 
 type deleteOptions struct {
 	rangeOptions
-	confirm bool
+	confirm    bool
+	warmupBars int64
 }
 
 func newDeleteCommand(ctx context.Context, root *rootOptions) *cobra.Command {
@@ -36,19 +37,23 @@ Time ranges use kline open_time with left-closed, right-open semantics:
   start <= open_time < end
 `),
 		Example: "market-data-admin delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000\n" +
-			"market-data-admin delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000 --confirm",
+			"market-data-admin delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000 --warmup-bars 300 --confirm",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			normalizeRangeOptions(&opts.rangeOptions)
 			return runDelete(ctx, root.configPath, opts)
 		},
 	}
 	addRangeFlags(cmd, &opts.rangeOptions)
+	addWarmupFlag(cmd, &opts.warmupBars)
 	cmd.Flags().BoolVar(&opts.confirm, "confirm", false, "submit ClickHouse delete mutations; without this flag the command is dry-run")
 	return cmd
 }
 
 func runDelete(ctx context.Context, configPath string, opts deleteOptions) error {
 	if err := validateRangeOptions(opts.rangeOptions); err != nil {
+		return err
+	}
+	if err := validateWarmupBars(opts.warmupBars); err != nil {
 		return err
 	}
 	cfg, err := loadConfig(configPath)
@@ -65,7 +70,11 @@ func runDelete(ctx context.Context, configPath string, opts deleteOptions) error
 	if err != nil {
 		return err
 	}
-	counts, err := store.DeleteCounts(ctx, opts.exchange, opts.market, opts.symbol, opts.interval, start, end)
+	deleteRange, err := effectiveWarmupRange(start, end, opts.interval, opts.warmupBars)
+	if err != nil {
+		return err
+	}
+	counts, err := store.DeleteCounts(ctx, opts.exchange, opts.market, opts.symbol, opts.interval, deleteRange.EffectiveStart, deleteRange.End)
 	if err != nil {
 		return err
 	}
@@ -76,8 +85,10 @@ func runDelete(ctx context.Context, configPath string, opts deleteOptions) error
 		"market", opts.market,
 		"symbol", opts.symbol,
 		"interval", opts.interval,
-		"start", start,
-		"end_exclusive", end,
+		"requested_start", deleteRange.RequestedStart,
+		"effective_start", deleteRange.EffectiveStart,
+		"end_exclusive", deleteRange.End,
+		"warmup_bars", deleteRange.WarmupBars,
 	)
 	for _, count := range counts {
 		slog.Info("delete target", "table", count.Table, "rows", count.Rows)
@@ -86,7 +97,7 @@ func runDelete(ctx context.Context, configPath string, opts deleteOptions) error
 		slog.Info("delete skipped", "reason", "pass --confirm to submit ClickHouse mutations")
 		return nil
 	}
-	if err := store.DeleteRange(ctx, opts.exchange, opts.market, opts.symbol, opts.interval, start, end); err != nil {
+	if err := store.DeleteRange(ctx, opts.exchange, opts.market, opts.symbol, opts.interval, deleteRange.EffectiveStart, deleteRange.End); err != nil {
 		return err
 	}
 	for _, count := range counts {

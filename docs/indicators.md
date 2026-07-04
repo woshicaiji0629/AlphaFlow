@@ -115,6 +115,25 @@
 
 这些语义字段不是底层事实数据的替代品。它们是当前策略消费的稳定接口，后续可以在 Go 聚合层调整口径，再让策略保持较小改动。
 
+## 指标分层建议
+
+当前指标库已经覆盖趋势、动量、波动率、成交量、结构、TradingView 派生脚本和 AI/自适应类指标。后续新增策略时，不建议把所有字段平铺成同等权重，而应按用途分层消费。
+
+在线 market-data 默认保留并计算最近 300 根已闭合 K 线。新增在线指标应优先控制在 300 根以内；超过 300 根的指标先作为回测或离线研究候选。当前 VFI 默认参数约需要 265 根 K 线，300 根窗口下可以稳定输出。
+
+| 层级 | 定位 | 典型字段 |
+| --- | --- | --- |
+| 核心层 | 默认参与在线策略判断，用于方向、趋势有效性、基础风险过滤。 | `ema_alignment`、`ma_window_bias`、`macd_window_bias`、`rsi14`、`atr14`、`supertrend_direction`、`volume_ratio20`、`price_volume_confirmation` |
+| 确认层 | 用于提高信号质量、过滤假突破、判断衰竭或结构位置。 | `qqe_window_bias`、`vfi_state`、`wvf_zone`、`exhaustion_risk`、`structure_bias`、`liquidity_sweep_type`、`supply_demand_position`、`premium_discount_zone` |
+| 实验层 | 用于回测对比和策略研究，默认不应直接成为实盘唯一触发条件。 | `adaptive_supertrend_direction`、`ai_supertrend_direction`、`ai_source_selected`、`ai_source_supertrend_direction`、`momentum_sd_position` |
+
+使用原则：
+
+- 在线策略优先消费核心层和窗口语义字段，例如 `trend_valid`、`trend_quality`、`pump_window_signal`。
+- 确认层适合作为加分、减分、过滤条件，不建议独立开仓。
+- 实验层先进入回测和观察，不应在没有统计结果前直接提高实盘权重。
+- 成本较高或参数较多的指标需要保留 benchmark 数据，避免随着指标数量增长拖慢实时计算。
+
 ## 命名约定
 
 - `*_pct`：百分比距离或百分比变化。

@@ -135,8 +135,8 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	if MarkPriceInterval() != "1s" {
 		t.Fatalf("MarkPriceInterval = %q, want 1s", MarkPriceInterval())
 	}
-	if KlineLimit() != 250 {
-		t.Fatalf("KlineLimit = %d, want 250", KlineLimit())
+	if KlineLimit() != 300 {
+		t.Fatalf("KlineLimit = %d, want 300", KlineLimit())
 	}
 	if KlineTTL() != 7*24*time.Hour {
 		t.Fatalf("KlineTTL = %s, want 168h", KlineTTL())

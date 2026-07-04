@@ -31,6 +31,7 @@ type backfillOptions struct {
 	writeRetries     int
 	retryDelay       time.Duration
 	maxMissingReport int
+	warmupBars       int64
 }
 
 type fetchJob struct {
@@ -87,7 +88,7 @@ to control parallel REST requests.
 The command exits with a non-zero status if any requested interval is still
 missing K lines after backfill.
 `),
-		Example: "market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000\n" +
+		Example: "market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000 --warmup-bars 300\n" +
 			"market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000 --limit 1000\n" +
 			"market-data-admin backfill --exchange binance --symbol ETHUSDT --intervals 10m --start 202606010000 --end 202607010000",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -113,6 +114,7 @@ missing K lines after backfill.
 	cmd.Flags().IntVar(&opts.writeRetries, "write-retries", 3, "ClickHouse write retries after the first attempt")
 	cmd.Flags().DurationVar(&opts.retryDelay, "retry-delay", time.Second, "base retry delay")
 	cmd.Flags().IntVar(&opts.maxMissingReport, "max-missing-report", 200, "maximum missing klines to log per interval")
+	cmd.Flags().Int64Var(&opts.warmupBars, "warmup-bars", 0, "extra kline bars to fetch before start for indicator warm-up")
 	return cmd
 }
 
@@ -151,12 +153,20 @@ func runBackfill(ctx context.Context, configPath string, opts backfillOptions) e
 		return err
 	}
 	for _, interval := range nativeIntervals {
-		if err := backfillRESTInterval(ctx, adminStore, writeStore, client, opts, interval, start, end); err != nil {
+		backfillRange, err := effectiveWarmupRange(start, end, interval, opts.warmupBars)
+		if err != nil {
+			return err
+		}
+		if err := backfillRESTInterval(ctx, adminStore, writeStore, client, opts, interval, backfillRange); err != nil {
 			return err
 		}
 	}
 	for _, rule := range derivedIntervals {
-		if err := backfillDerivedInterval(ctx, adminStore, writeStore, client, opts, rule, start, end); err != nil {
+		backfillRange, err := effectiveWarmupRange(start, end, rule.TargetInterval, opts.warmupBars)
+		if err != nil {
+			return err
+		}
+		if err := backfillDerivedInterval(ctx, adminStore, writeStore, client, opts, rule, backfillRange); err != nil {
 			return err
 		}
 	}
@@ -199,6 +209,9 @@ func validateBackfillOptions(opts backfillOptions) error {
 	}
 	if opts.maxMissingReport < 0 {
 		return fmt.Errorf("max-missing-report cannot be negative")
+	}
+	if err := validateWarmupBars(opts.warmupBars); err != nil {
+		return err
 	}
 	for _, interval := range opts.intervals {
 		if _, err := marketmodel.IntervalMillis(interval); err != nil {
@@ -314,8 +327,7 @@ func backfillRESTInterval(
 	client restClient,
 	opts backfillOptions,
 	interval string,
-	start int64,
-	end int64,
+	backfillRange warmupRange,
 ) error {
 	intervalMillis, err := marketmodel.IntervalMillis(interval)
 	if err != nil {
@@ -324,7 +336,7 @@ func backfillRESTInterval(
 
 	existingOpenTimes := map[int64]struct{}{}
 	if opts.mode == "skip-existing" {
-		existingOpenTimes, err = adminStore.ExistingOpenTimes(ctx, client.Exchange(), client.Market(), opts.symbol, interval, start, end)
+		existingOpenTimes, err = adminStore.ExistingOpenTimes(ctx, client.Exchange(), client.Market(), opts.symbol, interval, backfillRange.EffectiveStart, backfillRange.End)
 		if err != nil {
 			return err
 		}
@@ -332,7 +344,7 @@ func backfillRESTInterval(
 	initialExisting := len(existingOpenTimes)
 
 	now := time.Now().UnixMilli()
-	jobs := planFetchJobs(start, end, intervalMillis, existingOpenTimes, opts.mode, opts.limit)
+	jobs := planFetchJobs(backfillRange.EffectiveStart, backfillRange.End, intervalMillis, existingOpenTimes, opts.mode, opts.limit)
 	filtered, totalFetched, totalSkippedExisting, err := fetchKlineJobs(
 		ctx,
 		client,
@@ -364,11 +376,13 @@ func backfillRESTInterval(
 		"fetched", totalFetched,
 		"skipped_existing", totalSkippedExisting,
 		"written", written,
-		"start", start,
-		"end_exclusive", end,
+		"requested_start", backfillRange.RequestedStart,
+		"effective_start", backfillRange.EffectiveStart,
+		"end_exclusive", backfillRange.End,
+		"warmup_bars", backfillRange.WarmupBars,
 	)
 
-	return checkIntegrity(ctx, adminStore, client.Exchange(), client.Market(), opts.symbol, interval, start, end, intervalMillis, opts.timezone, opts.maxMissingReport, true)
+	return checkIntegrity(ctx, adminStore, client.Exchange(), client.Market(), opts.symbol, interval, backfillRange.EffectiveStart, backfillRange.End, intervalMillis, opts.timezone, opts.maxMissingReport, true, backfillRange)
 }
 
 func backfillDerivedInterval(
@@ -378,8 +392,7 @@ func backfillDerivedInterval(
 	client restClient,
 	opts backfillOptions,
 	rule aggregator.Rule,
-	start int64,
-	end int64,
+	backfillRange warmupRange,
 ) error {
 	sourceMillis, err := marketmodel.IntervalMillis(rule.SourceInterval)
 	if err != nil {
@@ -395,13 +408,13 @@ func backfillDerivedInterval(
 
 	existingOpenTimes := map[int64]struct{}{}
 	if opts.mode == "skip-existing" {
-		existingOpenTimes, err = adminStore.ExistingOpenTimes(ctx, rule.Exchange, rule.Market, opts.symbol, rule.TargetInterval, start, end)
+		existingOpenTimes, err = adminStore.ExistingOpenTimes(ctx, rule.Exchange, rule.Market, opts.symbol, rule.TargetInterval, backfillRange.EffectiveStart, backfillRange.End)
 		if err != nil {
 			return err
 		}
 	}
 	initialExisting := len(existingOpenTimes)
-	sourceKlines, err := writeStore.RangeKlines(ctx, rule.Exchange, rule.Market, opts.symbol, rule.SourceInterval, start, end-1)
+	sourceKlines, err := writeStore.RangeKlines(ctx, rule.Exchange, rule.Market, opts.symbol, rule.SourceInterval, backfillRange.EffectiveStart, backfillRange.End-1)
 	if err != nil {
 		return fmt.Errorf("query source klines %s %s %s range: %w", rule.Exchange, opts.symbol, rule.SourceInterval, err)
 	}
@@ -414,7 +427,7 @@ func backfillDerivedInterval(
 	totalWritten := 0
 	totalSkippedExisting := 0
 	totalSkippedMissingSource := 0
-	for openTime := start; openTime < end; openTime += targetMillis {
+	for openTime := backfillRange.EffectiveStart; openTime < backfillRange.End; openTime += targetMillis {
 		if _, ok := existingOpenTimes[openTime]; ok {
 			totalSkippedExisting++
 			continue
@@ -475,10 +488,12 @@ func backfillDerivedInterval(
 		"skipped_existing", totalSkippedExisting,
 		"skipped_missing_source", totalSkippedMissingSource,
 		"written", totalWritten,
-		"start", start,
-		"end_exclusive", end,
+		"requested_start", backfillRange.RequestedStart,
+		"effective_start", backfillRange.EffectiveStart,
+		"end_exclusive", backfillRange.End,
+		"warmup_bars", backfillRange.WarmupBars,
 	)
-	return checkIntegrity(ctx, adminStore, rule.Exchange, rule.Market, opts.symbol, rule.TargetInterval, start, end, targetMillis, opts.timezone, opts.maxMissingReport, true)
+	return checkIntegrity(ctx, adminStore, rule.Exchange, rule.Market, opts.symbol, rule.TargetInterval, backfillRange.EffectiveStart, backfillRange.End, targetMillis, opts.timezone, opts.maxMissingReport, true, backfillRange)
 }
 
 func planFetchJobs(

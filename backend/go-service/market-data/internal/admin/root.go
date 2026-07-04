@@ -42,6 +42,13 @@ type rangeOptions struct {
 	timezone string
 }
 
+type warmupRange struct {
+	RequestedStart int64
+	EffectiveStart int64
+	End            int64
+	WarmupBars     int64
+}
+
 func Execute(ctx context.Context) error {
 	opts := rootOptions{}
 	cmd := &cobra.Command{
@@ -100,6 +107,10 @@ func addRangeFlags(cmd *cobra.Command, opts *rangeOptions) {
 	cmd.Flags().StringVar(&opts.timezone, "timezone", "Asia/Shanghai", "date boundary timezone")
 }
 
+func addWarmupFlag(cmd *cobra.Command, target *int64) {
+	cmd.Flags().Int64Var(target, "warmup-bars", 0, "extra kline bars before start for indicator warm-up")
+}
+
 func normalizeRangeOptions(opts *rangeOptions) {
 	opts.exchange = strings.ToLower(strings.TrimSpace(opts.exchange))
 	opts.market = strings.ToLower(strings.TrimSpace(opts.market))
@@ -134,6 +145,40 @@ func validateRangeOptions(opts rangeOptions) error {
 		return err
 	}
 	return nil
+}
+
+func validateWarmupBars(warmupBars int64) error {
+	if warmupBars < 0 {
+		return fmt.Errorf("warmup-bars cannot be negative")
+	}
+	return nil
+}
+
+func warmupStart(start int64, interval string, warmupBars int64) (int64, error) {
+	if err := validateWarmupBars(warmupBars); err != nil {
+		return 0, err
+	}
+	if warmupBars == 0 {
+		return start, nil
+	}
+	intervalMillis, err := marketmodel.IntervalMillis(interval)
+	if err != nil {
+		return 0, err
+	}
+	return start - intervalMillis*warmupBars, nil
+}
+
+func effectiveWarmupRange(start int64, end int64, interval string, warmupBars int64) (warmupRange, error) {
+	effectiveStart, err := warmupStart(start, interval, warmupBars)
+	if err != nil {
+		return warmupRange{}, err
+	}
+	return warmupRange{
+		RequestedStart: start,
+		EffectiveStart: effectiveStart,
+		End:            end,
+		WarmupBars:     warmupBars,
+	}, nil
 }
 
 func timeRange(startValue string, endValue string, timezone string) (int64, int64, error) {

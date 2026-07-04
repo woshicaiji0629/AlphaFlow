@@ -125,6 +125,24 @@ func TestValidateCheckOptionsRejectsAmbiguousIntervals(t *testing.T) {
 	}
 }
 
+func TestValidateCheckOptionsRejectsNegativeWarmupBars(t *testing.T) {
+	opts := checkOptions{
+		rangeOptions: rangeOptions{
+			exchange: "binance",
+			market:   "um",
+			symbol:   "ETHUSDT",
+			interval: "1m",
+			start:    "202606010000",
+			end:      "202607010000",
+			timezone: "Asia/Shanghai",
+		},
+		warmupBars: -1,
+	}
+	if err := validateCheckOptions(&opts); err == nil {
+		t.Fatal("expected warmup-bars error")
+	}
+}
+
 func TestValidateInventoryOptionsRequiresExactTargetForMissingIntervals(t *testing.T) {
 	opts := inventoryOptions{
 		exchange:  "binance",
@@ -157,6 +175,9 @@ func TestSummarizeIntegrityReportsEveryMissingOpenTime(t *testing.T) {
 	if summary.Expected != 4 {
 		t.Fatalf("expected = %d, want 4", summary.Expected)
 	}
+	if summary.Actual != 2 {
+		t.Fatalf("actual = %d, want 2", summary.Actual)
+	}
 	wantMissing := []int64{minute, 3 * minute}
 	if len(summary.Missing) != len(wantMissing) {
 		t.Fatalf("missing = %#v, want %#v", summary.Missing, wantMissing)
@@ -164,6 +185,23 @@ func TestSummarizeIntegrityReportsEveryMissingOpenTime(t *testing.T) {
 	for index := range wantMissing {
 		if summary.Missing[index] != wantMissing[index] {
 			t.Fatalf("missing[%d] = %d, want %d", index, summary.Missing[index], wantMissing[index])
+		}
+	}
+}
+
+func TestIntegrityMissingDetailsSeparatesWarmupAndTrading(t *testing.T) {
+	details := integrityMissingDetails([]int64{1000}, []int64{2000, 3000})
+	want := []integrityMissingDetail{
+		{Phase: "warmup", OpenTime: 1000},
+		{Phase: "trading", OpenTime: 2000},
+		{Phase: "trading", OpenTime: 3000},
+	}
+	if len(details) != len(want) {
+		t.Fatalf("details length = %d, want %d: %#v", len(details), len(want), details)
+	}
+	for index := range want {
+		if details[index] != want[index] {
+			t.Fatalf("details[%d] = %#v, want %#v", index, details[index], want[index])
 		}
 	}
 }
@@ -203,6 +241,40 @@ func TestPlanFetchJobsOverwriteFetchesWholeRange(t *testing.T) {
 	assertFetchJobs(t, jobs, want)
 }
 
+func TestWarmupStartUsesIntervalBars(t *testing.T) {
+	const hour = int64(time.Hour / time.Millisecond)
+
+	got, err := warmupStart(1000*hour, "4h", 300)
+	if err != nil {
+		t.Fatalf("warmupStart: %v", err)
+	}
+	want := int64(1000-4*300) * hour
+	if got != want {
+		t.Fatalf("warmup start = %d, want %d", got, want)
+	}
+}
+
+func TestEffectiveWarmupRangeKeepsRequestedStart(t *testing.T) {
+	const minute = int64(time.Minute / time.Millisecond)
+
+	got, err := effectiveWarmupRange(1000*minute, 2000*minute, "5m", 300)
+	if err != nil {
+		t.Fatalf("effectiveWarmupRange: %v", err)
+	}
+	if got.RequestedStart != 1000*minute {
+		t.Fatalf("requested start = %d, want %d", got.RequestedStart, 1000*minute)
+	}
+	if got.EffectiveStart != (1000-5*300)*minute {
+		t.Fatalf("effective start = %d, want %d", got.EffectiveStart, (1000-5*300)*minute)
+	}
+	if got.End != 2000*minute {
+		t.Fatalf("end = %d, want %d", got.End, 2000*minute)
+	}
+	if got.WarmupBars != 300 {
+		t.Fatalf("warmup bars = %d, want 300", got.WarmupBars)
+	}
+}
+
 func TestDedupeKlinesKeepsLastLogicalRow(t *testing.T) {
 	klines := []marketmodel.Kline{
 		testKline("binance", "um", "ETHUSDT", "1m", 60_000, "old"),
@@ -227,6 +299,14 @@ func TestValidateBackfillOptionsRejectsInvalidConcurrency(t *testing.T) {
 	opts.concurrency = 0
 	if err := validateBackfillOptions(opts); err == nil {
 		t.Fatal("expected concurrency error")
+	}
+}
+
+func TestValidateBackfillOptionsRejectsNegativeWarmupBars(t *testing.T) {
+	opts := validBackfillOptions()
+	opts.warmupBars = -1
+	if err := validateBackfillOptions(opts); err == nil {
+		t.Fatal("expected warmup-bars error")
 	}
 }
 
@@ -358,6 +438,7 @@ func validBackfillOptions() backfillOptions {
 		writeRetries:     3,
 		retryDelay:       time.Second,
 		maxMissingReport: 200,
+		warmupBars:       0,
 	}
 }
 
