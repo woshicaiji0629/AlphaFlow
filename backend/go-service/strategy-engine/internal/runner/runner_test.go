@@ -20,6 +20,20 @@ type captureBroker struct {
 	intent execution.OrderIntent
 }
 
+type capturePublisher struct {
+	decision strategy.Decision
+	called   bool
+}
+
+func (p *capturePublisher) PublishDecision(ctx context.Context, decision strategy.Decision) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.called = true
+	p.decision = decision
+	return nil
+}
+
 func (b *captureBroker) Execute(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, error) {
 	if err := ctx.Err(); err != nil {
 		return execution.ExecutionReport{}, err
@@ -52,6 +66,70 @@ func (s *fixedStrategy) Evaluate(
 	}
 	s.seenPosition = currentPosition
 	return s.result, nil
+}
+
+func TestRunnerHandlePublishesDecisionWithoutLocalPaperDispatch(t *testing.T) {
+	target := strategy.Target{
+		Scope:    strategy.PositionScopePaper,
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "3m",
+	}
+	item := &fixedStrategy{
+		name: "supertrend",
+		result: strategy.Result{
+			StrategyName: "supertrend",
+			Signal: strategy.Signal{
+				Strategy:   "supertrend",
+				Side:       strategy.SignalSideBuy,
+				Confidence: 0.9,
+				Reason:     "trend up",
+				OpenTime:   1000,
+			},
+		},
+	}
+	store := position.NewMemoryStore()
+	publisher := &capturePublisher{}
+	runner, err := New(Options{
+		Engine:        strategy.NewEngine([]strategy.Strategy{item}),
+		Publisher:     publisher,
+		PositionStore: store,
+		Now:           func() int64 { return 2000 },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runner.Handle(context.Background(), strategy.Context{
+		Target: target,
+		Snapshots: map[string]strategy.Snapshot{
+			"3m": {
+				Current: marketmodel.Kline{Close: "100"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if !publisher.called {
+		t.Fatal("publisher was not called")
+	}
+	if len(publisher.decision.Results) != 1 {
+		t.Fatalf("len(published results) = %d, want 1", len(publisher.decision.Results))
+	}
+	currentPosition, err := store.GetPosition(context.Background(), position.Key{
+		Scope:        strategy.PositionScopePaper,
+		Exchange:     "binance",
+		Market:       "um",
+		Symbol:       "ETHUSDT",
+		StrategyName: "supertrend",
+	})
+	if err != nil {
+		t.Fatalf("GetPosition() error = %v", err)
+	}
+	if currentPosition != nil {
+		t.Fatalf("position = %+v, want nil without local paper dispatch", currentPosition)
+	}
 }
 
 func TestRunnerHandleExecutesPaperIntentAndAppendsEvents(t *testing.T) {

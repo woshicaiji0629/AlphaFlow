@@ -17,6 +17,7 @@ type SizingConfig = paperhandler.SizingConfig
 type Options struct {
 	Engine     *strategy.Engine
 	Dispatcher *strategyroute.Dispatcher
+	Publisher  DecisionPublisher
 
 	PositionManager *position.Manager
 	PositionStore   position.Store
@@ -30,15 +31,23 @@ type Options struct {
 type Runner struct {
 	engine        *strategy.Engine
 	dispatcher    *strategyroute.Dispatcher
+	publisher     DecisionPublisher
 	positionStore position.Store
+}
+
+type DecisionPublisher interface {
+	PublishDecision(ctx context.Context, decision strategy.Decision) error
 }
 
 func New(options Options) (*Runner, error) {
 	if options.Engine == nil {
 		return nil, fmt.Errorf("strategy engine is required")
 	}
+	if options.Dispatcher != nil && options.Publisher != nil {
+		return nil, fmt.Errorf("strategy dispatcher and publisher cannot both be configured")
+	}
 	dispatcher := options.Dispatcher
-	if dispatcher == nil {
+	if dispatcher == nil && options.Publisher == nil {
 		built, err := buildPaperDispatcher(options)
 		if err != nil {
 			return nil, err
@@ -48,6 +57,7 @@ func New(options Options) (*Runner, error) {
 	return &Runner{
 		engine:        options.Engine,
 		dispatcher:    dispatcher,
+		publisher:     options.Publisher,
 		positionStore: options.PositionStore,
 	}, nil
 }
@@ -84,6 +94,11 @@ func (r *Runner) Handle(ctx context.Context, input strategy.Context) (strategy.D
 	decision, err := r.engine.Evaluate(ctx, input)
 	if err != nil {
 		return strategy.Decision{}, err
+	}
+	if r.publisher != nil {
+		if err := r.publisher.PublishDecision(ctx, decision); err != nil {
+			return strategy.Decision{}, err
+		}
 	}
 	if r.dispatcher != nil {
 		if err := r.dispatcher.Dispatch(ctx, input, decision); err != nil {

@@ -26,6 +26,47 @@ type RedisBus struct {
 	options RedisOptions
 }
 
+type RedisPublisherOptions struct {
+	Stream string
+}
+
+type RedisPublisher struct {
+	client *redis.Client
+	stream string
+}
+
+func NewRedisPublisher(client *redis.Client, options RedisPublisherOptions) (*RedisPublisher, error) {
+	if client == nil {
+		return nil, fmt.Errorf("redis client is required")
+	}
+	options.Stream = strings.TrimSpace(options.Stream)
+	if options.Stream == "" {
+		options.Stream = DefaultDecisionStream
+	}
+	return &RedisPublisher{
+		client: client,
+		stream: options.Stream,
+	}, nil
+}
+
+func (p *RedisPublisher) PublishDecision(ctx context.Context, envelope DecisionEnvelope) (string, error) {
+	if p == nil || p.client == nil {
+		return "", fmt.Errorf("redis publisher is nil")
+	}
+	values, err := StreamValues(envelope)
+	if err != nil {
+		return "", err
+	}
+	id, err := p.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: p.stream,
+		Values: values,
+	}).Result()
+	if err != nil {
+		return "", fmt.Errorf("publish strategy decision: %w", err)
+	}
+	return id, nil
+}
+
 func NewRedisBus(client *redis.Client, options RedisOptions) (*RedisBus, error) {
 	if client == nil {
 		return nil, fmt.Errorf("redis client is required")

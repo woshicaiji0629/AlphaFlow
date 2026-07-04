@@ -17,6 +17,11 @@ scan_interval = "2s"
 [redis]
 addr = "localhost:6380"
 
+[output]
+mode = "bus"
+stream = "st:decision:stream"
+default_ttl = "45s"
+
 [position]
 scope = "paper"
 account = "demo"
@@ -63,6 +68,11 @@ confirm_intervals = ["5m", "10m"]
 	if got := Targets(cfg)[0].Account; got != "demo" {
 		t.Fatalf("account = %q, want demo", got)
 	}
+	if ttl, err := OutputDefaultTTL(cfg); err != nil {
+		t.Fatalf("OutputDefaultTTL() error = %v", err)
+	} else if ttl.String() != "45s" {
+		t.Fatalf("output ttl = %s, want 45s", ttl)
+	}
 	if !cfg.ClickHouse.Enabled {
 		t.Fatal("clickhouse enabled = false, want true")
 	}
@@ -90,6 +100,28 @@ interval = "3m"
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load() error = nil, want unsupported scope error")
+	}
+}
+
+func TestLoadRejectsUnsupportedOutputMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[output]
+mode = "direct"
+
+[[targets]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "3m"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want output mode validation error")
 	}
 }
 

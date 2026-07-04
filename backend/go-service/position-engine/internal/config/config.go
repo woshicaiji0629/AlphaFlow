@@ -15,14 +15,15 @@ import (
 )
 
 type Config struct {
-	Runtime  RuntimeConfig  `toml:"runtime"`
-	Redis    RedisConfig    `toml:"redis"`
-	Input    InputConfig    `toml:"input"`
-	Position PositionConfig `toml:"position"`
-	Sizing   SizingConfig   `toml:"sizing"`
-	Fee      FeeConfig      `toml:"fee"`
-	Routes   []RouteConfig  `toml:"routes"`
-	Logging  LoggingConfig  `toml:"logging"`
+	Runtime     RuntimeConfig     `toml:"runtime"`
+	Redis       RedisConfig       `toml:"redis"`
+	Input       InputConfig       `toml:"input"`
+	Idempotency IdempotencyConfig `toml:"idempotency"`
+	Position    PositionConfig    `toml:"position"`
+	Sizing      SizingConfig      `toml:"sizing"`
+	Fee         FeeConfig         `toml:"fee"`
+	Routes      []RouteConfig     `toml:"routes"`
+	Logging     LoggingConfig     `toml:"logging"`
 }
 
 type RuntimeConfig struct {
@@ -47,6 +48,12 @@ type InputConfig struct {
 	PendingIdle      string `toml:"pending_idle"`
 	DeadLetterStream string `toml:"dead_letter_stream"`
 	MaxDeliveries    int64  `toml:"max_deliveries"`
+}
+
+type IdempotencyConfig struct {
+	Prefix        string `toml:"prefix"`
+	ProcessingTTL string `toml:"processing_ttl"`
+	CompletedTTL  string `toml:"completed_ttl"`
 }
 
 type PositionConfig struct {
@@ -168,6 +175,14 @@ func InputBlock(cfg Config) (time.Duration, error) {
 	return parseDuration("input.block", cfg.Input.Block)
 }
 
+func IdempotencyProcessingTTL(cfg Config) (time.Duration, error) {
+	return parseDuration("idempotency.processing_ttl", cfg.Idempotency.ProcessingTTL)
+}
+
+func IdempotencyCompletedTTL(cfg Config) (time.Duration, error) {
+	return parseDuration("idempotency.completed_ttl", cfg.Idempotency.CompletedTTL)
+}
+
 func defaultConfig() Config {
 	return Config{
 		Runtime: RuntimeConfig{
@@ -188,6 +203,11 @@ func defaultConfig() Config {
 			PendingIdle:      "30s",
 			DeadLetterStream: strategybus.DefaultDecisionStream + ":dead",
 			MaxDeliveries:    5,
+		},
+		Idempotency: IdempotencyConfig{
+			Prefix:        "position:decision:idempotency",
+			ProcessingTTL: "10m",
+			CompletedTTL:  "24h",
 		},
 		Position: PositionConfig{
 			Scope:   string(strategy.PositionScopePaper),
@@ -239,6 +259,9 @@ func normalize(cfg *Config) {
 	cfg.Input.DefaultTTL = strings.TrimSpace(cfg.Input.DefaultTTL)
 	cfg.Input.PendingIdle = strings.TrimSpace(cfg.Input.PendingIdle)
 	cfg.Input.DeadLetterStream = strings.TrimSpace(cfg.Input.DeadLetterStream)
+	cfg.Idempotency.Prefix = strings.TrimSpace(cfg.Idempotency.Prefix)
+	cfg.Idempotency.ProcessingTTL = strings.TrimSpace(cfg.Idempotency.ProcessingTTL)
+	cfg.Idempotency.CompletedTTL = strings.TrimSpace(cfg.Idempotency.CompletedTTL)
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
 	for index, route := range cfg.Routes {
@@ -283,6 +306,15 @@ func validate(cfg Config) error {
 	}
 	if cfg.Input.MaxDeliveries <= 0 {
 		return fmt.Errorf("input.max_deliveries must be positive")
+	}
+	if cfg.Idempotency.Prefix == "" {
+		return fmt.Errorf("idempotency.prefix cannot be empty")
+	}
+	if _, err := IdempotencyProcessingTTL(cfg); err != nil {
+		return err
+	}
+	if _, err := IdempotencyCompletedTTL(cfg); err != nil {
+		return err
 	}
 	if cfg.Position.Scope == "" {
 		return fmt.Errorf("position.scope cannot be empty")

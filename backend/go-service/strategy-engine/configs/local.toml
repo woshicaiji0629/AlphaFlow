@@ -8,6 +8,11 @@ db = 0
 pool_size = 20
 min_idle_conns = 5
 
+[output]
+mode = "bus"
+stream = "st:decision:stream"
+default_ttl = "30s"
+
 [position]
 scope = "paper"
 account = "default"

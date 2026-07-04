@@ -12,9 +12,11 @@ import (
 	"alphaflow/go-service/pkg/redisclient"
 	"alphaflow/go-service/pkg/strategies/supertrend"
 	"alphaflow/go-service/pkg/strategy"
+	"alphaflow/go-service/pkg/strategybus"
 	"alphaflow/go-service/strategy-engine/internal/config"
 	"alphaflow/go-service/strategy-engine/internal/reader"
 	"alphaflow/go-service/strategy-engine/internal/runner"
+	"github.com/redis/go-redis/v9"
 )
 
 func Run(ctx context.Context, configPath string) error {
@@ -42,7 +44,11 @@ func Run(ctx context.Context, configPath string) error {
 	}
 	defer closeEventStore()
 
-	runtime, err := buildRuntime(cfg, reader.NewRedisHashReader(redisClient), positionStore, eventStore)
+	publisher, err := buildDecisionPublisher(cfg, redisClient)
+	if err != nil {
+		return err
+	}
+	runtime, err := buildRuntime(cfg, reader.NewRedisHashReader(redisClient), positionStore, eventStore, publisher)
 	if err != nil {
 		return err
 	}
@@ -67,6 +73,7 @@ func buildRuntime(
 	hashes reader.HashReader,
 	positionStore position.Store,
 	eventStore position.EventStore,
+	publisher runner.DecisionPublisher,
 ) (runtimeState, error) {
 	snapshotReader, err := reader.New(reader.Options{Hashes: hashes})
 	if err != nil {
@@ -81,6 +88,7 @@ func buildRuntime(
 	})
 	strategyRunner, err := runner.New(runner.Options{
 		Engine:          strategy.NewEngine([]strategy.Strategy{supertrend.New(supertrend.Config{})}),
+		Publisher:       publisher,
 		PositionManager: positionManager,
 		PositionStore:   positionStore,
 		EventStore:      eventStore,
@@ -101,6 +109,46 @@ func buildRuntime(
 	return runtimeState{
 		reader: snapshotReader,
 		runner: strategyRunner,
+	}, nil
+}
+
+type decisionPublisher interface {
+	PublishDecision(ctx context.Context, envelope strategybus.DecisionEnvelope) (string, error)
+}
+
+type busDecisionPublisher struct {
+	publisher decisionPublisher
+	ttl       time.Duration
+	now       func() int64
+}
+
+func (p busDecisionPublisher) PublishDecision(ctx context.Context, decision strategy.Decision) error {
+	messageID, err := p.publisher.PublishDecision(ctx, strategybus.NewDecisionEnvelope(decision, p.now(), p.ttl))
+	if err != nil {
+		return err
+	}
+	slog.Info("strategy decision published", "message_id", messageID, "target", decision.Target, "results", len(decision.Results))
+	return nil
+}
+
+func buildDecisionPublisher(cfg config.Config, redisClient *redis.Client) (runner.DecisionPublisher, error) {
+	if cfg.Output.Mode == "local" {
+		return nil, nil
+	}
+	ttl, err := config.OutputDefaultTTL(cfg)
+	if err != nil {
+		return nil, err
+	}
+	publisher, err := strategybus.NewRedisPublisher(redisClient, strategybus.RedisPublisherOptions{
+		Stream: cfg.Output.Stream,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return busDecisionPublisher{
+		publisher: publisher,
+		ttl:       ttl,
+		now:       func() int64 { return time.Now().UnixMilli() },
 	}, nil
 }
 

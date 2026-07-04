@@ -60,6 +60,20 @@ enabled = true
 	if defaultTTL <= 0 {
 		t.Fatalf("default ttl = %s, want positive", defaultTTL)
 	}
+	processingTTL, err := IdempotencyProcessingTTL(cfg)
+	if err != nil {
+		t.Fatalf("IdempotencyProcessingTTL() error = %v", err)
+	}
+	if processingTTL <= 0 {
+		t.Fatalf("processing ttl = %s, want positive", processingTTL)
+	}
+	completedTTL, err := IdempotencyCompletedTTL(cfg)
+	if err != nil {
+		t.Fatalf("IdempotencyCompletedTTL() error = %v", err)
+	}
+	if completedTTL <= 0 {
+		t.Fatalf("completed ttl = %s, want positive", completedTTL)
+	}
 }
 
 func TestLoadRejectsUnsupportedSink(t *testing.T) {

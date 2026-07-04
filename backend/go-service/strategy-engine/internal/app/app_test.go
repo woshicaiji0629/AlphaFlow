@@ -20,7 +20,7 @@ func TestBuildRuntimeUsesConfiguredStrategy(t *testing.T) {
 			Interval: "3m",
 		}},
 	}
-	runtime, err := buildRuntime(cfg, fakeHashReader{}, position.NewMemoryStore(), nil)
+	runtime, err := buildRuntime(cfg, fakeHashReader{}, position.NewMemoryStore(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime() error = %v", err)
 	}
@@ -43,7 +43,7 @@ func TestBuildRuntimeAcceptsEventStore(t *testing.T) {
 		}},
 	}
 	store := position.NewMemoryStore()
-	runtime, err := buildRuntime(cfg, fakeHashReader{}, store, store)
+	runtime, err := buildRuntime(cfg, fakeHashReader{}, store, store, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime() error = %v", err)
 	}

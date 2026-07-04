@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Runtime    RuntimeConfig    `toml:"runtime"`
 	Redis      RedisConfig      `toml:"redis"`
+	Output     OutputConfig     `toml:"output"`
 	Position   PositionConfig   `toml:"position"`
 	Sizing     SizingConfig     `toml:"sizing"`
 	Fee        FeeConfig        `toml:"fee"`
@@ -33,6 +34,12 @@ type RedisConfig struct {
 	DB           int    `toml:"db"`
 	PoolSize     int    `toml:"pool_size"`
 	MinIdleConns int    `toml:"min_idle_conns"`
+}
+
+type OutputConfig struct {
+	Mode       string `toml:"mode"`
+	Stream     string `toml:"stream"`
+	DefaultTTL string `toml:"default_ttl"`
 }
 
 type PositionConfig struct {
@@ -107,6 +114,11 @@ func defaultConfig() Config {
 			PoolSize:     20,
 			MinIdleConns: 5,
 		},
+		Output: OutputConfig{
+			Mode:       "bus",
+			Stream:     "st:decision:stream",
+			DefaultTTL: "30s",
+		},
 		Position: PositionConfig{
 			Scope:   string(strategy.PositionScopePaper),
 			Account: "default",
@@ -161,6 +173,10 @@ func ClickHouseDialTimeout(cfg Config) (time.Duration, error) {
 
 func ClickHouseReadTimeout(cfg Config) (time.Duration, error) {
 	return parseDuration("clickhouse.read_timeout", cfg.ClickHouse.ReadTimeout)
+}
+
+func OutputDefaultTTL(cfg Config) (time.Duration, error) {
+	return parseDuration("output.default_ttl", cfg.Output.DefaultTTL)
 }
 
 func RedisClientConfig(cfg Config) redisclient.Config {
@@ -233,12 +249,15 @@ func normalize(cfg *Config) {
 	}
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
+	cfg.Output.Mode = strings.ToLower(strings.TrimSpace(cfg.Output.Mode))
+	cfg.Output.Stream = strings.TrimSpace(cfg.Output.Stream)
 }
 
 func validate(cfg Config) error {
 	validators := []func(Config) error{
 		validateRuntime,
 		validateRedis,
+		validateOutput,
 		validatePosition,
 		validateTargets,
 		validateSizing,
@@ -263,6 +282,21 @@ func validateRuntime(cfg Config) error {
 func validateRedis(cfg Config) error {
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		return fmt.Errorf("redis addr cannot be empty")
+	}
+	return nil
+}
+
+func validateOutput(cfg Config) error {
+	switch cfg.Output.Mode {
+	case "bus", "local":
+	default:
+		return fmt.Errorf("unsupported output mode %q", cfg.Output.Mode)
+	}
+	if cfg.Output.Mode == "bus" && strings.TrimSpace(cfg.Output.Stream) == "" {
+		return fmt.Errorf("output.stream cannot be empty when output.mode is bus")
+	}
+	if _, err := OutputDefaultTTL(cfg); err != nil {
+		return err
 	}
 	return nil
 }

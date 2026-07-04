@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/execution"
+	"alphaflow/go-service/pkg/idempotency"
 	"alphaflow/go-service/pkg/position"
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
 	"alphaflow/go-service/pkg/strategy"
@@ -19,13 +20,18 @@ import (
 func TestRunLoadsRoutes(t *testing.T) {
 	originalBuilder := buildDecisionReader
 	originalProcessorBuilder := buildDecisionProcessor
+	originalIdempotencyBuilder := buildIdempotencyStore
 	t.Cleanup(func() {
 		buildDecisionReader = originalBuilder
 		buildDecisionProcessor = originalProcessorBuilder
+		buildIdempotencyStore = originalIdempotencyBuilder
 	})
+	ctx, cancel := context.WithCancel(context.Background())
 	reader := &fakeDecisionReader{
 		messages:        []strategybus.DecisionMessage{{ID: "1-0"}},
 		pendingMessages: []strategybus.DecisionMessage{{ID: "2-0", DeliveryCount: 2}},
+		cancelOnRead:    2,
+		cancel:          cancel,
 	}
 	closed := false
 	buildDecisionReader = func(ctx context.Context, cfg config.Config) (decisionReader, func(), error) {
@@ -35,6 +41,9 @@ func TestRunLoadsRoutes(t *testing.T) {
 	processorClosed := false
 	buildDecisionProcessor = func(ctx context.Context, cfg config.Config, routes []strategyroute.Route) (decisionProcessor, func(), error) {
 		return processor, func() { processorClosed = true }, nil
+	}
+	buildIdempotencyStore = func(ctx context.Context, cfg config.Config) (idempotency.Store, func(), error) {
+		return newFakeIdempotencyStore(idempotency.StatusStarted), func() {}, nil
 	}
 	path := writeConfig(t, `
 [redis]
@@ -71,7 +80,7 @@ enabled = true
 output = "stdout"
 `)
 
-	if err := Run(context.Background(), path); err != nil {
+	if err := Run(ctx, path); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if !reader.ensured {
@@ -97,18 +106,26 @@ output = "stdout"
 func TestRunDeadLettersAfterMaxDeliveries(t *testing.T) {
 	originalBuilder := buildDecisionReader
 	originalProcessorBuilder := buildDecisionProcessor
+	originalIdempotencyBuilder := buildIdempotencyStore
 	t.Cleanup(func() {
 		buildDecisionReader = originalBuilder
 		buildDecisionProcessor = originalProcessorBuilder
+		buildIdempotencyStore = originalIdempotencyBuilder
 	})
+	ctx, cancel := context.WithCancel(context.Background())
 	reader := &fakeDecisionReader{
 		pendingMessages: []strategybus.DecisionMessage{{ID: "2-0", DeliveryCount: 5}},
+		cancelOnRead:    2,
+		cancel:          cancel,
 	}
 	buildDecisionReader = func(ctx context.Context, cfg config.Config) (decisionReader, func(), error) {
 		return reader, func() {}, nil
 	}
 	buildDecisionProcessor = func(ctx context.Context, cfg config.Config, routes []strategyroute.Route) (decisionProcessor, func(), error) {
 		return failingDecisionProcessor{}, func() {}, nil
+	}
+	buildIdempotencyStore = func(ctx context.Context, cfg config.Config) (idempotency.Store, func(), error) {
+		return newFakeIdempotencyStore(idempotency.StatusStarted), func() {}, nil
 	}
 	path := writeConfig(t, `
 [redis]
@@ -148,7 +165,7 @@ enabled = true
 output = "stdout"
 `)
 
-	if err := Run(context.Background(), path); err != nil {
+	if err := Run(ctx, path); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if len(reader.deadLetters) != 1 || reader.deadLetters[0].ID != "2-0" {
@@ -277,6 +294,150 @@ func TestPaperDecisionProcessorAcksExpiredEntry(t *testing.T) {
 	}
 	if !shouldAck {
 		t.Fatal("shouldAck = false, want true for expired entry signal without position")
+	}
+}
+
+func TestIdleBackoffCapsInputBlock(t *testing.T) {
+	delay, err := idleBackoff(config.Config{
+		Input: config.InputConfig{Block: "5s"},
+	})
+	if err != nil {
+		t.Fatalf("idleBackoff() error = %v", err)
+	}
+	if delay != time.Second {
+		t.Fatalf("delay = %s, want 1s", delay)
+	}
+}
+
+func TestIdleBackoffUsesShortInputBlock(t *testing.T) {
+	delay, err := idleBackoff(config.Config{
+		Input: config.InputConfig{Block: "25ms"},
+	})
+	if err != nil {
+		t.Fatalf("idleBackoff() error = %v", err)
+	}
+	if delay != 25*time.Millisecond {
+		t.Fatalf("delay = %s, want 25ms", delay)
+	}
+}
+
+func TestProcessDecisionBatchAcksCompletedIdempotencyKey(t *testing.T) {
+	reader := &fakeDecisionReader{
+		messages: []strategybus.DecisionMessage{{ID: "1-0"}},
+	}
+	processor := &fakeDecisionProcessor{}
+	store := newFakeIdempotencyStore(idempotency.StatusCompleted)
+
+	stats, err := processDecisionBatch(context.Background(), config.Config{}, reader, processor, store)
+	if err != nil {
+		t.Fatalf("processDecisionBatch() error = %v", err)
+	}
+	if len(processor.messages) != 0 {
+		t.Fatalf("processed messages = %d, want 0", len(processor.messages))
+	}
+	if len(reader.acked) != 1 || reader.acked[0] != "1-0" {
+		t.Fatalf("acked = %v, want [1-0]", reader.acked)
+	}
+	if stats.acked != 1 || stats.processed != 1 {
+		t.Fatalf("stats = %#v, want acked=1 processed=1", stats)
+	}
+}
+
+func TestProcessDecisionBatchKeepsProcessingIdempotencyKeyPending(t *testing.T) {
+	reader := &fakeDecisionReader{
+		messages: []strategybus.DecisionMessage{{ID: "1-0"}},
+	}
+	processor := &fakeDecisionProcessor{}
+	store := newFakeIdempotencyStore(idempotency.StatusProcessing)
+
+	stats, err := processDecisionBatch(context.Background(), config.Config{}, reader, processor, store)
+	if err != nil {
+		t.Fatalf("processDecisionBatch() error = %v", err)
+	}
+	if len(processor.messages) != 0 {
+		t.Fatalf("processed messages = %d, want 0", len(processor.messages))
+	}
+	if len(reader.acked) != 0 {
+		t.Fatalf("acked = %v, want empty", reader.acked)
+	}
+	if stats.acked != 0 || stats.processed != 1 {
+		t.Fatalf("stats = %#v, want acked=0 processed=1", stats)
+	}
+}
+
+func TestProcessDecisionBatchSkipsCompletedResultAndProcessesRemaining(t *testing.T) {
+	first := strategy.Result{
+		StrategyName: "supertrend",
+		Signal: strategy.Signal{
+			Side:     strategy.SignalSideBuy,
+			OpenTime: 1000,
+		},
+	}
+	second := strategy.Result{
+		StrategyName: "breakout",
+		Signal: strategy.Signal{
+			Side:     strategy.SignalSideHold,
+			OpenTime: 1000,
+		},
+	}
+	message := strategybus.DecisionMessage{
+		ID: "1-0",
+		Envelope: strategybus.DecisionEnvelope{
+			Target: strategy.Target{
+				Exchange: "binance",
+				Market:   "um",
+				Symbol:   "ETHUSDT",
+				Interval: "3m",
+			},
+			Results: []strategy.Result{first, second},
+		},
+	}
+	reader := &fakeDecisionReader{messages: []strategybus.DecisionMessage{message}}
+	processor := &fakeDecisionProcessor{}
+	store := newFakeIdempotencyStore(idempotency.StatusStarted)
+	firstKey := resultIdempotencyKey(message, first)
+	secondKey := resultIdempotencyKey(message, second)
+	store.statusByKey = map[string]idempotency.Status{
+		firstKey: idempotency.StatusCompleted,
+	}
+
+	stats, err := processDecisionBatch(context.Background(), config.Config{}, reader, processor, store)
+	if err != nil {
+		t.Fatalf("processDecisionBatch() error = %v", err)
+	}
+	if len(processor.messages) != 1 {
+		t.Fatalf("processed messages = %d, want 1", len(processor.messages))
+	}
+	if len(processor.messages[0].Envelope.Results) != 1 || processor.messages[0].Envelope.Results[0].StrategyName != "breakout" {
+		t.Fatalf("processed result = %#v, want breakout only", processor.messages[0].Envelope.Results)
+	}
+	if len(reader.acked) != 1 || reader.acked[0] != "1-0" {
+		t.Fatalf("acked = %v, want [1-0]", reader.acked)
+	}
+	if len(store.completed) != 1 || store.completed[0] != secondKey {
+		t.Fatalf("completed keys = %v, want [%s]", store.completed, secondKey)
+	}
+	if stats.acked != 1 || stats.processed != 1 {
+		t.Fatalf("stats = %#v, want acked=1 processed=1", stats)
+	}
+}
+
+func TestIdempotencyKeyPrefersSignalID(t *testing.T) {
+	key := idempotencyKey(strategybus.DecisionMessage{
+		ID: "1-0",
+		Envelope: strategybus.DecisionEnvelope{
+			SignalID: "sig_abc",
+		},
+	})
+	if key != "signal:sig_abc" {
+		t.Fatalf("key = %q, want signal:sig_abc", key)
+	}
+}
+
+func TestIdempotencyKeyFallsBackToMessageID(t *testing.T) {
+	key := idempotencyKey(strategybus.DecisionMessage{ID: "1-0"})
+	if key != "message:1-0" {
+		t.Fatalf("key = %q, want message:1-0", key)
 	}
 }
 
@@ -412,10 +573,13 @@ func writeConfig(t *testing.T, content string) string {
 type fakeDecisionReader struct {
 	ensured         bool
 	read            bool
+	readCount       int
 	acked           []string
 	messages        []strategybus.DecisionMessage
 	pendingMessages []strategybus.DecisionMessage
 	deadLetters     []strategybus.DecisionMessage
+	cancelOnRead    int
+	cancel          context.CancelFunc
 }
 
 func (r *fakeDecisionReader) EnsureConsumerGroup(ctx context.Context) error {
@@ -429,6 +593,13 @@ func (r *fakeDecisionReader) EnsureConsumerGroup(ctx context.Context) error {
 func (r *fakeDecisionReader) ReadDecisions(ctx context.Context) ([]strategybus.DecisionMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	r.readCount++
+	if r.cancelOnRead > 0 && r.readCount >= r.cancelOnRead {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		return nil, context.Canceled
 	}
 	r.read = true
 	return r.messages, nil
@@ -492,3 +663,44 @@ func (r fakePriceReader) ReadPrice(ctx context.Context, target strategy.Target) 
 	}
 	return r.price, nil
 }
+
+type fakeIdempotencyStore struct {
+	status      idempotency.Status
+	statusByKey map[string]idempotency.Status
+	begun       []string
+	completed   []string
+	failed      []string
+}
+
+func newFakeIdempotencyStore(status idempotency.Status) *fakeIdempotencyStore {
+	return &fakeIdempotencyStore{status: status}
+}
+
+func (s *fakeIdempotencyStore) Begin(ctx context.Context, key string) (idempotency.Status, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.begun = append(s.begun, key)
+	if status, ok := s.statusByKey[key]; ok {
+		return status, nil
+	}
+	return s.status, nil
+}
+
+func (s *fakeIdempotencyStore) Complete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.completed = append(s.completed, key)
+	return nil
+}
+
+func (s *fakeIdempotencyStore) Fail(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.failed = append(s.failed, key)
+	return nil
+}
+
+var _ idempotency.Store = (*fakeIdempotencyStore)(nil)

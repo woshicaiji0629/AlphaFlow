@@ -19,6 +19,11 @@ pending_idle = "30s"
 dead_letter_stream = "st:decision:stream:dead"
 max_deliveries = 5
 
+[idempotency]
+prefix = "position:decision:idempotency"
+processing_ttl = "10m"
+completed_ttl = "24h"
+
 [position]
 scope = "paper"
 account = "paper-default"

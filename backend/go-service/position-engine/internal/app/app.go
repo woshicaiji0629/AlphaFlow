@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/execution"
+	"alphaflow/go-service/pkg/idempotency"
 	"alphaflow/go-service/pkg/logger"
 	"alphaflow/go-service/pkg/position"
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
@@ -31,6 +32,7 @@ type decisionProcessor interface {
 
 var buildDecisionReader = buildRedisDecisionReader
 var buildDecisionProcessor = buildPaperDecisionProcessor
+var buildIdempotencyStore = buildRedisIdempotencyStore
 
 func Run(ctx context.Context, configPath string) error {
 	cfg, err := config.Load(configPath)
@@ -60,52 +62,267 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer closeProcessor()
-	messages, err := decisionReader.ReadDecisions(ctx)
+	idempotencyStore, closeIdempotencyStore, err := buildIdempotencyStore(ctx, cfg)
 	if err != nil {
 		return err
+	}
+	defer closeIdempotencyStore()
+	if err := runLoop(ctx, cfg, routes, decisionReader, processor, idempotencyStore); err != nil {
+		if ctx.Err() != nil {
+			slog.Info("position-engine stopped")
+			return nil
+		}
+		return err
+	}
+	slog.Info("position-engine stopped")
+	return nil
+}
+
+type processingStats struct {
+	decisions    int
+	processed    int
+	acked        int
+	deadLettered int
+}
+
+func runLoop(
+	ctx context.Context,
+	cfg config.Config,
+	routes []strategyroute.Route,
+	decisionReader decisionReader,
+	processor decisionProcessor,
+	idempotencyStore idempotency.Store,
+) error {
+	enabledRoutes := 0
+	for _, route := range routes {
+		if route.Enabled {
+			enabledRoutes++
+		}
+	}
+	for {
+		stats, err := processDecisionBatch(ctx, cfg, decisionReader, processor, idempotencyStore)
+		if err != nil {
+			return err
+		}
+		slog.Info(
+			"position-engine decisions processed",
+			"routes", len(routes),
+			"enabled_routes", enabledRoutes,
+			"decisions", stats.decisions,
+			"processed", stats.processed,
+			"acked", stats.acked,
+			"dead_lettered", stats.deadLettered,
+		)
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		if stats.decisions == 0 {
+			delay, err := idleBackoff(cfg)
+			if err != nil {
+				return err
+			}
+			if err := sleepContext(ctx, delay); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+func idleBackoff(cfg config.Config) (time.Duration, error) {
+	block, err := config.InputBlock(cfg)
+	if err != nil {
+		return 0, err
+	}
+	if block > time.Second {
+		return time.Second, nil
+	}
+	return block, nil
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func processDecisionBatch(
+	ctx context.Context,
+	cfg config.Config,
+	decisionReader decisionReader,
+	processor decisionProcessor,
+	idempotencyStore idempotency.Store,
+) (processingStats, error) {
+	messages, err := decisionReader.ReadDecisions(ctx)
+	if err != nil {
+		return processingStats{}, err
 	}
 	pendingMessages, err := decisionReader.ClaimPending(ctx)
 	if err != nil {
-		return err
+		return processingStats{}, err
 	}
 	messages = append(messages, pendingMessages...)
-	processed := 0
-	acked := 0
-	deadLettered := 0
+	stats := processingStats{
+		decisions: len(messages),
+	}
 	for _, message := range messages {
-		shouldAck, err := processor.ProcessDecision(ctx, message)
+		result, err := processDecisionMessage(ctx, cfg, decisionReader, processor, idempotencyStore, message)
+		if err != nil {
+			return processingStats{}, err
+		}
+		if result.ack {
+			if err := decisionReader.Ack(ctx, message.ID); err != nil {
+				return processingStats{}, fmt.Errorf("ack decision message %s: %w", message.ID, err)
+			}
+			stats.acked++
+		}
+		if result.deadLettered {
+			stats.deadLettered++
+		}
+		stats.processed++
+	}
+	return stats, nil
+}
+
+type messageProcessingResult struct {
+	ack          bool
+	deadLettered bool
+}
+
+func processDecisionMessage(
+	ctx context.Context,
+	cfg config.Config,
+	decisionReader decisionReader,
+	processor decisionProcessor,
+	idempotencyStore idempotency.Store,
+	message strategybus.DecisionMessage,
+) (messageProcessingResult, error) {
+	if idempotencyStore == nil {
+		return processDecisionMessageWithoutIdempotency(ctx, cfg, decisionReader, processor, message)
+	}
+	if len(message.Envelope.Results) == 0 {
+		return processDecisionMessageKey(ctx, cfg, decisionReader, processor, idempotencyStore, message, idempotencyKey(message))
+	}
+
+	allResultsDone := true
+	for _, result := range message.Envelope.Results {
+		singleResultMessage := message
+		singleResultMessage.Envelope.Results = []strategy.Result{result}
+		key := resultIdempotencyKey(message, result)
+		status, err := idempotencyStore.Begin(ctx, key)
+		if err != nil {
+			return messageProcessingResult{}, err
+		}
+		switch status {
+		case idempotency.StatusCompleted:
+			continue
+		case idempotency.StatusProcessing:
+			slog.Warn("position-engine decision result already processing", "message_id", message.ID, "strategy", result.StrategyName)
+			allResultsDone = false
+			continue
+		}
+
+		shouldAck, err := processor.ProcessDecision(ctx, singleResultMessage)
 		if err != nil {
 			if shouldDeadLetter(message, cfg.Input.MaxDeliveries) {
 				if err := decisionReader.DeadLetter(ctx, message, err.Error()); err != nil {
-					return fmt.Errorf("dead-letter decision message %s: %w", message.ID, err)
+					return messageProcessingResult{}, fmt.Errorf("dead-letter decision message %s: %w", message.ID, err)
 				}
-				if err := decisionReader.Ack(ctx, message.ID); err != nil {
-					return fmt.Errorf("ack dead-lettered decision message %s: %w", message.ID, err)
+				if err := idempotencyStore.Complete(ctx, key); err != nil {
+					return messageProcessingResult{}, err
 				}
-				acked++
-				deadLettered++
-			} else {
-				slog.Warn("position-engine decision processing failed", "message_id", message.ID, "delivery_count", message.DeliveryCount, "error", err)
+				return messageProcessingResult{ack: true, deadLettered: true}, nil
 			}
-			processed++
-			continue
+			slog.Warn("position-engine decision result processing failed", "message_id", message.ID, "strategy", result.StrategyName, "delivery_count", message.DeliveryCount, "error", err)
+			if err := idempotencyStore.Fail(ctx, key); err != nil {
+				return messageProcessingResult{}, err
+			}
+			return messageProcessingResult{ack: false}, nil
 		}
 		if shouldAck {
-			if err := decisionReader.Ack(ctx, message.ID); err != nil {
-				return fmt.Errorf("ack decision message %s: %w", message.ID, err)
+			if err := idempotencyStore.Complete(ctx, key); err != nil {
+				return messageProcessingResult{}, err
 			}
-			acked++
+			continue
 		}
-		processed++
-	}
-	enabled := 0
-	for _, route := range routes {
-		if route.Enabled {
-			enabled++
+		if err := idempotencyStore.Fail(ctx, key); err != nil {
+			return messageProcessingResult{}, err
 		}
+		allResultsDone = false
 	}
-	slog.Info("position-engine decisions processed", "routes", len(routes), "enabled_routes", enabled, "decisions", len(messages), "processed", processed, "acked", acked, "dead_lettered", deadLettered)
-	return nil
+	return messageProcessingResult{ack: allResultsDone}, nil
+}
+
+func processDecisionMessageWithoutIdempotency(
+	ctx context.Context,
+	cfg config.Config,
+	decisionReader decisionReader,
+	processor decisionProcessor,
+	message strategybus.DecisionMessage,
+) (messageProcessingResult, error) {
+	shouldAck, err := processor.ProcessDecision(ctx, message)
+	if err != nil {
+		if shouldDeadLetter(message, cfg.Input.MaxDeliveries) {
+			if err := decisionReader.DeadLetter(ctx, message, err.Error()); err != nil {
+				return messageProcessingResult{}, fmt.Errorf("dead-letter decision message %s: %w", message.ID, err)
+			}
+			return messageProcessingResult{ack: true, deadLettered: true}, nil
+		}
+		slog.Warn("position-engine decision processing failed", "message_id", message.ID, "delivery_count", message.DeliveryCount, "error", err)
+		return messageProcessingResult{ack: false}, nil
+	}
+	return messageProcessingResult{ack: shouldAck}, nil
+}
+
+func processDecisionMessageKey(
+	ctx context.Context,
+	cfg config.Config,
+	decisionReader decisionReader,
+	processor decisionProcessor,
+	idempotencyStore idempotency.Store,
+	message strategybus.DecisionMessage,
+	key string,
+) (messageProcessingResult, error) {
+	status, err := idempotencyStore.Begin(ctx, key)
+	if err != nil {
+		return messageProcessingResult{}, err
+	}
+	switch status {
+	case idempotency.StatusCompleted:
+		return messageProcessingResult{ack: true}, nil
+	case idempotency.StatusProcessing:
+		slog.Warn("position-engine decision already processing", "message_id", message.ID)
+		return messageProcessingResult{ack: false}, nil
+	}
+	result, err := processDecisionMessageWithoutIdempotency(ctx, cfg, decisionReader, processor, message)
+	if err != nil {
+		return messageProcessingResult{}, err
+	}
+	if result.ack {
+		if err := idempotencyStore.Complete(ctx, key); err != nil {
+			return messageProcessingResult{}, err
+		}
+		return result, nil
+	}
+	if err := idempotencyStore.Fail(ctx, key); err != nil {
+		return messageProcessingResult{}, err
+	}
+	return result, nil
+}
+
+func idempotencyKey(message strategybus.DecisionMessage) string {
+	if message.Envelope.SignalID != "" {
+		return "signal:" + message.Envelope.SignalID
+	}
+	return "message:" + message.ID
+}
+
+func resultIdempotencyKey(message strategybus.DecisionMessage, result strategy.Result) string {
+	return "result:" + strategybus.NewResultSignalID(message.Envelope.Target, result)
 }
 
 func shouldDeadLetter(message strategybus.DecisionMessage, maxDeliveries int64) bool {
@@ -136,6 +353,38 @@ func buildRedisDecisionReader(ctx context.Context, cfg config.Config) (decisionR
 		return nil, nil, err
 	}
 	return bus, closeReader, nil
+}
+
+func buildRedisIdempotencyStore(ctx context.Context, cfg config.Config) (idempotency.Store, func(), error) {
+	redisClient, err := redisclient.New(ctx, config.RedisClientConfig(cfg))
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect redis idempotency store: %w", err)
+	}
+	closeStore := func() {
+		if err := redisclient.Close(redisClient); err != nil {
+			slog.Error("close idempotency redis failed", "error", err)
+		}
+	}
+	processingTTL, err := config.IdempotencyProcessingTTL(cfg)
+	if err != nil {
+		closeStore()
+		return nil, nil, err
+	}
+	completedTTL, err := config.IdempotencyCompletedTTL(cfg)
+	if err != nil {
+		closeStore()
+		return nil, nil, err
+	}
+	store, err := idempotency.NewRedisStore(redisClient, idempotency.RedisOptions{
+		Prefix:        cfg.Idempotency.Prefix,
+		ProcessingTTL: processingTTL,
+		CompletedTTL:  completedTTL,
+	})
+	if err != nil {
+		closeStore()
+		return nil, nil, err
+	}
+	return store, closeStore, nil
 }
 
 type paperDecisionProcessor struct {
