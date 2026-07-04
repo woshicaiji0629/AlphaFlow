@@ -8,6 +8,30 @@ const (
 	swingTrendDown
 )
 
+type liquiditySweepState struct {
+	kind   string
+	level  float64
+	top    float64
+	bottom float64
+	age    int
+}
+
+type momentumSupplyDemandZone struct {
+	top        float64
+	bottom     float64
+	startIndex int
+	breakIndex int
+	ok         bool
+}
+
+type momentumSupplyDemandState struct {
+	supply      momentumSupplyDemandZone
+	demand      momentumSupplyDemandZone
+	position    string
+	retestEvent string
+	breakEvent  string
+}
+
 func addSmartMoney(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
 	period := minInt(60, len(closes))
 	if period < 7 {
@@ -35,6 +59,9 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 	direction := ""
 	structureEvent := "none"
 	structureBias := structureBias(trend)
+	highStrength, lowStrength := swingStrengthLabels(trend)
+	signals["swing_high_strength"] = highStrength
+	signals["swing_low_strength"] = lowStrength
 	switch {
 	case swingHigh.price > 0 && closes[last] > swingHigh.price:
 		direction = "up"
@@ -67,6 +94,27 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 	default:
 		signals["market_structure"] = "range"
 	}
+	if sweep, ok := detectLiquiditySweep(windowHighs, windowLows, closes[start:], pivotHighs, pivotLows); ok {
+		setValue(values, "liquidity_sweep_level", sweep.level, true)
+		setValue(values, "liquidity_sweep_top", sweep.top, true)
+		setValue(values, "liquidity_sweep_bottom", sweep.bottom, true)
+		setValue(values, "liquidity_sweep_age", float64(sweep.age), true)
+		signals["liquidity_sweep_type"] = sweep.kind
+		if structureEvent == "none" {
+			if liquiditySweepIsHigh(sweep.kind) {
+				signals["smart_money"] = "liquidity_sweep_high"
+				structureEvent = "sweep_high"
+			} else if liquiditySweepIsLow(sweep.kind) {
+				signals["smart_money"] = "liquidity_sweep_low"
+				structureEvent = "sweep_low"
+			}
+		}
+	} else {
+		signals["liquidity_sweep_type"] = "none"
+	}
+	if momentumSD, ok := detectMomentumSupplyDemandZones(opens, highs, lows, closes, 120, 4, 4, 0.5, 20, 1.5); ok {
+		addMomentumSupplyDemandValues(values, signals, momentumSD, last)
+	}
 	signals["structure_event"] = structureEvent
 	signals["structure_bias"] = structureBias
 
@@ -80,6 +128,265 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 	addEqualHighLow(values, signals, highs, lows, closes, period)
 	addFairValueGap(values, signals, highs, lows, closes)
 	addPremiumDiscountZones(values, signals, closes[last], swingHigh.price, swingLow.price)
+}
+
+func addMomentumSupplyDemandValues(values map[string]string, signals map[string]string, state momentumSupplyDemandState, last int) {
+	if state.supply.ok {
+		setValue(values, "momentum_supply_top", state.supply.top, true)
+		setValue(values, "momentum_supply_bottom", state.supply.bottom, true)
+		setValue(values, "momentum_supply_mid", (state.supply.top+state.supply.bottom)/2, true)
+		setValue(values, "momentum_supply_age", float64(last-state.supply.startIndex), true)
+	}
+	if state.demand.ok {
+		setValue(values, "momentum_demand_top", state.demand.top, true)
+		setValue(values, "momentum_demand_bottom", state.demand.bottom, true)
+		setValue(values, "momentum_demand_mid", (state.demand.top+state.demand.bottom)/2, true)
+		setValue(values, "momentum_demand_age", float64(last-state.demand.startIndex), true)
+	}
+	signals["momentum_sd_position"] = state.position
+	signals["momentum_sd_retest"] = state.retestEvent
+	signals["momentum_sd_break"] = state.breakEvent
+}
+
+func detectMomentumSupplyDemandZones(
+	opens []float64,
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	lookback int,
+	momentumSpan int,
+	momentumCount int,
+	bodyMultiplier float64,
+	atrPeriod int,
+	maxZoneATR float64,
+) (momentumSupplyDemandState, bool) {
+	if lookback <= 0 || momentumSpan <= 0 || momentumCount <= 0 || bodyMultiplier <= 0 ||
+		len(closes) < lookback || len(opens) != len(closes) || len(highs) != len(closes) || len(lows) != len(closes) {
+		return momentumSupplyDemandState{}, false
+	}
+	atrValue, ok := atr(highs, lows, closes, atrPeriod)
+	if !ok || atrValue <= 0 {
+		return momentumSupplyDemandState{}, false
+	}
+	start := len(closes) - lookback
+	last := len(closes) - 1
+	minDistanceBetweenZones := 5
+	lastDemandZone := start - minDistanceBetweenZones
+	lastSupplyZone := start - minDistanceBetweenZones
+	state := momentumSupplyDemandState{
+		position:    "unknown",
+		retestEvent: "none",
+		breakEvent:  "none",
+	}
+	for index := start + momentumSpan + 1; index <= last; index++ {
+		bullish, bearish := momentumCandleCounts(opens, closes, index, momentumSpan, bodyMultiplier)
+		if bullish >= momentumCount && index-lastDemandZone > minDistanceBetweenZones {
+			anchor := index - momentumSpan - 1
+			state.demand = momentumSupplyDemandZoneFromRange(highs[anchor], lows[anchor], anchor, atrValue, maxZoneATR)
+			lastDemandZone = index
+		}
+		if bearish >= momentumCount && index-lastSupplyZone > minDistanceBetweenZones {
+			anchor := index - momentumSpan - 1
+			state.supply = momentumSupplyDemandZoneFromRange(highs[anchor], lows[anchor], anchor, atrValue, maxZoneATR)
+			lastSupplyZone = index
+		}
+		if state.demand.ok && state.demand.breakIndex < 0 && index > state.demand.startIndex && closes[index] < state.demand.bottom {
+			state.demand.breakIndex = index
+		}
+		if state.supply.ok && state.supply.breakIndex < 0 && index > state.supply.startIndex && closes[index] > state.supply.top {
+			state.supply.breakIndex = index
+		}
+	}
+	state.position = momentumSupplyDemandPosition(closes[last], state)
+	state.retestEvent = momentumSupplyDemandRetest(highs[last], lows[last], last, state)
+	state.breakEvent = momentumSupplyDemandBreak(last, state)
+	return state, state.supply.ok || state.demand.ok
+}
+
+func momentumCandleCounts(opens []float64, closes []float64, index int, momentumSpan int, bodyMultiplier float64) (int, int) {
+	averageBody := averageBodySizeAt(opens, closes, index, 20)
+	if averageBody <= 0 {
+		return 0, 0
+	}
+	bullish := 0
+	bearish := 0
+	start := index - momentumSpan + 1
+	for bodyIndex := start; bodyIndex <= index; bodyIndex++ {
+		bodySize := absFloat(closes[bodyIndex] - opens[bodyIndex])
+		if bodySize < averageBody*bodyMultiplier {
+			continue
+		}
+		if closes[bodyIndex] > opens[bodyIndex] {
+			bullish++
+		} else if closes[bodyIndex] < opens[bodyIndex] {
+			bearish++
+		}
+	}
+	return bullish, bearish
+}
+
+func averageBodySizeAt(opens []float64, closes []float64, index int, period int) float64 {
+	if period <= 0 || index < 0 || index >= len(closes) || len(opens) != len(closes) {
+		return 0
+	}
+	start := index - period + 1
+	if start < 0 {
+		start = 0
+	}
+	var total float64
+	for bodyIndex := start; bodyIndex <= index; bodyIndex++ {
+		total += absFloat(closes[bodyIndex] - opens[bodyIndex])
+	}
+	return total / float64(index-start+1)
+}
+
+func momentumSupplyDemandZoneFromRange(high float64, low float64, startIndex int, atrValue float64, maxZoneATR float64) momentumSupplyDemandZone {
+	top := high
+	bottom := low
+	maxSize := atrValue * maxZoneATR
+	if maxSize > 0 && top-bottom > maxSize {
+		diff := top - bottom - maxSize
+		top -= diff / 2
+		bottom += diff / 2
+	}
+	return momentumSupplyDemandZone{
+		top:        top,
+		bottom:     bottom,
+		startIndex: startIndex,
+		breakIndex: -1,
+		ok:         top > bottom,
+	}
+}
+
+func momentumSupplyDemandPosition(price float64, state momentumSupplyDemandState) string {
+	if state.supply.ok {
+		if price > state.supply.top {
+			return "above_supply"
+		}
+		if price >= state.supply.bottom {
+			return "in_supply"
+		}
+	}
+	if state.demand.ok {
+		if price < state.demand.bottom {
+			return "below_demand"
+		}
+		if price <= state.demand.top {
+			return "in_demand"
+		}
+	}
+	if state.supply.ok || state.demand.ok {
+		return "between_zones"
+	}
+	return "unknown"
+}
+
+func momentumSupplyDemandRetest(high float64, low float64, last int, state momentumSupplyDemandState) string {
+	if state.supply.ok && state.supply.breakIndex < 0 && last > state.supply.startIndex && high > state.supply.bottom {
+		return "supply_retest"
+	}
+	if state.demand.ok && state.demand.breakIndex < 0 && last > state.demand.startIndex && low < state.demand.top {
+		return "demand_retest"
+	}
+	return "none"
+}
+
+func momentumSupplyDemandBreak(last int, state momentumSupplyDemandState) string {
+	if state.supply.ok && state.supply.breakIndex == last {
+		return "supply_break"
+	}
+	if state.demand.ok && state.demand.breakIndex == last {
+		return "demand_break"
+	}
+	return "none"
+}
+
+func detectLiquiditySweep(highs []float64, lows []float64, closes []float64, pivotHighs []priceLevel, pivotLows []priceLevel) (liquiditySweepState, bool) {
+	if len(closes) == 0 || len(highs) != len(closes) || len(lows) != len(closes) {
+		return liquiditySweepState{}, false
+	}
+	best := liquiditySweepState{age: len(closes) + 1}
+	found := false
+	for _, pivot := range pivotHighs {
+		broken := false
+		for index := pivot.recency + 1; index < len(closes); index++ {
+			if !broken {
+				if highs[index] > pivot.price && closes[index] < pivot.price {
+					best, found = newerLiquiditySweep(best, found, liquiditySweepState{
+						kind:   "wick_high",
+						level:  pivot.price,
+						top:    highs[index],
+						bottom: pivot.price,
+						age:    len(closes) - 1 - index,
+					})
+				}
+				if closes[index] > pivot.price {
+					broken = true
+				}
+				continue
+			}
+			if lows[index] < pivot.price && closes[index] > pivot.price {
+				best, found = newerLiquiditySweep(best, found, liquiditySweepState{
+					kind:   "retest_high",
+					level:  pivot.price,
+					top:    pivot.price,
+					bottom: lows[index],
+					age:    len(closes) - 1 - index,
+				})
+			}
+			if closes[index] < pivot.price {
+				broken = false
+			}
+		}
+	}
+	for _, pivot := range pivotLows {
+		broken := false
+		for index := pivot.recency + 1; index < len(closes); index++ {
+			if !broken {
+				if lows[index] < pivot.price && closes[index] > pivot.price {
+					best, found = newerLiquiditySweep(best, found, liquiditySweepState{
+						kind:   "wick_low",
+						level:  pivot.price,
+						top:    pivot.price,
+						bottom: lows[index],
+						age:    len(closes) - 1 - index,
+					})
+				}
+				if closes[index] < pivot.price {
+					broken = true
+				}
+				continue
+			}
+			if highs[index] > pivot.price && closes[index] < pivot.price {
+				best, found = newerLiquiditySweep(best, found, liquiditySweepState{
+					kind:   "retest_low",
+					level:  pivot.price,
+					top:    highs[index],
+					bottom: pivot.price,
+					age:    len(closes) - 1 - index,
+				})
+			}
+			if closes[index] > pivot.price {
+				broken = false
+			}
+		}
+	}
+	return best, found
+}
+
+func newerLiquiditySweep(current liquiditySweepState, found bool, candidate liquiditySweepState) (liquiditySweepState, bool) {
+	if !found || candidate.age < current.age {
+		return candidate, true
+	}
+	return current, found
+}
+
+func liquiditySweepIsHigh(kind string) bool {
+	return kind == "wick_high" || kind == "retest_high"
+}
+
+func liquiditySweepIsLow(kind string) bool {
+	return kind == "wick_low" || kind == "retest_low"
 }
 
 func recentSwing(levels []priceLevel) (priceLevel, bool) {
@@ -174,6 +481,9 @@ func addInternalSmartMoney(values map[string]string, signals map[string]string, 
 
 	trend := detectSwingTrend(pivotHighs, pivotLows)
 	bias := structureBias(trend)
+	highStrength, lowStrength := swingStrengthLabels(trend)
+	signals["internal_swing_high_strength"] = highStrength
+	signals["internal_swing_low_strength"] = lowStrength
 	event := "none"
 	switch {
 	case closes[last] > internalHigh.price:
@@ -197,6 +507,17 @@ func addInternalSmartMoney(values map[string]string, signals map[string]string, 
 	}
 	signals["internal_structure_event"] = event
 	signals["internal_structure_bias"] = bias
+}
+
+func swingStrengthLabels(trend swingTrend) (string, string) {
+	switch trend {
+	case swingTrendUp:
+		return "weak", "strong"
+	case swingTrendDown:
+		return "strong", "weak"
+	default:
+		return "unknown", "unknown"
+	}
 }
 
 func addEqualHighLow(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {

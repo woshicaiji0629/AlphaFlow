@@ -13,6 +13,14 @@ func TestTradingViewFeaturesOutput(t *testing.T) {
 		"qqe_line",
 		"qqe_signal",
 		"qqe_hist",
+		"qqe_primary_line",
+		"qqe_primary_trend",
+		"qqe_secondary_line",
+		"qqe_secondary_trend",
+		"qqe_bb_upper",
+		"qqe_bb_lower",
+		"qqe_primary_hist",
+		"qqe_secondary_hist",
 		"ut_stop",
 		"ssl_upper",
 		"ssl_lower",
@@ -20,8 +28,11 @@ func TestTradingViewFeaturesOutput(t *testing.T) {
 		"range_filter_upper",
 		"range_filter_lower",
 		"wvf",
+		"wvf_mid_line",
 		"wvf_upper_band",
+		"wvf_lower_band",
 		"wvf_range_high",
+		"wvf_range_low",
 		"td_sell_setup_count",
 		"nw_middle",
 		"nw_upper",
@@ -34,12 +45,15 @@ func TestTradingViewFeaturesOutput(t *testing.T) {
 	for _, key := range []string{
 		"qqe_trend",
 		"qqe_cross",
+		"qqe_mod_signal",
+		"qqe_primary_zero_cross",
 		"ut_direction",
 		"ut_signal",
 		"ssl_direction",
 		"ssl_cross",
 		"range_filter_direction",
 		"wvf_state",
+		"wvf_zone",
 		"td_exhaustion",
 		"nw_trend",
 		"nw_position_state",
@@ -47,6 +61,40 @@ func TestTradingViewFeaturesOutput(t *testing.T) {
 		if signals[key] == "" {
 			t.Fatalf("missing %s in %#v", key, signals)
 		}
+	}
+}
+
+func TestQQEModEnhancedOutputsSignalFields(t *testing.T) {
+	closes := oscillatingCloses(180)
+
+	result, ok := qqeModEnhanced(closes, 6, 5, 3, 1.61, 50, 0.35, 3)
+
+	if !ok {
+		t.Fatal("qqeModEnhanced returned false")
+	}
+	if result.primaryLine == 0 || result.secondaryLine == 0 {
+		t.Fatalf("missing qqe lines: %#v", result)
+	}
+	if result.bbUpper == result.bbLower {
+		t.Fatalf("bb upper/lower should differ: %#v", result)
+	}
+	if result.signal == "" || result.zeroCross == "" {
+		t.Fatalf("missing qqe signals: %#v", result)
+	}
+}
+
+func TestQQEModSignalHelpers(t *testing.T) {
+	if got := qqeModSignal(5, 4, 3, -3, 3); got != "up" {
+		t.Fatalf("qqeModSignal up = %q", got)
+	}
+	if got := qqeModSignal(-5, -4, 3, -3, 3); got != "down" {
+		t.Fatalf("qqeModSignal down = %q", got)
+	}
+	if got := qqeZeroCross(49, 51); got != "up" {
+		t.Fatalf("qqeZeroCross up = %q", got)
+	}
+	if got := qqeZeroCross(51, 49); got != "down" {
+		t.Fatalf("qqeZeroCross down = %q", got)
 	}
 }
 
@@ -61,6 +109,20 @@ func TestTDSequentialSetupCounts(t *testing.T) {
 	if buyCount != 9 || exhaustion != "buy" {
 		t.Fatalf("td buy setup = %d/%q, want 9/buy", buyCount, exhaustion)
 	}
+}
+
+func oscillatingCloses(length int) []float64 {
+	values := make([]float64, 0, length)
+	price := 100.0
+	for index := 0; index < length; index++ {
+		if index%12 < 6 {
+			price += 0.8
+		} else {
+			price -= 0.5
+		}
+		values = append(values, price)
+	}
+	return values
 }
 
 func TestTradingViewSignalHelpers(t *testing.T) {
@@ -78,6 +140,15 @@ func TestTradingViewSignalHelpers(t *testing.T) {
 	}
 	if got := williamsVixFixState(10, 8, 9); got != "panic" {
 		t.Fatalf("williamsVixFixState panic = %q", got)
+	}
+	if got := williamsVixFixZone(10, 8, 1, 9, 2); got != "panic" {
+		t.Fatalf("williamsVixFixZone panic = %q", got)
+	}
+	if got := williamsVixFixZone(1, 8, 2, 9, 2); got != "low_volatility" {
+		t.Fatalf("williamsVixFixZone low volatility = %q", got)
+	}
+	if got := williamsVixFixZone(4, 8, 2, 9, 1); got != "normal" {
+		t.Fatalf("williamsVixFixZone normal = %q", got)
 	}
 	if got := thresholdTrend(55, 50, 50); got != "bull" {
 		t.Fatalf("thresholdTrend bull = %q", got)

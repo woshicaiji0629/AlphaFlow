@@ -99,6 +99,30 @@ func TestWaveTrendOutputsSeries(t *testing.T) {
 	}
 }
 
+func TestWaveTrendZoneBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		wt1  float64
+		want string
+	}{
+		{name: "overbought", wt1: 60, want: "overbought"},
+		{name: "upper", wt1: 53, want: "upper"},
+		{name: "bull", wt1: 1, want: "bull"},
+		{name: "neutral", wt1: 0, want: "neutral"},
+		{name: "bear", wt1: -1, want: "bear"},
+		{name: "lower", wt1: -53, want: "lower"},
+		{name: "oversold", wt1: -60, want: "oversold"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := waveTrendZone(tc.wt1); got != tc.want {
+				t.Fatalf("waveTrendZone(%v) = %q, want %q", tc.wt1, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWilliamsRAndROC(t *testing.T) {
 	highs := []float64{10, 11, 12, 13, 14}
 	lows := []float64{8, 9, 10, 11, 12}

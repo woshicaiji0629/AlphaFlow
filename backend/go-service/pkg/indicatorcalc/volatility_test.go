@@ -3,7 +3,7 @@ package indicatorcalc
 import "testing"
 
 func TestSupertrendUsesSeriesDirection(t *testing.T) {
-	highs, lows, closes, volumes := trendingSeries(80, 100, 0.8)
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.8)
 	values := map[string]string{}
 	signals := map[string]string{}
 
@@ -22,6 +22,20 @@ func TestSupertrendUsesSeriesDirection(t *testing.T) {
 		"supertrend_10_3",
 		"supertrend_10_3_3",
 		"supertrend_14_4",
+		"adaptive_supertrend",
+		"adaptive_supertrend_distance_pct",
+		"adaptive_supertrend_assigned_atr",
+		"adaptive_supertrend_high_centroid",
+		"adaptive_supertrend_mid_centroid",
+		"adaptive_supertrend_low_centroid",
+		"ai_supertrend",
+		"ai_supertrend_ama",
+		"ai_supertrend_distance_pct",
+		"ai_supertrend_target_factor",
+		"ai_supertrend_performance_index",
+		"ai_supertrend_best_centroid",
+		"ai_supertrend_average_centroid",
+		"ai_supertrend_worst_centroid",
 	} {
 		if values[key] == "" {
 			t.Fatalf("missing %s: %#v", key, values)
@@ -35,6 +49,17 @@ func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	}
 	if signals["supertrend_7_2_direction"] == "" || signals["supertrend_10_3_direction"] == "" || signals["supertrend_10_3_3_direction"] == "" || signals["supertrend_14_4_direction"] == "" {
 		t.Fatalf("missing supertrend preset directions: %#v", signals)
+	}
+	if signals["adaptive_supertrend_direction"] == "" ||
+		signals["adaptive_supertrend_flip"] == "" ||
+		signals["adaptive_supertrend_volatility_cluster"] == "" {
+		t.Fatalf("missing adaptive supertrend signals: %#v", signals)
+	}
+	if signals["ai_supertrend_direction"] == "" ||
+		signals["ai_supertrend_flip"] == "" ||
+		signals["ai_supertrend_cluster"] == "" ||
+		signals["ai_supertrend_factor_cluster"] == "" {
+		t.Fatalf("missing ai supertrend signals: %#v", signals)
 	}
 	if values["alphatrend"] == "" || values["mfi14"] == "" {
 		t.Fatalf("missing alphatrend values: %#v", values)
@@ -62,6 +87,84 @@ func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	}
 	if signals["chandelier_direction"] == "" {
 		t.Fatalf("missing chandelier direction: %#v", signals)
+	}
+}
+
+func TestSupertrendZoneUsesRecentFlipPivots(t *testing.T) {
+	highs := []float64{105, 103, 101, 99, 104, 110, 118, 116}
+	lows := []float64{100, 98, 94, 92, 96, 103, 109, 108}
+	closes := []float64{102, 100, 96, 94, 102, 108, 114, 110}
+	points := []trendPoint{
+		{value: 103, direction: "down"},
+		{value: 101, direction: "down"},
+		{value: 97, direction: "up"},
+		{value: 100, direction: "up"},
+		{value: 105, direction: "up"},
+		{value: 112, direction: "down"},
+	}
+
+	zone, ok := supertrendZone(highs, lows, closes, points, 2, 3, 1.5)
+
+	if !ok {
+		t.Fatal("supertrendZone returned false")
+	}
+	if zone.pivotLow != 92 {
+		t.Fatalf("pivotLow = %v, want 92", zone.pivotLow)
+	}
+	if zone.pivotHigh != 118 {
+		t.Fatalf("pivotHigh = %v, want 118", zone.pivotHigh)
+	}
+	if zone.side != "bear" {
+		t.Fatalf("side = %q, want bear", zone.side)
+	}
+	if zone.area != "premium" {
+		t.Fatalf("area = %q, want premium", zone.area)
+	}
+	if zone.fib618 == 0 || zone.extension == 0 || zone.premiumBand == 0 || zone.discountBand == 0 {
+		t.Fatalf("missing zone levels: %#v", zone)
+	}
+}
+
+func TestAdaptiveVolatilityClusterAssignsLevels(t *testing.T) {
+	cluster, ok := adaptiveVolatilityCluster([]float64{1, 1.1, 1.2, 2, 2.1, 3.5, 3.7, 3.9}, 3.8)
+
+	if !ok {
+		t.Fatal("adaptiveVolatilityCluster returned false")
+	}
+	if cluster.cluster != "high" {
+		t.Fatalf("cluster = %q, want high", cluster.cluster)
+	}
+	if cluster.assignedATR != cluster.highCentroid {
+		t.Fatalf("assigned ATR = %v, high centroid = %v", cluster.assignedATR, cluster.highCentroid)
+	}
+	if cluster.highCentroid <= cluster.midCentroid || cluster.midCentroid <= cluster.lowCentroid {
+		t.Fatalf("unexpected centroids: %#v", cluster)
+	}
+}
+
+func TestAIPerformanceClustersRanksBestAverageWorst(t *testing.T) {
+	results := []aiSupertrendFactorResult{
+		{factor: 1, perf: -1},
+		{factor: 1.5, perf: -0.8},
+		{factor: 2, perf: 0.1},
+		{factor: 2.5, perf: 0.2},
+		{factor: 3, perf: 1.2},
+		{factor: 3.5, perf: 1.4},
+	}
+
+	clusters, ok := aiPerformanceClusters(results)
+
+	if !ok {
+		t.Fatal("aiPerformanceClusters returned false")
+	}
+	if clusters[0].name != "worst" || clusters[1].name != "average" || clusters[2].name != "best" {
+		t.Fatalf("unexpected cluster names: %#v", clusters)
+	}
+	if clusters[2].centroid <= clusters[1].centroid || clusters[1].centroid <= clusters[0].centroid {
+		t.Fatalf("unexpected centroids: %#v", clusters)
+	}
+	if len(clusters[2].factors) == 0 {
+		t.Fatalf("best cluster has no factors: %#v", clusters)
 	}
 }
 

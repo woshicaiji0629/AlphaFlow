@@ -5,20 +5,22 @@ func addTradingViewWindowAnalysis(ctx *analysisContext) {
 		"donchian_mid20", "donchian_width_pct20", "donchian_position20",
 		"keltner_middle20", "keltner_width_pct20", "keltner_position20",
 		"qqe_line", "qqe_signal", "qqe_hist",
+		"qqe_primary_line", "qqe_primary_trend", "qqe_secondary_line", "qqe_secondary_trend",
+		"qqe_bb_upper", "qqe_bb_lower", "qqe_primary_hist", "qqe_secondary_hist",
 		"ut_stop", "ut_stop_distance_pct",
 		"ssl_upper", "ssl_lower", "ssl_width_pct",
 		"range_filter", "range_filter_upper", "range_filter_lower", "range_filter_distance_pct",
-		"wvf", "wvf_upper_band", "wvf_range_high",
+		"wvf", "wvf_mid_line", "wvf_upper_band", "wvf_lower_band", "wvf_range_high", "wvf_range_low",
 		"td_buy_setup_count", "td_sell_setup_count",
 		"nw_middle", "nw_upper", "nw_lower", "nw_width_pct", "nw_position",
 	)
 	ctx.addSignals(
 		"donchian_breakout", "keltner_breakout",
-		"qqe_trend", "qqe_cross",
+		"qqe_trend", "qqe_cross", "qqe_mod_signal", "qqe_primary_zero_cross",
 		"ut_direction", "ut_signal",
 		"ssl_direction", "ssl_cross",
 		"range_filter_direction",
-		"wvf_state", "td_exhaustion",
+		"wvf_state", "wvf_zone", "td_exhaustion",
 		"nw_trend", "nw_position_state",
 	)
 	addChannelSemanticAnalysis(ctx)

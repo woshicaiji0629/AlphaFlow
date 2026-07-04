@@ -67,6 +67,136 @@ func addSupertrend(values map[string]string, signals map[string]string, highs []
 		setValue(values, preset.name, presetValue, true)
 		signals[preset.name+"_direction"] = presetDirection
 	}
+
+	addAdaptiveSupertrend(values, signals, highs, lows, closes, 10, 3, 100)
+	addAISupertrend(values, signals, highs, lows, closes, 10, 1, 5, 0.5, 10)
+
+	zone, zoneOK := supertrendZone(highs, lows, closes, points, period, 14, 1.5)
+	if !zoneOK {
+		signals["supertrend_zone_ready"] = "false"
+		return
+	}
+	setValue(values, "supertrend_zone_pivot_high", zone.pivotHigh, true)
+	setValue(values, "supertrend_zone_pivot_low", zone.pivotLow, true)
+	setValue(values, "supertrend_zone_mid", zone.mid, true)
+	setValue(values, "supertrend_zone_fib_236", zone.fib236, true)
+	setValue(values, "supertrend_zone_fib_382", zone.fib382, true)
+	setValue(values, "supertrend_zone_fib_5", zone.fib5, true)
+	setValue(values, "supertrend_zone_fib_618", zone.fib618, true)
+	setValue(values, "supertrend_zone_fib_786", zone.fib786, true)
+	setValue(values, "supertrend_zone_extension_1618", zone.extension, true)
+	setValue(values, "supertrend_zone_premium_band", zone.premiumBand, true)
+	setValue(values, "supertrend_zone_discount_band", zone.discountBand, true)
+	setValue(values, "supertrend_zone_position_pct", zone.positionPct, true)
+	signals["supertrend_zone_side"] = zone.side
+	signals["supertrend_zone_area"] = zone.area
+	signals["supertrend_zone_ready"] = "true"
+}
+
+type supertrendZoneState struct {
+	pivotHigh    float64
+	pivotLow     float64
+	mid          float64
+	fib236       float64
+	fib382       float64
+	fib5         float64
+	fib618       float64
+	fib786       float64
+	extension    float64
+	premiumBand  float64
+	discountBand float64
+	positionPct  float64
+	side         string
+	area         string
+}
+
+func supertrendZone(highs []float64, lows []float64, closes []float64, points []trendPoint, supertrendPeriod int, atrPeriod int, atrMultiplier float64) (supertrendZoneState, bool) {
+	if len(points) < 2 || len(highs) != len(closes) || len(lows) != len(closes) || supertrendPeriod <= 0 {
+		return supertrendZoneState{}, false
+	}
+	offset := len(closes) - len(points)
+	if offset < 0 || offset >= len(closes) {
+		return supertrendZoneState{}, false
+	}
+	var pivotHigh float64
+	var pivotLow float64
+	hasPivotHigh := false
+	hasPivotLow := false
+	segmentStart := offset
+	previousDirection := points[0].direction
+	for pointIndex := 1; pointIndex < len(points); pointIndex++ {
+		currentDirection := points[pointIndex].direction
+		if currentDirection == previousDirection {
+			continue
+		}
+		seriesIndex := pointIndex + offset
+		highest, lowest := highLow(highs[segmentStart:seriesIndex+1], lows[segmentStart:seriesIndex+1])
+		if previousDirection == "up" && currentDirection == "down" {
+			pivotHigh = highest
+			hasPivotHigh = true
+		}
+		if previousDirection == "down" && currentDirection == "up" {
+			pivotLow = lowest
+			hasPivotLow = true
+		}
+		segmentStart = seriesIndex
+		previousDirection = currentDirection
+	}
+	if !hasPivotHigh || !hasPivotLow || pivotHigh == pivotLow {
+		return supertrendZoneState{}, false
+	}
+	if pivotHigh < pivotLow {
+		pivotHigh, pivotLow = pivotLow, pivotHigh
+	}
+	atrValue, ok := atr(highs, lows, closes, atrPeriod)
+	if !ok {
+		return supertrendZoneState{}, false
+	}
+	lastPoint := points[len(points)-1]
+	lastClose := closes[len(closes)-1]
+	priceRange := pivotHigh - pivotLow
+	positionPct := (lastClose - pivotLow) / priceRange * 100
+	zone := supertrendZoneState{
+		pivotHigh:    pivotHigh,
+		pivotLow:     pivotLow,
+		mid:          pivotLow + priceRange*0.5,
+		fib236:       pivotLow + priceRange*0.236,
+		fib382:       pivotLow + priceRange*0.382,
+		fib5:         pivotLow + priceRange*0.5,
+		fib618:       pivotLow + priceRange*0.618,
+		fib786:       pivotLow + priceRange*0.786,
+		premiumBand:  lastPoint.value + atrValue*atrMultiplier,
+		discountBand: lastPoint.value - atrValue*atrMultiplier,
+		positionPct:  positionPct,
+		side:         supertrendZoneSide(lastPoint.direction),
+		area:         supertrendZoneArea(positionPct),
+	}
+	if lastPoint.direction == "down" {
+		zone.extension = pivotLow - priceRange*0.618
+	} else {
+		zone.extension = pivotLow + priceRange*1.618
+	}
+	return zone, true
+}
+
+func supertrendZoneSide(direction string) string {
+	if direction == "down" {
+		return "bear"
+	}
+	return "bull"
+}
+
+func supertrendZoneArea(positionPct float64) string {
+	switch {
+	case positionPct < 0 || positionPct > 100:
+		return "extension"
+	case positionPct < 38.2:
+		return "discount"
+	case positionPct <= 61.8:
+		return "mid"
+	default:
+		return "premium"
+	}
 }
 
 func addAlphaTrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) {
@@ -144,6 +274,515 @@ func supertrend(highs []float64, lows []float64, closes []float64, period int, m
 type trendPoint struct {
 	value     float64
 	direction string
+}
+
+type adaptiveSupertrendState struct {
+	points       []trendPoint
+	assignedATR  float64
+	highCentroid float64
+	midCentroid  float64
+	lowCentroid  float64
+	cluster      string
+}
+
+type volatilityCluster struct {
+	assignedATR  float64
+	highCentroid float64
+	midCentroid  float64
+	lowCentroid  float64
+	cluster      string
+}
+
+type aiSupertrendState struct {
+	points           []trendPoint
+	ama              float64
+	targetFactor     float64
+	performanceIndex float64
+	bestCentroid     float64
+	averageCentroid  float64
+	worstCentroid    float64
+	cluster          string
+}
+
+type aiSupertrendFactorResult struct {
+	factor float64
+	perf   float64
+}
+
+type aiPerformanceCluster struct {
+	name     string
+	centroid float64
+	factors  []float64
+	perfs    []float64
+}
+
+func addAdaptiveSupertrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int) {
+	state, ok := adaptiveSupertrend(highs, lows, closes, period, multiplier, trainingPeriod)
+	if !ok {
+		return
+	}
+	lastIndex := len(state.points) - 1
+	lastPoint := state.points[lastIndex]
+	lastClose := closes[len(closes)-1]
+	setValue(values, "adaptive_supertrend", lastPoint.value, true)
+	setValue(values, "adaptive_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValue(values, "adaptive_supertrend_assigned_atr", state.assignedATR, true)
+	setValue(values, "adaptive_supertrend_high_centroid", state.highCentroid, true)
+	setValue(values, "adaptive_supertrend_mid_centroid", state.midCentroid, true)
+	setValue(values, "adaptive_supertrend_low_centroid", state.lowCentroid, true)
+	signals["adaptive_supertrend_direction"] = lastPoint.direction
+	signals["adaptive_supertrend_flip"] = trendFlip(state.points[lastIndex-1].direction, lastPoint.direction)
+	signals["adaptive_supertrend_volatility_cluster"] = state.cluster
+}
+
+func addAISupertrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int) {
+	state, ok := aiSupertrend(highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha)
+	if !ok {
+		return
+	}
+	lastIndex := len(state.points) - 1
+	lastPoint := state.points[lastIndex]
+	lastClose := closes[len(closes)-1]
+	setValue(values, "ai_supertrend", lastPoint.value, true)
+	setValue(values, "ai_supertrend_ama", state.ama, true)
+	setValue(values, "ai_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValue(values, "ai_supertrend_target_factor", state.targetFactor, true)
+	setValue(values, "ai_supertrend_performance_index", state.performanceIndex, true)
+	setValue(values, "ai_supertrend_best_centroid", state.bestCentroid, true)
+	setValue(values, "ai_supertrend_average_centroid", state.averageCentroid, true)
+	setValue(values, "ai_supertrend_worst_centroid", state.worstCentroid, true)
+	signals["ai_supertrend_direction"] = lastPoint.direction
+	signals["ai_supertrend_flip"] = trendFlip(state.points[lastIndex-1].direction, lastPoint.direction)
+	signals["ai_supertrend_cluster"] = state.cluster
+	signals["ai_supertrend_factor_cluster"] = state.cluster
+}
+
+func aiSupertrend(highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int) (aiSupertrendState, bool) {
+	if period <= 0 || minFactor <= 0 || maxFactor < minFactor || step <= 0 || perfAlpha < 2 ||
+		len(closes) <= period+2 || len(highs) != len(closes) || len(lows) != len(closes) {
+		return aiSupertrendState{}, false
+	}
+	atrValues, ok := atrSeries(highs, lows, closes, period)
+	if !ok || len(atrValues) < 2 {
+		return aiSupertrendState{}, false
+	}
+	offset := len(closes) - len(atrValues)
+	results := []aiSupertrendFactorResult{}
+	for factor := minFactor; factor <= maxFactor+0.00000001; factor += step {
+		result, ok := aiSupertrendFactorPerformance(highs, lows, closes, atrValues, offset, factor, perfAlpha)
+		if ok {
+			results = append(results, result)
+		}
+	}
+	if len(results) < 3 {
+		return aiSupertrendState{}, false
+	}
+	clusters, ok := aiPerformanceClusters(results)
+	if !ok {
+		return aiSupertrendState{}, false
+	}
+	best := clusters[len(clusters)-1]
+	if len(best.factors) == 0 || len(best.perfs) == 0 {
+		return aiSupertrendState{}, false
+	}
+	targetFactor := averageFloat(best.factors)
+	points, ok := supertrendSeriesWithATRFactor(highs, lows, closes, atrValues, offset, targetFactor)
+	if !ok {
+		return aiSupertrendState{}, false
+	}
+	denominator, ok := aiPerformanceDenominator(closes, perfAlpha)
+	if !ok || denominator <= 0 {
+		return aiSupertrendState{}, false
+	}
+	performanceIndex := maxFloat(averageFloat(best.perfs), 0) / denominator
+	ama := aiSupertrendAMA(points, performanceIndex)
+	return aiSupertrendState{
+		points:           points,
+		ama:              ama,
+		targetFactor:     targetFactor,
+		performanceIndex: performanceIndex,
+		bestCentroid:     clusters[2].centroid,
+		averageCentroid:  clusters[1].centroid,
+		worstCentroid:    clusters[0].centroid,
+		cluster:          best.name,
+	}, true
+}
+
+func aiSupertrendFactorPerformance(highs []float64, lows []float64, closes []float64, atrValues []float64, offset int, factor float64, perfAlpha int) (aiSupertrendFactorResult, bool) {
+	if offset <= 0 || offset >= len(closes) || len(atrValues)+offset != len(closes) {
+		return aiSupertrendFactorResult{}, false
+	}
+	upper := (highs[offset] + lows[offset]) / 2
+	lower := upper
+	output := upper
+	trend := "down"
+	performance := 0.0
+	alpha := 2 / float64(perfAlpha+1)
+	for index := offset; index < len(closes); index++ {
+		atrValue := atrValues[index-offset]
+		if atrValue <= 0 {
+			return aiSupertrendFactorResult{}, false
+		}
+		mid := (highs[index] + lows[index]) / 2
+		up := mid + atrValue*factor
+		down := mid - atrValue*factor
+		previousUpper := upper
+		previousLower := lower
+		previousOutput := output
+		if closes[index] > previousUpper {
+			trend = "up"
+		} else if closes[index] < previousLower {
+			trend = "down"
+		}
+		if index > 0 && closes[index-1] < previousUpper {
+			upper = minFloat(up, previousUpper)
+		} else {
+			upper = up
+		}
+		if index > 0 && closes[index-1] > previousLower {
+			lower = maxFloat(down, previousLower)
+		} else {
+			lower = down
+		}
+		if index > offset {
+			priceDirection := signFloat(closes[index-1] - previousOutput)
+			performance += alpha * ((closes[index]-closes[index-1])*priceDirection - performance)
+		}
+		if trend == "up" {
+			output = lower
+		} else {
+			output = upper
+		}
+	}
+	return aiSupertrendFactorResult{factor: factor, perf: performance}, true
+}
+
+func aiPerformanceClusters(results []aiSupertrendFactorResult) ([]aiPerformanceCluster, bool) {
+	if len(results) < 3 {
+		return nil, false
+	}
+	perfs := make([]float64, 0, len(results))
+	for _, result := range results {
+		perfs = append(perfs, result.perf)
+	}
+	centroids := []float64{
+		percentileSortedCopy(perfs, 0.25),
+		percentileSortedCopy(perfs, 0.50),
+		percentileSortedCopy(perfs, 0.75),
+	}
+	assignments := make([]int, len(results))
+	for iteration := 0; iteration < 100; iteration++ {
+		sums := []float64{0, 0, 0}
+		counts := []int{0, 0, 0}
+		for index, result := range results {
+			cluster := nearestCentroidIndex(result.perf, centroids)
+			assignments[index] = cluster
+			sums[cluster] += result.perf
+			counts[cluster]++
+		}
+		changed := false
+		for index := range centroids {
+			if counts[index] == 0 {
+				continue
+			}
+			next := sums[index] / float64(counts[index])
+			if absFloat(next-centroids[index]) > 0.00000001 {
+				changed = true
+			}
+			centroids[index] = next
+		}
+		if !changed {
+			break
+		}
+	}
+	clusters := []aiPerformanceCluster{
+		{name: "cluster_0", centroid: centroids[0]},
+		{name: "cluster_1", centroid: centroids[1]},
+		{name: "cluster_2", centroid: centroids[2]},
+	}
+	for index, result := range results {
+		cluster := assignments[index]
+		clusters[cluster].factors = append(clusters[cluster].factors, result.factor)
+		clusters[cluster].perfs = append(clusters[cluster].perfs, result.perf)
+	}
+	sortPerformanceClusters(clusters)
+	clusters[0].name = "worst"
+	clusters[1].name = "average"
+	clusters[2].name = "best"
+	return clusters, true
+}
+
+func aiPerformanceDenominator(closes []float64, period int) (float64, bool) {
+	if len(closes) < period+1 {
+		return 0, false
+	}
+	changes := make([]float64, 0, len(closes)-1)
+	for index := 1; index < len(closes); index++ {
+		changes = append(changes, absFloat(closes[index]-closes[index-1]))
+	}
+	return ema(changes, period)
+}
+
+func aiSupertrendAMA(points []trendPoint, performanceIndex float64) float64 {
+	if len(points) == 0 {
+		return 0
+	}
+	ama := points[0].value
+	for _, point := range points[1:] {
+		ama += performanceIndex * (point.value - ama)
+	}
+	return ama
+}
+
+func averageFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, value := range values {
+		sum += value
+	}
+	return sum / float64(len(values))
+}
+
+func signFloat(value float64) float64 {
+	switch {
+	case value > 0:
+		return 1
+	case value < 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
+func nearestCentroidIndex(value float64, centroids []float64) int {
+	index := 0
+	distance := absFloat(value - centroids[0])
+	for nextIndex := 1; nextIndex < len(centroids); nextIndex++ {
+		nextDistance := absFloat(value - centroids[nextIndex])
+		if nextDistance < distance {
+			index = nextIndex
+			distance = nextDistance
+		}
+	}
+	return index
+}
+
+func percentileSortedCopy(values []float64, percentile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), values...)
+	for index := 1; index < len(sorted); index++ {
+		value := sorted[index]
+		position := index - 1
+		for position >= 0 && sorted[position] > value {
+			sorted[position+1] = sorted[position]
+			position--
+		}
+		sorted[position+1] = value
+	}
+	if percentile <= 0 {
+		return sorted[0]
+	}
+	if percentile >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	position := percentile * float64(len(sorted)-1)
+	lower := int(position)
+	upper := lower + 1
+	if upper >= len(sorted) {
+		return sorted[lower]
+	}
+	weight := position - float64(lower)
+	return sorted[lower] + (sorted[upper]-sorted[lower])*weight
+}
+
+func sortPerformanceClusters(clusters []aiPerformanceCluster) {
+	for index := 1; index < len(clusters); index++ {
+		value := clusters[index]
+		position := index - 1
+		for position >= 0 && clusters[position].centroid > value.centroid {
+			clusters[position+1] = clusters[position]
+			position--
+		}
+		clusters[position+1] = value
+	}
+}
+
+func supertrendSeriesWithATRFactor(highs []float64, lows []float64, closes []float64, atrValues []float64, offset int, factor float64) ([]trendPoint, bool) {
+	assignedATR := make([]float64, len(closes))
+	for atrIndex, value := range atrValues {
+		assignedATR[atrIndex+offset] = value * factor
+	}
+	return supertrendSeriesWithATR(highs, lows, closes, assignedATR, offset, 1)
+}
+
+func adaptiveSupertrend(highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int) (adaptiveSupertrendState, bool) {
+	if period <= 0 || trainingPeriod <= 1 || len(closes) <= period+trainingPeriod ||
+		len(highs) != len(closes) || len(lows) != len(closes) {
+		return adaptiveSupertrendState{}, false
+	}
+	atrValues, ok := atrSeries(highs, lows, closes, period)
+	if !ok || len(atrValues) < trainingPeriod {
+		return adaptiveSupertrendState{}, false
+	}
+	offset := len(closes) - len(atrValues)
+	assignedATR := make([]float64, len(closes))
+	var lastCluster volatilityCluster
+	hasCluster := false
+	for atrIndex := trainingPeriod - 1; atrIndex < len(atrValues); atrIndex++ {
+		cluster, ok := adaptiveVolatilityCluster(atrValues[atrIndex-trainingPeriod+1:atrIndex+1], atrValues[atrIndex])
+		if !ok {
+			continue
+		}
+		assignedATR[atrIndex+offset] = cluster.assignedATR
+		lastCluster = cluster
+		hasCluster = true
+	}
+	if !hasCluster {
+		return adaptiveSupertrendState{}, false
+	}
+	points, ok := supertrendSeriesWithATR(highs, lows, closes, assignedATR, offset+trainingPeriod-1, multiplier)
+	if !ok {
+		return adaptiveSupertrendState{}, false
+	}
+	return adaptiveSupertrendState{
+		points:       points,
+		assignedATR:  lastCluster.assignedATR,
+		highCentroid: lastCluster.highCentroid,
+		midCentroid:  lastCluster.midCentroid,
+		lowCentroid:  lastCluster.lowCentroid,
+		cluster:      lastCluster.cluster,
+	}, true
+}
+
+func adaptiveVolatilityCluster(values []float64, current float64) (volatilityCluster, bool) {
+	if len(values) == 0 {
+		return volatilityCluster{}, false
+	}
+	high := highestValue(values)
+	low := lowestValue(values)
+	highMean := low + (high-low)*0.75
+	midMean := low + (high-low)*0.5
+	lowMean := low + (high-low)*0.25
+	for iteration := 0; iteration < 20; iteration++ {
+		var highSum, midSum, lowSum float64
+		var highCount, midCount, lowCount int
+		for _, value := range values {
+			highDistance := absFloat(value - highMean)
+			midDistance := absFloat(value - midMean)
+			lowDistance := absFloat(value - lowMean)
+			switch {
+			case highDistance <= midDistance && highDistance <= lowDistance:
+				highSum += value
+				highCount++
+			case midDistance <= highDistance && midDistance <= lowDistance:
+				midSum += value
+				midCount++
+			default:
+				lowSum += value
+				lowCount++
+			}
+		}
+		nextHigh := highMean
+		nextMid := midMean
+		nextLow := lowMean
+		if highCount > 0 {
+			nextHigh = highSum / float64(highCount)
+		}
+		if midCount > 0 {
+			nextMid = midSum / float64(midCount)
+		}
+		if lowCount > 0 {
+			nextLow = lowSum / float64(lowCount)
+		}
+		if absFloat(nextHigh-highMean) < 0.00000001 &&
+			absFloat(nextMid-midMean) < 0.00000001 &&
+			absFloat(nextLow-lowMean) < 0.00000001 {
+			highMean, midMean, lowMean = nextHigh, nextMid, nextLow
+			break
+		}
+		highMean, midMean, lowMean = nextHigh, nextMid, nextLow
+	}
+	cluster := volatilityCluster{
+		highCentroid: highMean,
+		midCentroid:  midMean,
+		lowCentroid:  lowMean,
+	}
+	highDistance := absFloat(current - highMean)
+	midDistance := absFloat(current - midMean)
+	lowDistance := absFloat(current - lowMean)
+	switch {
+	case highDistance <= midDistance && highDistance <= lowDistance:
+		cluster.assignedATR = highMean
+		cluster.cluster = "high"
+	case midDistance <= highDistance && midDistance <= lowDistance:
+		cluster.assignedATR = midMean
+		cluster.cluster = "medium"
+	default:
+		cluster.assignedATR = lowMean
+		cluster.cluster = "low"
+	}
+	return cluster, true
+}
+
+func supertrendSeriesWithATR(highs []float64, lows []float64, closes []float64, atrValues []float64, start int, multiplier float64) ([]trendPoint, bool) {
+	if start <= 0 || start >= len(closes) || len(atrValues) != len(closes) {
+		return nil, false
+	}
+	finalUpper := make([]float64, len(closes))
+	finalLower := make([]float64, len(closes))
+	direction := make([]string, len(closes))
+	for index := start; index < len(closes); index++ {
+		if atrValues[index] <= 0 {
+			return nil, false
+		}
+		mid := (highs[index] + lows[index]) / 2
+		basicUpper := mid + multiplier*atrValues[index]
+		basicLower := mid - multiplier*atrValues[index]
+		if index == start {
+			finalUpper[index] = basicUpper
+			finalLower[index] = basicLower
+			if closes[index] >= mid {
+				direction[index] = "up"
+			} else {
+				direction[index] = "down"
+			}
+			continue
+		}
+		if basicUpper < finalUpper[index-1] || closes[index-1] > finalUpper[index-1] {
+			finalUpper[index] = basicUpper
+		} else {
+			finalUpper[index] = finalUpper[index-1]
+		}
+		if basicLower > finalLower[index-1] || closes[index-1] < finalLower[index-1] {
+			finalLower[index] = basicLower
+		} else {
+			finalLower[index] = finalLower[index-1]
+		}
+		switch {
+		case direction[index-1] == "down" && closes[index] > finalUpper[index]:
+			direction[index] = "up"
+		case direction[index-1] == "up" && closes[index] < finalLower[index]:
+			direction[index] = "down"
+		default:
+			direction[index] = direction[index-1]
+		}
+	}
+	points := make([]trendPoint, 0, len(closes)-start)
+	for index := start; index < len(closes); index++ {
+		if direction[index] == "down" {
+			points = append(points, trendPoint{value: finalUpper[index], direction: "down"})
+			continue
+		}
+		points = append(points, trendPoint{value: finalLower[index], direction: "up"})
+	}
+	if len(points) < 2 {
+		return nil, false
+	}
+	return points, true
 }
 
 func supertrendSeries(highs []float64, lows []float64, closes []float64, period int, multiplier float64) ([]trendPoint, bool) {

@@ -247,6 +247,8 @@
 | `signals.macd_cross` | signal | 标准 MACD 金叉/死叉。 |
 | `signals.macd_zone` | signal | MACD 多空区域。 |
 | `signals.macd_momentum` | signal | MACD 动能状态。 |
+| `signals.macd_hist_phase` | signal | MACD 柱体四状态：`above_rising`、`above_falling`、`below_falling`、`below_rising`。 |
+| `signals.macd_signal_side` | signal | MACD 线相对 signal 线位置：`above_signal`、`below_signal`。 |
 | `signals.macd_divergence` | signal | MACD 背离。 |
 | `values.macd_fast` | value | 快速 MACD 线，参数 7/19/9。 |
 | `values.macd_fast_signal` | value | 快速 MACD signal 线。 |
@@ -256,6 +258,8 @@
 | `signals.macd_fast_cross` | signal | 快速 MACD 金叉/死叉。 |
 | `signals.macd_fast_zone` | signal | 快速 MACD 多空区域。 |
 | `signals.macd_fast_momentum` | signal | 快速 MACD 动能状态。 |
+| `signals.macd_fast_hist_phase` | signal | 快速 MACD 柱体四状态。 |
+| `signals.macd_fast_signal_side` | signal | 快速 MACD 线相对 signal 线位置。 |
 | `signals.macd_fast_divergence` | signal | 快速 MACD 背离。 |
 
 策略建议：标准 MACD 更稳，快速 MACD 更适合 3 分钟入场动能确认。横盘时不要只看交叉，要结合柱体连续性和均线发散。
@@ -288,7 +292,7 @@
 
 ### WaveTrend
 
-LazyBear WaveTrend，默认参数 `10/21/4`。
+LazyBear WaveTrend，默认参数 `10/21/4`，口径为 `hlc3 -> EMA(10) -> CI -> EMA(21)`，信号线为 `SMA(wt1, 4)`。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -303,15 +307,25 @@ LazyBear WaveTrend，默认参数 `10/21/4`。
 
 ### QQE Mod
 
-QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、QQE factor `3`。
+QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、QQE factor `3`。增强字段采用 primary/secondary QQE 加 Bollinger 过滤口径，保留旧字段兼容窗口分析。
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `values.qqe_line` | value | 平滑后的 RSI 动能线。 |
 | `values.qqe_signal` | value | QQE trailing level。 |
 | `values.qqe_hist` | value | `qqe_line - qqe_signal`。 |
+| `values.qqe_primary_line` | value | Primary QQE 平滑 RSI。 |
+| `values.qqe_primary_trend` | value | Primary QQE trend line。 |
+| `values.qqe_secondary_line` | value | Secondary QQE 平滑 RSI。 |
+| `values.qqe_secondary_trend` | value | Secondary QQE trend line。 |
+| `values.qqe_bb_upper` | value | Primary QQE trend line histogram 的 Bollinger 上轨。 |
+| `values.qqe_bb_lower` | value | Primary QQE trend line histogram 的 Bollinger 下轨。 |
+| `values.qqe_primary_hist` | value | `qqe_primary_line - 50`。 |
+| `values.qqe_secondary_hist` | value | `qqe_secondary_line - 50`。 |
 | `signals.qqe_trend` | signal | QQE 趋势状态：`bull`、`bear`、`neutral`。 |
 | `signals.qqe_cross` | signal | QQE 线和信号线交叉：`golden`、`dead`、`none`。 |
+| `signals.qqe_mod_signal` | signal | 双 QQE 与 Bollinger 过滤后的信号：`up`、`down`、`none`。 |
+| `signals.qqe_primary_zero_cross` | signal | Primary QQE 平滑 RSI 穿越 50：`up`、`down`、`none`。 |
 
 策略建议：QQE 适合作为 Supertrend、Donchian 突破后的动能确认，不建议单独作为入场信号。
 
@@ -361,9 +375,13 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `values.wvf` | value | Williams Vix Fix，默认周期 `22`。 |
+| `values.wvf_mid_line` | value | WVF 布林中轨，默认长度 `20`。 |
 | `values.wvf_upper_band` | value | WVF 布林上轨，默认长度 `20`、倍数 `2`。 |
+| `values.wvf_lower_band` | value | WVF 布林下轨，默认长度 `20`、倍数 `2`。 |
 | `values.wvf_range_high` | value | WVF 回看高位阈值，默认回看 `50`、分位系数 `0.85`。 |
+| `values.wvf_range_low` | value | WVF 回看低位阈值，默认回看 `50`、低位系数 `1.01`。 |
 | `signals.wvf_state` | signal | WVF 状态：`panic`、`normal`。 |
+| `signals.wvf_zone` | signal | WVF 细分区域：`panic`、`low_volatility`、`normal`。 |
 | `values.td_buy_setup_count` | value | TD Sequential 买入 setup 计数。 |
 | `values.td_sell_setup_count` | value | TD Sequential 卖出 setup 计数。 |
 | `signals.td_exhaustion` | signal | TD setup 9 衰竭状态：`buy`、`sell`、`none`。 |
@@ -432,6 +450,57 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | `signals.supertrend_10_3_direction` | signal | 10/3 方向。 |
 | `signals.supertrend_10_3_3_direction` | signal | 10/3.3 方向。 |
 | `signals.supertrend_14_4_direction` | signal | 14/4 方向。 |
+| `values.adaptive_supertrend` | value | ATR K-Means 自适应 Supertrend 线，默认 ATR `10`、factor `3`、训练窗口 `100`。 |
+| `values.adaptive_supertrend_distance_pct` | value | 当前价格相对自适应 Supertrend 的距离。 |
+| `values.adaptive_supertrend_assigned_atr` | value | 当前波动簇分配给 Supertrend 的 ATR centroid。 |
+| `values.adaptive_supertrend_high_centroid` | value | 高波动 ATR centroid。 |
+| `values.adaptive_supertrend_mid_centroid` | value | 中波动 ATR centroid。 |
+| `values.adaptive_supertrend_low_centroid` | value | 低波动 ATR centroid。 |
+| `signals.adaptive_supertrend_direction` | signal | 自适应 Supertrend 方向。 |
+| `signals.adaptive_supertrend_flip` | signal | 自适应 Supertrend 方向翻转。 |
+| `signals.adaptive_supertrend_volatility_cluster` | signal | 当前 ATR 波动簇：`high`、`medium`、`low`。 |
+| `values.ai_supertrend` | value | SuperTrend AI 线，按 factor 表现聚类选择最佳参数。 |
+| `values.ai_supertrend_ama` | value | SuperTrend AI trailing stop 的表现指数自适应均线。 |
+| `values.ai_supertrend_distance_pct` | value | 当前价格相对 SuperTrend AI 的距离。 |
+| `values.ai_supertrend_target_factor` | value | 从 best performance cluster 选出的目标 factor。 |
+| `values.ai_supertrend_performance_index` | value | best cluster 表现指数，按价格变化 EMA 归一化。 |
+| `values.ai_supertrend_best_centroid` | value | best factor performance cluster centroid。 |
+| `values.ai_supertrend_average_centroid` | value | average factor performance cluster centroid。 |
+| `values.ai_supertrend_worst_centroid` | value | worst factor performance cluster centroid。 |
+| `signals.ai_supertrend_direction` | signal | SuperTrend AI 方向。 |
+| `signals.ai_supertrend_flip` | signal | SuperTrend AI 方向翻转。 |
+| `signals.ai_supertrend_cluster` | signal | 当前使用的 performance cluster，默认 `best`。 |
+| `signals.ai_supertrend_factor_cluster` | signal | 目标 factor 来源 cluster，默认 `best`。 |
+| `values.ai_source_ma` | value | AI Source Switching MA，默认 EMA(50)。 |
+| `values.ai_source_value` | value | O/H/L/C 动态源选择后平滑的 source。 |
+| `values.ai_source_drive` | value | KNN analog、agreement、tightness 综合驱动力。 |
+| `values.ai_source_score_open` | value | Open 源综合评分。 |
+| `values.ai_source_score_high` | value | High 源综合评分。 |
+| `values.ai_source_score_low` | value | Low 源综合评分。 |
+| `values.ai_source_score_close` | value | Close 源综合评分。 |
+| `values.ai_source_supertrend` | value | 基于 AI source 与自适应 ATR multiplier 的 Supertrend trail。 |
+| `values.ai_source_supertrend_distance_pct` | value | 当前价格相对 AI source Supertrend 的距离。 |
+| `values.ai_source_supertrend_adapt_mult` | value | AI source Supertrend 当前自适应 ATR multiplier。 |
+| `signals.ai_source_selected` | signal | 当前选中的 OHLC 源：`open`、`high`、`low`、`close`。 |
+| `signals.ai_source_changed` | signal | 当前 K 线是否切换了选中源。 |
+| `signals.ai_source_supertrend_direction` | signal | AI source Supertrend 方向：`bull`、`bear`。 |
+| `signals.ai_source_supertrend_flip` | signal | AI source Supertrend 翻转：`buy`、`sell`、`none`。 |
+| `signals.ai_source_ready` | signal | AI source memory bank 是否已达到可用样本。 |
+| `values.supertrend_zone_pivot_high` | value | 最近 Supertrend 翻转区间高点。 |
+| `values.supertrend_zone_pivot_low` | value | 最近 Supertrend 翻转区间低点。 |
+| `values.supertrend_zone_mid` | value | Supertrend zone 中位线。 |
+| `values.supertrend_zone_fib_236` | value | Supertrend zone Fibonacci 0.236。 |
+| `values.supertrend_zone_fib_382` | value | Supertrend zone Fibonacci 0.382。 |
+| `values.supertrend_zone_fib_5` | value | Supertrend zone Fibonacci 0.5。 |
+| `values.supertrend_zone_fib_618` | value | Supertrend zone Fibonacci 0.618。 |
+| `values.supertrend_zone_fib_786` | value | Supertrend zone Fibonacci 0.786。 |
+| `values.supertrend_zone_extension_1618` | value | Supertrend zone 顺势/逆势扩展位。 |
+| `values.supertrend_zone_premium_band` | value | Supertrend 线叠加 ATR band 的上侧参考。 |
+| `values.supertrend_zone_discount_band` | value | Supertrend 线叠加 ATR band 的下侧参考。 |
+| `values.supertrend_zone_position_pct` | value | 当前收盘价在 Supertrend zone 高低点区间内的位置百分比。 |
+| `signals.supertrend_zone_side` | signal | Supertrend zone 当前方向：`bull`、`bear`。 |
+| `signals.supertrend_zone_area` | signal | 当前价格区域：`discount`、`mid`、`premium`、`extension`。 |
+| `signals.supertrend_zone_ready` | signal | 是否已有足够 Supertrend 翻转点生成 zone。 |
 
 策略建议：当前 Supertrend 策略把它作为主触发。为了防止 3 分钟来回翻转，需要结合窗口稳定性、均线发散、MACD/WaveTrend 动能和成交量确认。
 
@@ -472,6 +541,11 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | `values.ad_line` | value | Accumulation/Distribution line。 |
 | `values.ad_line_slope5` | value | A/D line 近 5 根斜率。 |
 | `values.price_volume_trend` | value | PVT。 |
+| `values.vfi` | value | LazyBear Volume Flow Indicator，默认长度 `130`。 |
+| `values.vfi_signal` | value | VFI 的 EMA 信号线，默认长度 `5`。 |
+| `values.vfi_hist` | value | `vfi - vfi_signal`。 |
+| `values.vfi_volume_cutoff` | value | VFI 成交量截断阈值，默认 `SMA(volume, 130)[1] * 2.5`。 |
+| `values.vfi_price_cutoff` | value | VFI 价格变化过滤阈值，默认 `0.2 * stdev(log(hlc3/hlc3[1]), 30) * close`。 |
 | `values.volume_zscore20` | value | 成交量 20 周期 z-score。 |
 | `values.volume_ratio5` | value | 5 周期成交量比。 |
 | `values.volume_ratio10` | value | 10 周期成交量比。 |
@@ -479,6 +553,16 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | `values.volume_trend5` | value | 成交量近 5 根趋势。 |
 | `values.volume_divergence_score` | value | 价量背离分数。 |
 | `values.volume_pressure20` | value | 20 周期量压。 |
+| `values.supply_zone_top` | value | 近 120 根 Volume Range 供给区上边界。 |
+| `values.supply_zone_bottom` | value | 近 120 根 Volume Range 供给区下边界。 |
+| `values.supply_zone_avg` | value | 供给区均值线。 |
+| `values.supply_zone_wavg` | value | 供给区成交量加权均值线。 |
+| `values.demand_zone_top` | value | 近 120 根 Volume Range 需求区上边界。 |
+| `values.demand_zone_bottom` | value | 近 120 根 Volume Range 需求区下边界。 |
+| `values.demand_zone_avg` | value | 需求区均值线。 |
+| `values.demand_zone_wavg` | value | 需求区成交量加权均值线。 |
+| `values.supply_demand_equilibrium` | value | 供需可见区间中轴。 |
+| `values.supply_demand_weighted_equilibrium` | value | 供需加权中轴。 |
 | `signals.money_flow` | signal | 资金流方向。 |
 | `signals.volume_state` | signal | 成交量状态。 |
 | `signals.price_volume_confirmation` | signal | 价量确认。 |
@@ -488,6 +572,10 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | `signals.breakout_volume_strength` | signal | 突破量强度。 |
 | `signals.volume_divergence` | signal | 价量背离。 |
 | `signals.volume_phase` | signal | 成交量阶段。 |
+| `signals.vfi_state` | signal | VFI 资金流状态：`inflow`、`outflow`、`neutral`。 |
+| `signals.vfi_cross` | signal | VFI 与信号线交叉：`golden`、`dead`、`none`。 |
+| `signals.vfi_momentum` | signal | VFI 柱体动能：`rising`、`falling`、`flat`。 |
+| `signals.supply_demand_position` | signal | 最新收盘价相对供需区位置：`above_supply`、`in_supply`、`between_zones`、`in_demand`、`below_demand`。 |
 
 策略建议：成交量字段更适合过滤“无力假信号”，例如 Supertrend 翻转但成交量萎缩、价量背离时降低信号质量。
 
@@ -559,11 +647,31 @@ QQE Mod 第一版采用非重绘口径，默认参数为 RSI `6`、平滑 `5`、
 | `values.order_block_high` | value | Order block 高点。 |
 | `values.order_block_low` | value | Order block 低点。 |
 | `values.order_block_mid` | value | Order block 中点。 |
+| `values.momentum_supply_top` | value | 动量触发供给区上边界。 |
+| `values.momentum_supply_bottom` | value | 动量触发供给区下边界。 |
+| `values.momentum_supply_mid` | value | 动量触发供给区中线。 |
+| `values.momentum_supply_age` | value | 动量触发供给区距离当前 K 线数量。 |
+| `values.momentum_demand_top` | value | 动量触发需求区上边界。 |
+| `values.momentum_demand_bottom` | value | 动量触发需求区下边界。 |
+| `values.momentum_demand_mid` | value | 动量触发需求区中线。 |
+| `values.momentum_demand_age` | value | 动量触发需求区距离当前 K 线数量。 |
+| `values.liquidity_sweep_level` | value | 最近流动性扫单参考位。 |
+| `values.liquidity_sweep_top` | value | 最近流动性扫单区域上边界。 |
+| `values.liquidity_sweep_bottom` | value | 最近流动性扫单区域下边界。 |
+| `values.liquidity_sweep_age` | value | 最近流动性扫单距离当前 K 线数量。 |
 | `signals.market_structure` | signal | 市场结构：BOS、range 等。 |
 | `signals.smart_money` | signal | Smart money 事件，如流动性扫单。 |
 | `signals.choch` | signal | CHOCH 方向。 |
 | `signals.structure_event` | signal | 结构事件。 |
 | `signals.structure_bias` | signal | 结构方向偏置。 |
+| `signals.swing_high_strength` | signal | Swing 高点强弱：`strong`、`weak`、`unknown`。 |
+| `signals.swing_low_strength` | signal | Swing 低点强弱：`strong`、`weak`、`unknown`。 |
+| `signals.internal_swing_high_strength` | signal | Internal swing 高点强弱。 |
+| `signals.internal_swing_low_strength` | signal | Internal swing 低点强弱。 |
+| `signals.momentum_sd_position` | signal | 价格相对动量供需区位置：`above_supply`、`in_supply`、`between_zones`、`in_demand`、`below_demand`、`unknown`。 |
+| `signals.momentum_sd_retest` | signal | 动量供需区回测事件：`supply_retest`、`demand_retest`、`none`。 |
+| `signals.momentum_sd_break` | signal | 动量供需区失效事件：`supply_break`、`demand_break`、`none`。 |
+| `signals.liquidity_sweep_type` | signal | 流动性扫单类型：`wick_high`、`wick_low`、`retest_high`、`retest_low`、`none`。 |
 
 策略建议：结构类字段适合做突破有效性判断和止盈止损位置参考。
 

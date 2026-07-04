@@ -9,6 +9,7 @@ func addMoneyFlowWindowAnalysis(ctx *analysisContext) {
 		"vwap", "vwap_distance_pct", "rolling_vwap20", "rolling_vwap_distance_pct",
 		"mfi14", "cmf20", "ad_line", "ad_line_slope5",
 		"price_volume_trend",
+		"vfi", "vfi_signal", "vfi_hist", "vfi_volume_cutoff", "vfi_price_cutoff",
 		"dynamic_swing_vwap", "dynamic_swing_vwap_distance_pct",
 		"dynamic_swing_vwap_anchor_price", "dynamic_swing_vwap_anchor_age",
 		"volume_profile_poc", "volume_profile_vah", "volume_profile_val",
@@ -16,14 +17,19 @@ func addMoneyFlowWindowAnalysis(ctx *analysisContext) {
 		"volume_profile_value_area_pct",
 		"volume_profile_poc_distance_pct",
 		"volume_profile_vah_distance_pct", "volume_profile_val_distance_pct",
+		"supply_zone_top", "supply_zone_bottom", "supply_zone_avg", "supply_zone_wavg",
+		"demand_zone_top", "demand_zone_bottom", "demand_zone_avg", "demand_zone_wavg",
+		"supply_demand_equilibrium", "supply_demand_weighted_equilibrium",
 	)
 	ctx.addSignals(
 		"money_flow", "volume_state", "price_volume_confirmation", "cmf_state",
 		"price_volume_action", "breakout_volume_confirm", "breakout_volume_strength",
 		"volume_divergence", "volume_phase",
+		"vfi_state", "vfi_cross", "vfi_momentum",
 		"dynamic_swing_vwap_direction", "dynamic_swing_vwap_position",
 		"dynamic_swing_vwap_anchor_type", "dynamic_swing_vwap_swing_label",
 		"volume_profile_position", "volume_profile_poc_side", "volume_profile_value_area_state",
+		"supply_demand_position",
 	)
 	addMoneyFlowSemanticAnalysis(ctx)
 	addVolumeProfileSemanticAnalysis(ctx)

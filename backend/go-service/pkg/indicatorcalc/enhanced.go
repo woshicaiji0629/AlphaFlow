@@ -20,4 +20,5 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addTradingViewFeatures(values, signals, highs, lows, closes)
 	addSmartMoney(values, signals, opens, highs, lows, closes)
 	addLivermoreFeatures(values, signals, highs, lows, closes, opens)
+	addAISourceSwitchingFeatures(values, signals, opens, highs, lows, closes)
 }

@@ -12,6 +12,9 @@ func addStructureWindowAnalysis(ctx *analysisContext) {
 		"internal_swing_high", "internal_swing_low",
 		"internal_swing_high_distance_pct", "internal_swing_low_distance_pct",
 		"order_block_high", "order_block_low", "order_block_mid",
+		"momentum_supply_top", "momentum_supply_bottom", "momentum_supply_mid", "momentum_supply_age",
+		"momentum_demand_top", "momentum_demand_bottom", "momentum_demand_mid", "momentum_demand_age",
+		"liquidity_sweep_level", "liquidity_sweep_top", "liquidity_sweep_bottom", "liquidity_sweep_age",
 		"equal_high", "equal_low", "equal_high_distance_pct", "equal_low_distance_pct",
 		"fvg_top", "fvg_bottom", "fvg_mid", "fvg_distance_pct",
 		"premium_level", "discount_level", "equilibrium_level",
@@ -20,7 +23,10 @@ func addStructureWindowAnalysis(ctx *analysisContext) {
 		"sr_position", "fib_zone", "pivot_zone",
 		"ichimoku_trend", "ichimoku_cloud", "ichimoku_cross",
 		"choch", "market_structure", "smart_money", "structure_event", "structure_bias",
-		"internal_structure_event", "internal_structure_bias",
+		"swing_high_strength", "swing_low_strength",
+		"internal_swing_high_strength", "internal_swing_low_strength",
+		"momentum_sd_position", "momentum_sd_retest", "momentum_sd_break",
+		"liquidity_sweep_type", "internal_structure_event", "internal_structure_bias",
 		"equal_high_low", "fvg_direction", "fvg_position", "premium_discount_zone",
 	)
 	addStructureSemanticAnalysis(ctx)
@@ -87,7 +93,11 @@ func addSMCSemanticAnalysis(ctx *analysisContext) {
 	bosRecent := recentSignalContains(ctx, "structure_event", "bos") ||
 		recentSignalContains(ctx, "internal_structure_event", "bos")
 	liquiditySweep := recentSignalContains(ctx, "structure_event", "sweep") ||
-		recentSignalContains(ctx, "smart_money", "liquidity_sweep")
+		recentSignalContains(ctx, "smart_money", "liquidity_sweep") ||
+		recentSignalContains(ctx, "liquidity_sweep_type", "wick") ||
+		recentSignalContains(ctx, "liquidity_sweep_type", "retest")
+	momentumSDRetest := recentSignalContains(ctx, "momentum_sd_retest", "retest")
+	momentumSDBreak := recentSignalContains(ctx, "momentum_sd_break", "break")
 	eventAge := latestSMCEventAge(ctx)
 	chochAge := latestSignalContainsAge(ctx, "structure_event", "choch")
 	if internalAge := latestSignalContainsAge(ctx, "internal_structure_event", "choch"); internalAge >= 0 &&
@@ -103,6 +113,14 @@ func addSMCSemanticAnalysis(ctx *analysisContext) {
 	if smartMoneyAge := latestSignalContainsAge(ctx, "smart_money", "liquidity_sweep"); smartMoneyAge >= 0 &&
 		(sweepAge < 0 || smartMoneyAge < sweepAge) {
 		sweepAge = smartMoneyAge
+	}
+	for _, candidate := range []int{
+		latestSignalContainsAge(ctx, "liquidity_sweep_type", "wick"),
+		latestSignalContainsAge(ctx, "liquidity_sweep_type", "retest"),
+	} {
+		if candidate >= 0 && (sweepAge < 0 || candidate < sweepAge) {
+			sweepAge = candidate
+		}
 	}
 
 	orderBlockPosition := "unknown"
@@ -121,7 +139,7 @@ func addSMCSemanticAnalysis(ctx *analysisContext) {
 		zone = normalizeSignal(value)
 	}
 
-	reversalRisk := chochRecent || liquiditySweep
+	reversalRisk := chochRecent || liquiditySweep || momentumSDRetest || momentumSDBreak
 	if bias == "bull" && signalIs(zone, "premium") {
 		reversalRisk = true
 	}
@@ -173,6 +191,10 @@ func latestSMCEventAge(ctx *analysisContext) int {
 		latestSignalContainsAge(ctx, "internal_structure_event", "choch"),
 		latestSignalContainsAge(ctx, "internal_structure_event", "sweep"),
 		latestSignalContainsAge(ctx, "smart_money", "liquidity_sweep"),
+		latestSignalContainsAge(ctx, "liquidity_sweep_type", "wick"),
+		latestSignalContainsAge(ctx, "liquidity_sweep_type", "retest"),
+		latestSignalContainsAge(ctx, "momentum_sd_retest", "retest"),
+		latestSignalContainsAge(ctx, "momentum_sd_break", "break"),
 	} {
 		if candidate >= 0 && (age < 0 || candidate < age) {
 			age = candidate

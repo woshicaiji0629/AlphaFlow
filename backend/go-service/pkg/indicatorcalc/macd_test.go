@@ -39,6 +39,24 @@ func TestMACDSignals(t *testing.T) {
 	if got := macdMomentum(dead); got != "expanding_bear" {
 		t.Fatalf("macdMomentum = %q, want expanding_bear", got)
 	}
+	if got := macdHistPhase([]macdPoint{{hist: 1}, {hist: 2}}); got != "above_rising" {
+		t.Fatalf("macdHistPhase = %q, want above_rising", got)
+	}
+	if got := macdHistPhase([]macdPoint{{hist: 2}, {hist: 1}}); got != "above_falling" {
+		t.Fatalf("macdHistPhase = %q, want above_falling", got)
+	}
+	if got := macdHistPhase([]macdPoint{{hist: -1}, {hist: -2}}); got != "below_falling" {
+		t.Fatalf("macdHistPhase = %q, want below_falling", got)
+	}
+	if got := macdHistPhase([]macdPoint{{hist: -2}, {hist: -1}}); got != "below_rising" {
+		t.Fatalf("macdHistPhase = %q, want below_rising", got)
+	}
+	if got := macdSignalSide(macdPoint{value: 2, signal: 1}); got != "above_signal" {
+		t.Fatalf("macdSignalSide = %q, want above_signal", got)
+	}
+	if got := macdSignalSide(macdPoint{value: 1, signal: 2}); got != "below_signal" {
+		t.Fatalf("macdSignalSide = %q, want below_signal", got)
+	}
 }
 
 func TestAddMACDFeatures(t *testing.T) {
@@ -53,7 +71,8 @@ func TestAddMACDFeatures(t *testing.T) {
 	if values["macd_zero_distance"] == "" {
 		t.Fatalf("missing macd_zero_distance: %#v", values)
 	}
-	if signals["macd_cross"] == "" || signals["macd_zone"] == "" || signals["macd_momentum"] == "" || signals["macd_divergence"] == "" {
+	if signals["macd_cross"] == "" || signals["macd_zone"] == "" || signals["macd_momentum"] == "" ||
+		signals["macd_hist_phase"] == "" || signals["macd_signal_side"] == "" || signals["macd_divergence"] == "" {
 		t.Fatalf("missing macd signals: %#v", signals)
 	}
 }
@@ -70,7 +89,8 @@ func TestAddMACDFeaturesWithPrefix(t *testing.T) {
 	if values["macd_fast_zero_distance"] == "" {
 		t.Fatalf("missing macd_fast_zero_distance: %#v", values)
 	}
-	if signals["macd_fast_cross"] == "" || signals["macd_fast_zone"] == "" || signals["macd_fast_momentum"] == "" || signals["macd_fast_divergence"] == "" {
+	if signals["macd_fast_cross"] == "" || signals["macd_fast_zone"] == "" || signals["macd_fast_momentum"] == "" ||
+		signals["macd_fast_hist_phase"] == "" || signals["macd_fast_signal_side"] == "" || signals["macd_fast_divergence"] == "" {
 		t.Fatalf("missing fast macd signals: %#v", signals)
 	}
 }

@@ -2,6 +2,13 @@ package indicatorcalc
 
 import "math"
 
+const (
+	waveTrendOverboughtLevel = 60
+	waveTrendUpperLevel      = 53
+	waveTrendLowerLevel      = -53
+	waveTrendOversoldLevel   = -60
+)
+
 func addRSIFeatures(values map[string]string, signals map[string]string, closes []float64, period int) {
 	value, ok := rsi(closes, period)
 	setValue(values, "rsi14", value, ok)
@@ -125,13 +132,13 @@ func waveTrendWT1Series(highs []float64, lows []float64, closes []float64, chann
 
 func waveTrendZone(wt1 float64) string {
 	switch {
-	case wt1 >= 60:
+	case wt1 >= waveTrendOverboughtLevel:
 		return "overbought"
-	case wt1 <= -60:
+	case wt1 <= waveTrendOversoldLevel:
 		return "oversold"
-	case wt1 >= 53:
+	case wt1 >= waveTrendUpperLevel:
 		return "upper"
-	case wt1 <= -53:
+	case wt1 <= waveTrendLowerLevel:
 		return "lower"
 	case wt1 > 0:
 		return "bull"

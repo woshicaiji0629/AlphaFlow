@@ -29,6 +29,8 @@ func addMACDFeaturesWithPrefix(
 	signals[prefix+"_cross"] = macdCross(series)
 	signals[prefix+"_zone"] = macdZone(last)
 	signals[prefix+"_momentum"] = macdMomentum(series)
+	signals[prefix+"_hist_phase"] = macdHistPhase(series)
+	signals[prefix+"_signal_side"] = macdSignalSide(last)
 	signals[prefix+"_divergence"] = macdDivergence(closes, series)
 }
 
@@ -129,6 +131,32 @@ func macdMomentum(series []macdPoint) string {
 	default:
 		return "flat"
 	}
+}
+
+func macdHistPhase(series []macdPoint) string {
+	if len(series) < 2 {
+		return "unknown"
+	}
+	last := len(series) - 1
+	current := series[last].hist
+	previous := series[last-1].hist
+	switch {
+	case current > 0 && current > previous:
+		return "above_rising"
+	case current > 0:
+		return "above_falling"
+	case current <= 0 && current < previous:
+		return "below_falling"
+	default:
+		return "below_rising"
+	}
+}
+
+func macdSignalSide(point macdPoint) string {
+	if point.value >= point.signal {
+		return "above_signal"
+	}
+	return "below_signal"
 }
 
 func macdDivergence(closes []float64, series []macdPoint) string {

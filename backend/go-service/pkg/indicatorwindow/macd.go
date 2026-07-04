@@ -7,8 +7,8 @@ func addMACDWindowAnalysis(ctx *analysisContext) {
 		"macd_fast_hist_delta", "macd_fast_zero_distance",
 	)
 	ctx.addSignals(
-		"macd_cross", "macd_zone", "macd_momentum", "macd_divergence",
-		"macd_fast_cross", "macd_fast_zone", "macd_fast_momentum", "macd_fast_divergence",
+		"macd_cross", "macd_zone", "macd_momentum", "macd_hist_phase", "macd_signal_side", "macd_divergence",
+		"macd_fast_cross", "macd_fast_zone", "macd_fast_momentum", "macd_fast_hist_phase", "macd_fast_signal_side", "macd_fast_divergence",
 	)
 	addMACDSemanticAnalysis(ctx)
 }

@@ -4,6 +4,7 @@ import "math"
 
 func addTradingViewFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	addQQEModFeatures(values, signals, closes, 6, 5, 3)
+	addQQEModEnhancedFeatures(values, signals, closes)
 	addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
 	addSSLChannelFeatures(values, signals, highs, lows, closes, 10)
 	addRangeFilterFeatures(values, signals, closes, 100, 3)
@@ -22,6 +23,181 @@ func addQQEModFeatures(values map[string]string, signals map[string]string, clos
 	setValue(values, "qqe_hist", line-signal, true)
 	signals["qqe_trend"] = thresholdTrend(line, signal, 50)
 	signals["qqe_cross"] = crossSignal(previousLine, previousSignal, line, signal)
+}
+
+func addQQEModEnhancedFeatures(values map[string]string, signals map[string]string, closes []float64) {
+	result, ok := qqeModEnhanced(closes, 6, 5, 3, 1.61, 50, 0.35, 3)
+	if !ok {
+		return
+	}
+	setValue(values, "qqe_primary_line", result.primaryLine, true)
+	setValue(values, "qqe_primary_trend", result.primaryTrend, true)
+	setValue(values, "qqe_secondary_line", result.secondaryLine, true)
+	setValue(values, "qqe_secondary_trend", result.secondaryTrend, true)
+	setValue(values, "qqe_bb_upper", result.bbUpper, true)
+	setValue(values, "qqe_bb_lower", result.bbLower, true)
+	setValue(values, "qqe_primary_hist", result.primaryHist, true)
+	setValue(values, "qqe_secondary_hist", result.secondaryHist, true)
+	signals["qqe_mod_signal"] = result.signal
+	signals["qqe_primary_zero_cross"] = result.zeroCross
+}
+
+type qqeModEnhancedResult struct {
+	primaryLine    float64
+	primaryTrend   float64
+	secondaryLine  float64
+	secondaryTrend float64
+	bbUpper        float64
+	bbLower        float64
+	primaryHist    float64
+	secondaryHist  float64
+	signal         string
+	zeroCross      string
+}
+
+func qqeModEnhanced(
+	closes []float64,
+	rsiPeriod int,
+	smoothing int,
+	primaryFactor float64,
+	secondaryFactor float64,
+	bbPeriod int,
+	bbMultiplier float64,
+	secondaryThreshold float64,
+) (qqeModEnhancedResult, bool) {
+	primaryTrend, primaryLine, okPrimary := qqeModTrendSeries(closes, rsiPeriod, smoothing, primaryFactor)
+	secondaryTrend, secondaryLine, okSecondary := qqeModTrendSeries(closes, rsiPeriod, smoothing, secondaryFactor)
+	if !okPrimary || !okSecondary || len(primaryTrend) < bbPeriod || len(primaryLine) < 2 || len(secondaryLine) == 0 {
+		return qqeModEnhancedResult{}, false
+	}
+	primaryTrendHist := make([]float64, 0, len(primaryTrend))
+	for _, value := range primaryTrend {
+		primaryTrendHist = append(primaryTrendHist, value-50)
+	}
+	basis, ok := sma(primaryTrendHist, bbPeriod)
+	if !ok {
+		return qqeModEnhancedResult{}, false
+	}
+	deviation, ok := standardDeviation(primaryTrendHist, bbPeriod)
+	if !ok {
+		return qqeModEnhancedResult{}, false
+	}
+	lastPrimary := primaryLine[len(primaryLine)-1]
+	previousPrimary := primaryLine[len(primaryLine)-2]
+	lastSecondary := secondaryLine[len(secondaryLine)-1]
+	lastPrimaryHist := lastPrimary - 50
+	lastSecondaryHist := lastSecondary - 50
+	upper := basis + deviation*bbMultiplier
+	lower := basis - deviation*bbMultiplier
+	result := qqeModEnhancedResult{
+		primaryLine:    lastPrimary,
+		primaryTrend:   primaryTrend[len(primaryTrend)-1],
+		secondaryLine:  lastSecondary,
+		secondaryTrend: secondaryTrend[len(secondaryTrend)-1],
+		bbUpper:        upper,
+		bbLower:        lower,
+		primaryHist:    lastPrimaryHist,
+		secondaryHist:  lastSecondaryHist,
+		signal:         qqeModSignal(lastPrimaryHist, lastSecondaryHist, upper, lower, secondaryThreshold),
+		zeroCross:      qqeZeroCross(previousPrimary, lastPrimary),
+	}
+	return result, true
+}
+
+func qqeModTrendSeries(closes []float64, rsiPeriod int, smoothing int, factor float64) ([]float64, []float64, bool) {
+	rsiValues, ok := rsiSeries(closes, rsiPeriod)
+	if !ok || len(rsiValues) < smoothing*3 || factor <= 0 {
+		return nil, nil, false
+	}
+	smoothed, ok := emaSeries(rsiValues, smoothing)
+	if !ok || len(smoothed) < 3 {
+		return nil, nil, false
+	}
+	deltas := make([]float64, 0, len(smoothed)-1)
+	for index := 1; index < len(smoothed); index++ {
+		deltas = append(deltas, math.Abs(smoothed[index]-smoothed[index-1]))
+	}
+	wildersPeriod := rsiPeriod*2 - 1
+	smoothedDeltas, ok := emaSeries(deltas, wildersPeriod)
+	if !ok || len(smoothedDeltas) < 2 {
+		return nil, nil, false
+	}
+	offset := len(smoothed) - len(smoothedDeltas)
+	if offset <= 0 {
+		return nil, nil, false
+	}
+	longBand := smoothed[offset] - smoothedDeltas[0]*factor
+	shortBand := smoothed[offset] + smoothedDeltas[0]*factor
+	trendDirection := 1
+	trendValues := make([]float64, 0, len(smoothedDeltas))
+	lineValues := make([]float64, 0, len(smoothedDeltas))
+	for index := offset; index < len(smoothed); index++ {
+		rangeValue := smoothedDeltas[index-offset] * factor
+		line := smoothed[index]
+		previousLine := line
+		if index > 0 {
+			previousLine = smoothed[index-1]
+		}
+		newLongBand := line - rangeValue
+		newShortBand := line + rangeValue
+		previousLongBand := longBand
+		previousShortBand := shortBand
+		if previousLine > previousLongBand && line > previousLongBand {
+			longBand = math.Max(previousLongBand, newLongBand)
+		} else {
+			longBand = newLongBand
+		}
+		if previousLine < previousShortBand && line < previousShortBand {
+			shortBand = math.Min(previousShortBand, newShortBand)
+		} else {
+			shortBand = newShortBand
+		}
+		if crossesAbove(previousLine, line, previousShortBand) {
+			trendDirection = 1
+		} else if crossesBelow(previousLine, line, previousLongBand) {
+			trendDirection = -1
+		}
+		if trendDirection == 1 {
+			trendValues = append(trendValues, longBand)
+		} else {
+			trendValues = append(trendValues, shortBand)
+		}
+		lineValues = append(lineValues, line)
+	}
+	if len(trendValues) < 2 || len(lineValues) < 2 {
+		return nil, nil, false
+	}
+	return trendValues, lineValues, true
+}
+
+func qqeModSignal(primaryHist float64, secondaryHist float64, upper float64, lower float64, threshold float64) string {
+	switch {
+	case secondaryHist > threshold && primaryHist > upper:
+		return "up"
+	case secondaryHist < -threshold && primaryHist < lower:
+		return "down"
+	default:
+		return "none"
+	}
+}
+
+func qqeZeroCross(previous float64, current float64) string {
+	switch {
+	case previous <= 50 && current > 50:
+		return "up"
+	case previous >= 50 && current < 50:
+		return "down"
+	default:
+		return "none"
+	}
+}
+
+func crossesAbove(previousValue float64, currentValue float64, previousLevel float64) bool {
+	return previousValue <= previousLevel && currentValue > previousLevel
+}
+
+func crossesBelow(previousValue float64, currentValue float64, previousLevel float64) bool {
+	return previousValue >= previousLevel && currentValue < previousLevel
 }
 
 func qqeMod(closes []float64, rsiPeriod int, smoothing int, factor float64) (float64, float64, float64, float64, bool) {
@@ -233,11 +409,17 @@ func addWilliamsVixFixFeatures(values map[string]string, signals map[string]stri
 	mid, _ := sma(series, bbLength)
 	deviation, _ := standardDeviation(series, bbLength)
 	upperBand := mid + bbMultiplier*deviation
+	lowerBand := mid - bbMultiplier*deviation
 	rangeHigh := highestValue(series[len(series)-lookback:]) * percentileHigh
+	rangeLow := lowestValue(series[len(series)-lookback:]) * 1.01
 	setValue(values, "wvf", last, true)
+	setValue(values, "wvf_mid_line", mid, true)
 	setValue(values, "wvf_upper_band", upperBand, true)
+	setValue(values, "wvf_lower_band", lowerBand, true)
 	setValue(values, "wvf_range_high", rangeHigh, true)
+	setValue(values, "wvf_range_low", rangeLow, true)
 	signals["wvf_state"] = williamsVixFixState(last, upperBand, rangeHigh)
+	signals["wvf_zone"] = williamsVixFixZone(last, upperBand, lowerBand, rangeHigh, rangeLow)
 }
 
 func williamsVixFixSeries(lows []float64, closes []float64, period int) ([]float64, bool) {
@@ -259,6 +441,16 @@ func williamsVixFixSeries(lows []float64, closes []float64, period int) ([]float
 func williamsVixFixState(value float64, upperBand float64, rangeHigh float64) string {
 	if value >= upperBand || value >= rangeHigh {
 		return "panic"
+	}
+	return "normal"
+}
+
+func williamsVixFixZone(value float64, upperBand float64, lowerBand float64, rangeHigh float64, rangeLow float64) string {
+	if value >= upperBand || value >= rangeHigh {
+		return "panic"
+	}
+	if value <= lowerBand || value <= rangeLow {
+		return "low_volatility"
 	}
 	return "normal"
 }
@@ -413,6 +605,16 @@ func highestValue(values []float64) float64 {
 	result := values[0]
 	for _, value := range values[1:] {
 		if value > result {
+			result = value
+		}
+	}
+	return result
+}
+
+func lowestValue(values []float64) float64 {
+	result := values[0]
+	for _, value := range values[1:] {
+		if value < result {
 			result = value
 		}
 	}

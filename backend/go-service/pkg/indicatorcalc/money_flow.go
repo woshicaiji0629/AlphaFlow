@@ -51,7 +51,153 @@ func addMoneyFlowFeatures(values map[string]string, signals map[string]string, h
 	signals["breakout_volume_strength"] = breakoutVolumeStrength(volumeBreakoutRatio, okBreakout)
 	signals["volume_divergence"] = volumeDivergence(closes, volumes, 20)
 	signals["volume_phase"] = volumePhase(pressure, cmfValue, ok)
+	addVolumeFlowIndicatorFeatures(values, signals, highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
 	addVolumeProfileFeatures(values, signals, highs, lows, closes, volumes, 200, 100, 68)
+	addSupplyDemandRangeFeatures(values, signals, highs, lows, closes, volumes, 120, 50, 10)
+}
+
+type volumeFlowIndicatorResult struct {
+	value          float64
+	signal         float64
+	hist           float64
+	previousValue  float64
+	previousSignal float64
+	volumeCutoff   float64
+	priceCutoff    float64
+}
+
+func addVolumeFlowIndicatorFeatures(
+	values map[string]string,
+	signals map[string]string,
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+	length int,
+	coef float64,
+	volumeCoef float64,
+	signalLength int,
+) {
+	result, ok := volumeFlowIndicator(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+	if !ok {
+		return
+	}
+	setValue(values, "vfi", result.value, true)
+	setValue(values, "vfi_signal", result.signal, true)
+	setValue(values, "vfi_hist", result.hist, true)
+	setValue(values, "vfi_volume_cutoff", result.volumeCutoff, true)
+	setValue(values, "vfi_price_cutoff", result.priceCutoff, true)
+	signals["vfi_state"] = vfiState(result.value)
+	signals["vfi_cross"] = crossSignal(result.previousValue, result.previousSignal, result.value, result.signal)
+	signals["vfi_momentum"] = vfiMomentum(result.hist)
+}
+
+func volumeFlowIndicator(
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+	length int,
+	coef float64,
+	volumeCoef float64,
+	signalLength int,
+) (volumeFlowIndicatorResult, bool) {
+	if length <= 0 || coef <= 0 || volumeCoef <= 0 || signalLength <= 0 ||
+		len(closes) != len(highs) || len(closes) != len(lows) || len(closes) != len(volumes) ||
+		len(closes) < length*2+signalLength {
+		return volumeFlowIndicatorResult{}, false
+	}
+	typicals := make([]float64, len(closes))
+	inter := make([]float64, len(closes))
+	for index := range closes {
+		typicals[index] = (highs[index] + lows[index] + closes[index]) / 3
+		if index == 0 || typicals[index] <= 0 || typicals[index-1] <= 0 {
+			continue
+		}
+		inter[index] = math.Log(typicals[index]) - math.Log(typicals[index-1])
+	}
+	vcp := make([]float64, len(closes))
+	validVCP := make([]bool, len(closes))
+	priceCutoffs := make([]float64, len(closes))
+	volumeCutoffs := make([]float64, len(closes))
+	for index := 1; index < len(closes); index++ {
+		if index < length || index < 30 {
+			continue
+		}
+		volatility, ok := standardDeviation(inter[:index+1], 30)
+		if !ok {
+			continue
+		}
+		volumeAverage, ok := sma(volumes[index-length:index], length)
+		if !ok || volumeAverage == 0 {
+			continue
+		}
+		priceCutoff := coef * volatility * closes[index]
+		volumeCutoff := volumeAverage * volumeCoef
+		cappedVolume := volumes[index]
+		if cappedVolume > volumeCutoff {
+			cappedVolume = volumeCutoff
+		}
+		moneyFlow := typicals[index] - typicals[index-1]
+		switch {
+		case moneyFlow > priceCutoff:
+			vcp[index] = cappedVolume
+		case moneyFlow < -priceCutoff:
+			vcp[index] = -cappedVolume
+		default:
+			vcp[index] = 0
+		}
+		validVCP[index] = true
+		priceCutoffs[index] = priceCutoff
+		volumeCutoffs[index] = volumeCutoff
+	}
+	vfiValues := []float64{}
+	priceCutoffValues := []float64{}
+	volumeCutoffValues := []float64{}
+	for index := 0; index < len(closes); index++ {
+		start := index - length + 1
+		if start < 0 {
+			continue
+		}
+		valid := true
+		for vcpIndex := start; vcpIndex <= index; vcpIndex++ {
+			if !validVCP[vcpIndex] {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		volumeAverage, ok := sma(volumes[index-length:index], length)
+		if !ok || volumeAverage == 0 {
+			continue
+		}
+		vfiValues = append(vfiValues, sum(vcp[start:index+1])/volumeAverage)
+		priceCutoffValues = append(priceCutoffValues, priceCutoffs[index])
+		volumeCutoffValues = append(volumeCutoffValues, volumeCutoffs[index])
+	}
+	if len(vfiValues) < signalLength+1 {
+		return volumeFlowIndicatorResult{}, false
+	}
+	signalValues, ok := emaSeries(vfiValues, signalLength)
+	if !ok || len(signalValues) < 2 {
+		return volumeFlowIndicatorResult{}, false
+	}
+	offset := len(vfiValues) - len(signalValues)
+	last := len(vfiValues) - 1
+	prev := last - 1
+	lastSignal := signalValues[len(signalValues)-1]
+	prevSignal := signalValues[prev-offset]
+	return volumeFlowIndicatorResult{
+		value:          vfiValues[last],
+		signal:         lastSignal,
+		hist:           vfiValues[last] - lastSignal,
+		previousValue:  vfiValues[prev],
+		previousSignal: prevSignal,
+		volumeCutoff:   volumeCutoffValues[len(volumeCutoffValues)-1],
+		priceCutoff:    priceCutoffValues[len(priceCutoffValues)-1],
+	}, true
 }
 
 func moneyFlowIndex(highs []float64, lows []float64, closes []float64, volumes []float64, period int) float64 {
@@ -237,12 +383,54 @@ func addVolumeProfileFeatures(
 	signals["volume_profile_value_area_state"] = volumeProfileValueAreaState(last, profile.vah, profile.val)
 }
 
+func addSupplyDemandRangeFeatures(
+	values map[string]string,
+	signals map[string]string,
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+	lookback int,
+	bins int,
+	thresholdPct float64,
+) {
+	zone, ok := supplyDemandRange(highs, lows, closes, volumes, lookback, bins, thresholdPct)
+	if !ok {
+		return
+	}
+	last := closes[len(closes)-1]
+	setValue(values, "supply_zone_top", zone.supplyTop, true)
+	setValue(values, "supply_zone_bottom", zone.supplyBottom, true)
+	setValue(values, "supply_zone_avg", zone.supplyAvg, true)
+	setValue(values, "supply_zone_wavg", zone.supplyWAvg, true)
+	setValue(values, "demand_zone_top", zone.demandTop, true)
+	setValue(values, "demand_zone_bottom", zone.demandBottom, true)
+	setValue(values, "demand_zone_avg", zone.demandAvg, true)
+	setValue(values, "demand_zone_wavg", zone.demandWAvg, true)
+	setValue(values, "supply_demand_equilibrium", zone.equilibrium, true)
+	setValue(values, "supply_demand_weighted_equilibrium", zone.weightedEquilibrium, true)
+	signals["supply_demand_position"] = supplyDemandPosition(last, zone)
+}
+
 type volumeProfileResult struct {
 	poc       float64
 	vah       float64
 	val       float64
 	rangeHigh float64
 	rangeLow  float64
+}
+
+type supplyDemandRangeResult struct {
+	supplyTop           float64
+	supplyBottom        float64
+	supplyAvg           float64
+	supplyWAvg          float64
+	demandTop           float64
+	demandBottom        float64
+	demandAvg           float64
+	demandWAvg          float64
+	equilibrium         float64
+	weightedEquilibrium float64
 }
 
 func volumeProfile(
@@ -310,6 +498,120 @@ func volumeProfile(
 		rangeHigh: rangeHigh,
 		rangeLow:  rangeLow,
 	}, true
+}
+
+func supplyDemandRange(
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+	lookback int,
+	bins int,
+	thresholdPct float64,
+) (supplyDemandRangeResult, bool) {
+	if lookback <= 0 || bins < 2 || thresholdPct <= 0 || len(closes) < lookback ||
+		len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
+		return supplyDemandRangeResult{}, false
+	}
+	start := len(closes) - lookback
+	rangeHigh := highs[start]
+	rangeLow := lows[start]
+	for index := start + 1; index < len(closes); index++ {
+		rangeHigh = math.Max(rangeHigh, highs[index])
+		rangeLow = math.Min(rangeLow, lows[index])
+	}
+	if rangeHigh <= rangeLow {
+		return supplyDemandRangeResult{}, false
+	}
+	bucketSize := (rangeHigh - rangeLow) / float64(bins)
+	if bucketSize <= 0 {
+		return supplyDemandRangeResult{}, false
+	}
+	bucketVolumes := make([]float64, bins)
+	for index := start; index < len(closes); index++ {
+		lowBucket := supplyDemandBucketIndex(lows[index], rangeLow, bucketSize, bins)
+		highBucket := supplyDemandBucketIndex(highs[index], rangeLow, bucketSize, bins)
+		if highBucket < lowBucket {
+			continue
+		}
+		coveredBuckets := highBucket - lowBucket + 1
+		volumePerBucket := volumes[index] / float64(coveredBuckets)
+		for bucket := lowBucket; bucket <= highBucket; bucket++ {
+			bucketVolumes[bucket] += volumePerBucket
+		}
+	}
+	totalVolume := sum(bucketVolumes)
+	if totalVolume == 0 {
+		return supplyDemandRangeResult{}, false
+	}
+	targetVolume := totalVolume * thresholdPct / 100
+	supplyIndex, supplyWAvg, okSupply := supplyDemandBoundary(bucketVolumes, rangeLow, bucketSize, targetVolume, true)
+	demandIndex, demandWAvg, okDemand := supplyDemandBoundary(bucketVolumes, rangeLow, bucketSize, targetVolume, false)
+	if !okSupply || !okDemand {
+		return supplyDemandRangeResult{}, false
+	}
+	result := supplyDemandRangeResult{
+		supplyTop:    rangeHigh,
+		supplyBottom: rangeLow + bucketSize*float64(supplyIndex),
+		demandTop:    rangeLow + bucketSize*float64(demandIndex+1),
+		demandBottom: rangeLow,
+		supplyWAvg:   supplyWAvg,
+		demandWAvg:   demandWAvg,
+	}
+	result.supplyAvg = (result.supplyTop + result.supplyBottom) / 2
+	result.demandAvg = (result.demandTop + result.demandBottom) / 2
+	result.equilibrium = (rangeHigh + rangeLow) / 2
+	result.weightedEquilibrium = (result.supplyWAvg + result.demandWAvg) / 2
+	return result, true
+}
+
+func supplyDemandBoundary(bucketVolumes []float64, rangeLow float64, bucketSize float64, targetVolume float64, fromHigh bool) (int, float64, bool) {
+	if len(bucketVolumes) == 0 || targetVolume <= 0 {
+		return 0, 0, false
+	}
+	var volumeSum float64
+	var weightedSum float64
+	if fromHigh {
+		for index := len(bucketVolumes) - 1; index >= 0; index-- {
+			center := rangeLow + bucketSize*(float64(index)+0.5)
+			volume := bucketVolumes[index]
+			volumeSum += volume
+			weightedSum += center * volume
+			if volumeSum >= targetVolume {
+				return index, weightedSum / volumeSum, true
+			}
+		}
+		return 0, weightedSum / volumeSum, volumeSum > 0
+	}
+	for index, volume := range bucketVolumes {
+		center := rangeLow + bucketSize*(float64(index)+0.5)
+		volumeSum += volume
+		weightedSum += center * volume
+		if volumeSum >= targetVolume {
+			return index, weightedSum / volumeSum, true
+		}
+	}
+	return len(bucketVolumes) - 1, weightedSum / volumeSum, volumeSum > 0
+}
+
+func supplyDemandBucketIndex(price float64, rangeLow float64, bucketSize float64, bins int) int {
+	index := int(math.Floor((price - rangeLow) / bucketSize))
+	return clampInt(index, 0, bins-1)
+}
+
+func supplyDemandPosition(price float64, zone supplyDemandRangeResult) string {
+	switch {
+	case price > zone.supplyTop:
+		return "above_supply"
+	case price >= zone.supplyBottom:
+		return "in_supply"
+	case price <= zone.demandBottom:
+		return "below_demand"
+	case price <= zone.demandTop:
+		return "in_demand"
+	default:
+		return "between_zones"
+	}
 }
 
 func volumeProfileBucketIndex(price float64, rangeLow float64, bucketSize float64, bins int) int {
@@ -424,6 +726,28 @@ func moneyFlowSignal(mfi float64, pressure float64) string {
 		return "outflow"
 	default:
 		return "neutral"
+	}
+}
+
+func vfiState(value float64) string {
+	switch {
+	case value > 0:
+		return "inflow"
+	case value < 0:
+		return "outflow"
+	default:
+		return "neutral"
+	}
+}
+
+func vfiMomentum(hist float64) string {
+	switch {
+	case hist > 0:
+		return "rising"
+	case hist < 0:
+		return "falling"
+	default:
+		return "flat"
 	}
 }
 

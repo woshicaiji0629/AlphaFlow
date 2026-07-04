@@ -60,6 +60,32 @@ func TestRollingVWAP(t *testing.T) {
 	}
 }
 
+func TestVolumeFlowIndicatorOutputsSignals(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(320, 100, 0.3, 100)
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+
+	for _, key := range []string{
+		"vfi",
+		"vfi_signal",
+		"vfi_hist",
+		"vfi_volume_cutoff",
+		"vfi_price_cutoff",
+	} {
+		if values[key] == "" {
+			t.Fatalf("missing %s in %#v", key, values)
+		}
+	}
+	if signals["vfi_state"] != "inflow" {
+		t.Fatalf("vfi_state = %q, want inflow", signals["vfi_state"])
+	}
+	if signals["vfi_cross"] == "" || signals["vfi_momentum"] == "" {
+		t.Fatalf("missing vfi signals: %#v", signals)
+	}
+}
+
 func TestVolumeStateDetectsSpikeAndDry(t *testing.T) {
 	if got := volumeState(2.1, true); got != "spike" {
 		t.Fatalf("volumeState spike = %q", got)
@@ -155,6 +181,58 @@ func TestVolumeProfileFeatures(t *testing.T) {
 	} {
 		if signals[key] == "" {
 			t.Fatalf("missing %s in %#v", key, signals)
+		}
+	}
+}
+
+func TestSupplyDemandRangeFeatures(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(160, 100, 0.2, 100)
+	values := map[string]string{}
+	signals := map[string]string{}
+
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+
+	for _, key := range []string{
+		"supply_zone_top",
+		"supply_zone_bottom",
+		"supply_zone_avg",
+		"supply_zone_wavg",
+		"demand_zone_top",
+		"demand_zone_bottom",
+		"demand_zone_avg",
+		"demand_zone_wavg",
+		"supply_demand_equilibrium",
+		"supply_demand_weighted_equilibrium",
+	} {
+		if values[key] == "" {
+			t.Fatalf("missing %s in %#v", key, values)
+		}
+	}
+	if signals["supply_demand_position"] == "" {
+		t.Fatalf("missing supply_demand_position: %#v", signals)
+	}
+}
+
+func TestSupplyDemandPosition(t *testing.T) {
+	zone := supplyDemandRangeResult{
+		supplyTop:    110,
+		supplyBottom: 105,
+		demandTop:    95,
+		demandBottom: 90,
+	}
+	cases := []struct {
+		price float64
+		want  string
+	}{
+		{price: 111, want: "above_supply"},
+		{price: 108, want: "in_supply"},
+		{price: 100, want: "between_zones"},
+		{price: 92, want: "in_demand"},
+		{price: 89, want: "below_demand"},
+	}
+	for _, tc := range cases {
+		if got := supplyDemandPosition(tc.price, zone); got != tc.want {
+			t.Fatalf("supplyDemandPosition(%v) = %q, want %q", tc.price, got, tc.want)
 		}
 	}
 }
