@@ -34,7 +34,7 @@ type positionScanner interface {
 	ScanPositions(ctx context.Context) (int, error)
 }
 
-var buildDecisionReader = buildRedisDecisionReader
+var buildDecisionReader = buildNATSDecisionReader
 var buildDecisionProcessor = buildPaperDecisionProcessor
 var buildIdempotencyStore = buildRedisIdempotencyStore
 
@@ -384,32 +384,29 @@ func resultIdempotencyKey(message strategybus.DecisionMessage, result strategy.R
 	return "result:" + strategybus.NewResultSignalID(message.Envelope.Target, result)
 }
 
-func shouldDeadLetter(message strategybus.DecisionMessage, maxDeliveries int64) bool {
+func shouldDeadLetter(message strategybus.DecisionMessage, maxDeliveries int) bool {
 	if maxDeliveries <= 0 {
 		return false
 	}
-	return message.DeliveryCount >= maxDeliveries
+	return message.DeliveryCount >= int64(maxDeliveries)
 }
 
-func buildRedisDecisionReader(ctx context.Context, cfg config.Config) (decisionReader, func(), error) {
-	redisClient, err := redisclient.New(ctx, config.RedisClientConfig(cfg))
+func buildNATSDecisionReader(ctx context.Context, cfg config.Config) (decisionReader, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	options, err := config.NATSBusOptions(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect redis: %w", err)
+		return nil, nil, err
+	}
+	bus, err := strategybus.NewNATSBus(options)
+	if err != nil {
+		return nil, nil, err
 	}
 	closeReader := func() {
-		if err := redisclient.Close(redisClient); err != nil {
-			slog.Error("close redis failed", "error", err)
+		if err := bus.Close(); err != nil {
+			slog.Error("close nats bus failed", "error", err)
 		}
-	}
-	options, err := config.RedisBusOptions(cfg)
-	if err != nil {
-		closeReader()
-		return nil, nil, err
-	}
-	bus, err := strategybus.NewRedisBus(redisClient, options)
-	if err != nil {
-		closeReader()
-		return nil, nil, err
 	}
 	return bus, closeReader, nil
 }

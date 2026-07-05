@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Runtime    RuntimeConfig    `toml:"runtime"`
 	Redis      RedisConfig      `toml:"redis"`
+	NATS       NATSConfig       `toml:"nats"`
 	Output     OutputConfig     `toml:"output"`
 	Position   PositionConfig   `toml:"position"`
 	Strategies StrategiesConfig `toml:"strategies"`
@@ -37,9 +38,14 @@ type RedisConfig struct {
 	MinIdleConns int    `toml:"min_idle_conns"`
 }
 
+type NATSConfig struct {
+	URL string `toml:"url"`
+}
+
 type OutputConfig struct {
 	Mode       string `toml:"mode"`
 	Stream     string `toml:"stream"`
+	Subject    string `toml:"subject"`
 	DefaultTTL string `toml:"default_ttl"`
 }
 
@@ -119,9 +125,13 @@ func defaultConfig() Config {
 			PoolSize:     20,
 			MinIdleConns: 5,
 		},
+		NATS: NATSConfig{
+			URL: "nats://localhost:4222",
+		},
 		Output: OutputConfig{
 			Mode:       "bus",
-			Stream:     "st:decision:stream",
+			Stream:     "ALPHAFLOW_STRATEGY",
+			Subject:    "strategy.decision",
 			DefaultTTL: "30s",
 		},
 		Position: PositionConfig{
@@ -242,6 +252,7 @@ func resolvePath(configPath string) string {
 func normalize(cfg *Config) {
 	cfg.Redis.Addr = envOrValue("ALPHAFLOW_REDIS_ADDR", cfg.Redis.Addr)
 	cfg.Redis.Password = envOrValue("ALPHAFLOW_REDIS_PASSWORD", cfg.Redis.Password)
+	cfg.NATS.URL = envOrValue("ALPHAFLOW_NATS_URL", cfg.NATS.URL)
 	cfg.ClickHouse.Addr = envOrValue("ALPHAFLOW_CLICKHOUSE_ADDR", cfg.ClickHouse.Addr)
 	cfg.ClickHouse.Database = envOrValue("ALPHAFLOW_CLICKHOUSE_DATABASE", cfg.ClickHouse.Database)
 	cfg.ClickHouse.Username = envOrValue("ALPHAFLOW_CLICKHOUSE_USERNAME", cfg.ClickHouse.Username)
@@ -262,6 +273,7 @@ func normalize(cfg *Config) {
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
 	cfg.Output.Mode = strings.ToLower(strings.TrimSpace(cfg.Output.Mode))
 	cfg.Output.Stream = strings.TrimSpace(cfg.Output.Stream)
+	cfg.Output.Subject = strings.TrimSpace(cfg.Output.Subject)
 }
 
 func validate(cfg Config) error {
@@ -306,6 +318,9 @@ func validateOutput(cfg Config) error {
 	}
 	if cfg.Output.Mode == "bus" && strings.TrimSpace(cfg.Output.Stream) == "" {
 		return fmt.Errorf("output.stream cannot be empty when output.mode is bus")
+	}
+	if cfg.Output.Mode == "bus" && strings.TrimSpace(cfg.Output.Subject) == "" {
+		return fmt.Errorf("output.subject cannot be empty when output.mode is bus")
 	}
 	if _, err := OutputDefaultTTL(cfg); err != nil {
 		return err

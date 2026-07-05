@@ -14,6 +14,9 @@ symbols = ["ETHUSDT"]
 enabled = false
 symbols = ["ETHUSDT"]
 
+[nats]
+url = "nats://localhost:4222"
+
 [clickhouse]
 enabled = true
 addr = "localhost:9000"
@@ -25,6 +28,16 @@ read_timeout = "30s"
 retry_interval = "10s"
 retry_batch = 100
 max_pending = 100000
+pending_ack_wait = "30s"
+pending_max_deliveries = 5
+
+[backfill_queue]
+ack_wait = "30m"
+max_deliveries = 3
+max_pending = 10000
+worker_enabled = true
+worker_batch = 1
+worker_max_wait = "1s"
 
 [logging]
 service = "market-data"

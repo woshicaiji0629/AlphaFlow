@@ -37,18 +37,18 @@ enabled = true
 	if routes[0].Sink != strategyroute.SinkPaper {
 		t.Fatalf("sink = %q, want paper", routes[0].Sink)
 	}
-	options, err := RedisBusOptions(cfg)
+	options, err := NATSBusOptions(cfg)
 	if err != nil {
-		t.Fatalf("RedisBusOptions() error = %v", err)
+		t.Fatalf("NATSBusOptions() error = %v", err)
 	}
-	if options.Stream == "" || options.Group == "" || options.Consumer == "" {
-		t.Fatalf("redis bus options incomplete: %#v", options)
+	if options.Stream == "" || options.Subject == "" || options.Durable == "" || options.Consumer == "" {
+		t.Fatalf("nats bus options incomplete: %#v", options)
 	}
-	if options.PendingIdle <= 0 {
-		t.Fatalf("pending idle = %s, want positive", options.PendingIdle)
+	if options.AckWait <= 0 {
+		t.Fatalf("ack wait = %s, want positive", options.AckWait)
 	}
-	if options.DeadLetterStream == "" {
-		t.Fatal("dead letter stream is empty")
+	if options.DeadLetterSubject == "" {
+		t.Fatal("dead letter subject is empty")
 	}
 	if options.MaxDeliveries <= 0 {
 		t.Fatalf("max deliveries = %d, want positive", options.MaxDeliveries)

@@ -32,6 +32,7 @@ type backfillOptions struct {
 	retryDelay       time.Duration
 	maxMissingReport int
 	warmupBars       int64
+	async            bool
 }
 
 type fetchJob struct {
@@ -106,6 +107,9 @@ missing K lines after backfill.
 			opts.intervals = parseList(rawIntervals)
 			opts.timezone = strings.TrimSpace(opts.timezone)
 			opts.mode = strings.ToLower(strings.TrimSpace(opts.mode))
+			if opts.async {
+				return enqueueBackfill(ctx, root.configPath, opts)
+			}
 			return runBackfill(ctx, root.configPath, opts)
 		},
 	}
@@ -124,8 +128,38 @@ missing K lines after backfill.
 	cmd.Flags().DurationVar(&opts.retryDelay, "retry-delay", time.Second, "base retry delay")
 	cmd.Flags().IntVar(&opts.maxMissingReport, "max-missing-report", 200, "maximum missing klines to log per interval")
 	cmd.Flags().Int64Var(&opts.warmupBars, "warmup-bars", 0, "extra kline bars to fetch before start for indicator warm-up")
+	cmd.Flags().BoolVar(&opts.async, "async", false, "submit backfill task to NATS JetStream and return without running it")
 	addTaskConfigFlag(cmd, &taskConfigPath)
 	return cmd
+}
+
+func enqueueBackfill(ctx context.Context, configPath string, opts backfillOptions) error {
+	if err := validateBackfillOptions(opts); err != nil {
+		return err
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	queue, err := newNATSBackfillTaskQueue(cfg)
+	if err != nil {
+		return err
+	}
+	defer queue.Close()
+	messageID, err := queue.Publish(ctx, newBackfillTask(opts))
+	if err != nil {
+		return err
+	}
+	slog.Info(
+		"submitted backfill task",
+		"message_id", messageID,
+		"exchange", opts.exchange,
+		"symbol", opts.symbol,
+		"intervals", opts.intervals,
+		"start", opts.start,
+		"end", opts.end,
+	)
+	return nil
 }
 
 func runBackfill(ctx context.Context, configPath string, opts backfillOptions) error {

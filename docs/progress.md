@@ -25,6 +25,8 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - Redis 保存实时行情、已收盘窗口特征和当前 K 线实时特征。
 - ClickHouse 保存已闭合 K 线历史。
 - 指标计算和窗口分析已下沉到公共包，供实时服务、回测和未来重算复用。
+- 指标 runner 已完成第一轮性能优化：闭合指标 Redis 写入合并为单次 pipeline，连续 K 线窗口 snapshot 增量缓存，worker 数按 CPU 自适应并设置上限。
+- 最近一次本地指标压测中，`symbols=10`、`tasks=280`、`lookback=100`、模拟 Redis 写延迟 `1ms` 时，单轮从约 `41s` 降到约 `4.9s`；`symbols=100`、`tasks=2800` 冷启动仍约 `113s`。
 
 ### 策略框架
 
@@ -53,7 +55,7 @@ ClickHouse 历史 K 线 / Redis 实时特征
 
 ### 仓位和执行路由
 
-- `position-engine` 已支持 Redis Stream 长驻消费、pending reclaim、dead-letter 和 result-level 幂等。
+- `position-engine` 已支持 NATS JetStream 长驻消费、dead-letter 和 result-level 幂等。
 - paper route 已接入公共 paper handler，支持开仓、平仓、减仓、止盈、止损、移动止损和分批退出。
 - paper 当前持仓 scanner 已接入，可按最新价格滚动检查退出规则。
 - paper 和 backtest 使用本地策略仓位，不依赖交易所账户仓位。
@@ -63,7 +65,12 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - ClickHouse `strategy_events` 保存策略事件和模拟成交事件。
 - ClickHouse `backtest_trades` 保存由回测成交事件配对生成的交易明细。
 - ClickHouse `backtest_run_summary` 保存回测 run 级摘要。
-- Redis 继续作为当前活跃状态和服务交接层，不作为长期分析存储。
+- Redis 继续作为当前活跃状态和缓存层，不作为长期分析存储。
+- NATS JetStream 用于服务间通信队列；服务内自产自销队列由对应服务进程内部约定，不暴露 stream/subject 命名配置。
+- Redis Stream 队列已迁移到 NATS JetStream。Redis 只承担缓存和当前态。
+- `market-data` 的 ClickHouse pending 重试和异步 K 线 backfill 已使用 NATS JetStream；默认由 `market-data` 进程内 worker 消费，不单独拆服务。
+- 本地 Docker Compose 已加入 NATS JetStream，文件存储目录为 `data/nats`。
+- 最近一次清空 Redis 和 ClickHouse 后的全链路本地验证已跑通：`market-data` 能重新写入 Redis 缓存和 ClickHouse K 线，NATS strategy bus smoke 通过。
 
 ## 关键决策
 
@@ -89,17 +96,20 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - HTTP 健康检查接口尚未实现。
 - 管理 API 和前端尚未实现。
 - ClickHouse 表当前通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
+- top500 冷启动指标计算仍偏重，需要继续异步化、分片化或增量预热；不能把最近一次小样本压测结果当作生产 SLA。
 
 ## 建议下一步
 
-1. 补回测图表报告和结果查询入口。
-2. 补回测参数化运行和策略配置加载。
-3. 实现 position-engine 的 notify handler。
-4. 增加交易所 symbol capability 自动同步和缓存。
-5. 明确过期策略反向退出但无 exit rule 时的 action 协议。
-6. 拆出真实 order executor 服务。
-7. 接入 testnet。
-8. 接入 live。
+1. 继续优化 top500 冷启动指标计算：异步化、分片调度、增量预热或更细粒度缓存。
+2. 做一次 top500 长时间全链路压测，观察 Redis、NATS、ClickHouse、market-data 和策略链路积压。
+3. 补回测图表报告和结果查询入口。
+4. 补回测参数化运行和策略配置加载。
+5. 实现 position-engine 的 notify handler。
+6. 增加交易所 symbol capability 自动同步和缓存。
+7. 明确过期策略反向退出但无 exit rule 时的 action 协议。
+8. 拆出真实 order executor 服务。
+9. 接入 testnet。
+10. 接入 live。
 
 ## 验证状态
 
@@ -109,4 +119,4 @@ ClickHouse 历史 K 线 / Redis 实时特征
 GO111MODULE=on go test ./...
 ```
 
-本轮回测账户、报告、symbol capability 和滑点更新包含 Go 代码和文档进度同步。
+最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证和指标 runner 第一轮性能优化。

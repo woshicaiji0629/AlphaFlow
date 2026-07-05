@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/admin"
 	"alphaflow/go-service/market-data/internal/aggregator"
 	"alphaflow/go-service/market-data/internal/collector"
 	"alphaflow/go-service/market-data/internal/config"
@@ -53,7 +54,7 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}()
 
-	if err := runMarketData(ctx, collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, restartDelay); err != nil {
+	if err := runMarketData(ctx, configPath, cfg, collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, restartDelay); err != nil {
 		if ctx.Err() != nil {
 			slog.Info("market-data stopped")
 			return nil
@@ -216,6 +217,10 @@ func buildStore(ctx context.Context, cfg config.Config, redisStore *store.RedisS
 	if err != nil {
 		return nil, err
 	}
+	pendingAckWait, err := config.ClickHousePendingAckWait(cfg)
+	if err != nil {
+		return nil, err
+	}
 	clickHouseStore, err := store.NewClickHouseStore(ctx, store.ClickHouseOptions{
 		Addr:        cfg.ClickHouse.Addr,
 		Database:    cfg.ClickHouse.Database,
@@ -227,16 +232,31 @@ func buildStore(ctx context.Context, cfg config.Config, redisStore *store.RedisS
 	if err != nil {
 		return nil, fmt.Errorf("connect clickhouse: %w", err)
 	}
+	pendingQueue, err := store.NewNATSPendingQueue(store.NATSPendingQueueOptions{
+		URL:           cfg.NATS.URL,
+		AckWait:       pendingAckWait,
+		MaxDeliveries: cfg.ClickHouse.PendingMaxDeliveries,
+		MaxPending:    cfg.ClickHouse.MaxPending,
+	})
+	if err != nil {
+		if closeErr := clickHouseStore.Close(); closeErr != nil {
+			slog.Error("close clickhouse after nats pending queue failure failed", "error", closeErr)
+		}
+		return nil, fmt.Errorf("connect nats clickhouse pending queue: %w", err)
+	}
 
 	return store.NewMarketStore(redisStore, clickHouseStore, store.MarketStoreOptions{
 		RetryInterval: retryInterval,
 		RetryBatch:    cfg.ClickHouse.RetryBatch,
-		MaxPending:    cfg.ClickHouse.MaxPending,
+		MaxDeliveries: cfg.ClickHouse.PendingMaxDeliveries,
+		PendingQueue:  pendingQueue,
 	}), nil
 }
 
 func runMarketData(
 	ctx context.Context,
+	configPath string,
+	cfg config.Config,
 	collectors []*collector.Collector,
 	klineAggregator *aggregator.Aggregator,
 	indicatorRunner *indicator.Runner,
@@ -276,6 +296,20 @@ func runMarketData(
 		defer wg.Done()
 		errCh <- marketStore.RunClickHouseRetry(ctx)
 	}()
+	if cfg.Backfill.WorkerEnabled {
+		backfillMaxWait, err := config.BackfillWorkerMaxWait(cfg)
+		if err != nil {
+			return err
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- admin.RunBackfillWorker(ctx, configPath, admin.BackfillWorkerOptions{
+				Batch:   cfg.Backfill.WorkerBatch,
+				MaxWait: backfillMaxWait,
+			})
+		}()
+	}
 
 	err := <-errCh
 	cancel()

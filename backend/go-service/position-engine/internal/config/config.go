@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Runtime     RuntimeConfig     `toml:"runtime"`
 	Redis       RedisConfig       `toml:"redis"`
+	NATS        NATSConfig        `toml:"nats"`
 	Input       InputConfig       `toml:"input"`
 	Idempotency IdempotencyConfig `toml:"idempotency"`
 	Position    PositionConfig    `toml:"position"`
@@ -39,16 +40,21 @@ type RedisConfig struct {
 	MinIdleConns int    `toml:"min_idle_conns"`
 }
 
+type NATSConfig struct {
+	URL string `toml:"url"`
+}
+
 type InputConfig struct {
-	Stream           string `toml:"stream"`
-	Group            string `toml:"group"`
-	Consumer         string `toml:"consumer"`
-	Block            string `toml:"block"`
-	Batch            int64  `toml:"batch"`
-	DefaultTTL       string `toml:"default_ttl"`
-	PendingIdle      string `toml:"pending_idle"`
-	DeadLetterStream string `toml:"dead_letter_stream"`
-	MaxDeliveries    int64  `toml:"max_deliveries"`
+	Stream            string `toml:"stream"`
+	Subject           string `toml:"subject"`
+	Durable           string `toml:"durable"`
+	Consumer          string `toml:"consumer"`
+	Block             string `toml:"block"`
+	Batch             int    `toml:"batch"`
+	DefaultTTL        string `toml:"default_ttl"`
+	AckWait           string `toml:"ack_wait"`
+	DeadLetterSubject string `toml:"dead_letter_subject"`
+	MaxDeliveries     int    `toml:"max_deliveries"`
 }
 
 type IdempotencyConfig struct {
@@ -144,24 +150,26 @@ func RedisClientConfig(cfg Config) redisclient.Config {
 	}
 }
 
-func RedisBusOptions(cfg Config) (strategybus.RedisOptions, error) {
+func NATSBusOptions(cfg Config) (strategybus.NATSOptions, error) {
 	block, err := InputBlock(cfg)
 	if err != nil {
-		return strategybus.RedisOptions{}, err
+		return strategybus.NATSOptions{}, err
 	}
-	pendingIdle, err := InputPendingIdle(cfg)
+	ackWait, err := InputAckWait(cfg)
 	if err != nil {
-		return strategybus.RedisOptions{}, err
+		return strategybus.NATSOptions{}, err
 	}
-	return strategybus.RedisOptions{
-		Stream:           cfg.Input.Stream,
-		Group:            cfg.Input.Group,
-		Consumer:         cfg.Input.Consumer,
-		Block:            block,
-		Batch:            cfg.Input.Batch,
-		PendingIdle:      pendingIdle,
-		DeadLetterStream: cfg.Input.DeadLetterStream,
-		MaxDeliveries:    cfg.Input.MaxDeliveries,
+	return strategybus.NATSOptions{
+		URL:               cfg.NATS.URL,
+		Stream:            cfg.Input.Stream,
+		Subject:           cfg.Input.Subject,
+		Durable:           cfg.Input.Durable,
+		Consumer:          cfg.Input.Consumer,
+		Block:             block,
+		Batch:             cfg.Input.Batch,
+		AckWait:           ackWait,
+		DeadLetterSubject: cfg.Input.DeadLetterSubject,
+		MaxDeliveries:     cfg.Input.MaxDeliveries,
 	}, nil
 }
 
@@ -177,8 +185,8 @@ func InputDefaultTTL(cfg Config) (time.Duration, error) {
 	return parseDuration("input.default_ttl", cfg.Input.DefaultTTL)
 }
 
-func InputPendingIdle(cfg Config) (time.Duration, error) {
-	return parseDuration("input.pending_idle", cfg.Input.PendingIdle)
+func InputAckWait(cfg Config) (time.Duration, error) {
+	return parseDuration("input.ack_wait", cfg.Input.AckWait)
 }
 
 func InputBlock(cfg Config) (time.Duration, error) {
@@ -203,16 +211,20 @@ func defaultConfig() Config {
 			PoolSize:     20,
 			MinIdleConns: 5,
 		},
+		NATS: NATSConfig{
+			URL: "nats://localhost:4222",
+		},
 		Input: InputConfig{
-			Stream:           strategybus.DefaultDecisionStream,
-			Group:            "position-engine",
-			Consumer:         "local",
-			Block:            "5s",
-			Batch:            10,
-			DefaultTTL:       "60s",
-			PendingIdle:      "30s",
-			DeadLetterStream: strategybus.DefaultDecisionStream + ":dead",
-			MaxDeliveries:    5,
+			Stream:            strategybus.DefaultDecisionStreamName,
+			Subject:           strategybus.DefaultDecisionSubject,
+			Durable:           "position-engine",
+			Consumer:          "local",
+			Block:             "5s",
+			Batch:             10,
+			DefaultTTL:        "60s",
+			AckWait:           "30s",
+			DeadLetterSubject: strategybus.DefaultDecisionSubject + ".dead",
+			MaxDeliveries:     5,
 		},
 		Idempotency: IdempotencyConfig{
 			Prefix:        "position:decision:idempotency",
@@ -266,13 +278,15 @@ func normalize(cfg *Config) {
 	cfg.Runtime.Service = strings.TrimSpace(cfg.Runtime.Service)
 	cfg.Redis.Addr = envOrValue("ALPHAFLOW_REDIS_ADDR", cfg.Redis.Addr)
 	cfg.Redis.Password = envOrValue("ALPHAFLOW_REDIS_PASSWORD", cfg.Redis.Password)
+	cfg.NATS.URL = envOrValue("ALPHAFLOW_NATS_URL", cfg.NATS.URL)
 	cfg.Input.Stream = strings.TrimSpace(cfg.Input.Stream)
-	cfg.Input.Group = strings.TrimSpace(cfg.Input.Group)
+	cfg.Input.Subject = strings.TrimSpace(cfg.Input.Subject)
+	cfg.Input.Durable = strings.TrimSpace(cfg.Input.Durable)
 	cfg.Input.Consumer = strings.TrimSpace(cfg.Input.Consumer)
 	cfg.Input.Block = strings.TrimSpace(cfg.Input.Block)
 	cfg.Input.DefaultTTL = strings.TrimSpace(cfg.Input.DefaultTTL)
-	cfg.Input.PendingIdle = strings.TrimSpace(cfg.Input.PendingIdle)
-	cfg.Input.DeadLetterStream = strings.TrimSpace(cfg.Input.DeadLetterStream)
+	cfg.Input.AckWait = strings.TrimSpace(cfg.Input.AckWait)
+	cfg.Input.DeadLetterSubject = strings.TrimSpace(cfg.Input.DeadLetterSubject)
 	cfg.Idempotency.Prefix = strings.TrimSpace(cfg.Idempotency.Prefix)
 	cfg.Idempotency.ProcessingTTL = strings.TrimSpace(cfg.Idempotency.ProcessingTTL)
 	cfg.Idempotency.CompletedTTL = strings.TrimSpace(cfg.Idempotency.CompletedTTL)
@@ -295,11 +309,17 @@ func validate(cfg Config) error {
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		return fmt.Errorf("redis addr cannot be empty")
 	}
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty")
+	}
 	if cfg.Input.Stream == "" {
 		return fmt.Errorf("input.stream cannot be empty")
 	}
-	if cfg.Input.Group == "" {
-		return fmt.Errorf("input.group cannot be empty")
+	if cfg.Input.Subject == "" {
+		return fmt.Errorf("input.subject cannot be empty")
+	}
+	if cfg.Input.Durable == "" {
+		return fmt.Errorf("input.durable cannot be empty")
 	}
 	if cfg.Input.Consumer == "" {
 		return fmt.Errorf("input.consumer cannot be empty")
@@ -310,14 +330,14 @@ func validate(cfg Config) error {
 	if _, err := InputDefaultTTL(cfg); err != nil {
 		return err
 	}
-	if _, err := InputPendingIdle(cfg); err != nil {
+	if _, err := InputAckWait(cfg); err != nil {
 		return err
 	}
 	if cfg.Input.Batch <= 0 {
 		return fmt.Errorf("input.batch must be positive")
 	}
-	if cfg.Input.DeadLetterStream == "" {
-		return fmt.Errorf("input.dead_letter_stream cannot be empty")
+	if cfg.Input.DeadLetterSubject == "" {
+		return fmt.Errorf("input.dead_letter_subject cannot be empty")
 	}
 	if cfg.Input.MaxDeliveries <= 0 {
 		return fmt.Errorf("input.max_deliveries must be positive")

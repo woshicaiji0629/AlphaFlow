@@ -16,7 +16,6 @@ import (
 	"alphaflow/go-service/strategy-engine/internal/config"
 	"alphaflow/go-service/strategy-engine/internal/reader"
 	"alphaflow/go-service/strategy-engine/internal/runner"
-	"github.com/redis/go-redis/v9"
 )
 
 func Run(ctx context.Context, configPath string) error {
@@ -44,10 +43,11 @@ func Run(ctx context.Context, configPath string) error {
 	}
 	defer closeEventStore()
 
-	publisher, err := buildDecisionPublisher(cfg, redisClient)
+	publisher, closePublisher, err := buildDecisionPublisher(cfg)
 	if err != nil {
 		return err
 	}
+	defer closePublisher()
 	runtime, err := buildRuntime(cfg, reader.NewRedisHashReader(redisClient), positionStore, eventStore, publisher)
 	if err != nil {
 		return err
@@ -135,25 +135,31 @@ func (p busDecisionPublisher) PublishDecision(ctx context.Context, decision stra
 	return nil
 }
 
-func buildDecisionPublisher(cfg config.Config, redisClient *redis.Client) (runner.DecisionPublisher, error) {
+func buildDecisionPublisher(cfg config.Config) (runner.DecisionPublisher, func(), error) {
 	if cfg.Output.Mode == "local" {
-		return nil, nil
+		return nil, func() {}, nil
 	}
 	ttl, err := config.OutputDefaultTTL(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	publisher, err := strategybus.NewRedisPublisher(redisClient, strategybus.RedisPublisherOptions{
-		Stream: cfg.Output.Stream,
+	publisher, err := strategybus.NewNATSPublisher(strategybus.NATSPublisherOptions{
+		URL:     cfg.NATS.URL,
+		Stream:  cfg.Output.Stream,
+		Subject: cfg.Output.Subject,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return busDecisionPublisher{
-		publisher: publisher,
-		ttl:       ttl,
-		now:       func() int64 { return time.Now().UnixMilli() },
-	}, nil
+			publisher: publisher,
+			ttl:       ttl,
+			now:       func() int64 { return time.Now().UnixMilli() },
+		}, func() {
+			if err := publisher.Close(); err != nil {
+				slog.Error("close nats publisher failed", "error", err)
+			}
+		}, nil
 }
 
 func buildEventStore(ctx context.Context, cfg config.Config) (position.EventStore, func(), error) {

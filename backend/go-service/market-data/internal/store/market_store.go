@@ -53,7 +53,8 @@ type MarketStore struct {
 type MarketStoreOptions struct {
 	RetryInterval time.Duration
 	RetryBatch    int
-	MaxPending    int64
+	MaxDeliveries int
+	PendingQueue  pendingQueue
 }
 
 func NewMarketStore(redisStore *RedisStore, clickHouseStore *ClickHouseStore, options MarketStoreOptions) *MarketStore {
@@ -72,11 +73,11 @@ func NewMarketStore(redisStore *RedisStore, clickHouseStore *ClickHouseStore, op
 		marketStatuses:       map[string]model.MarketStatus{},
 		clickHouseFlushReady: make(chan struct{}, 1),
 	}
-	if clickHouseStore != nil {
-		marketStore.pending = NewClickHousePendingWriter(redisStore.client, clickHouseStore, PendingWriterOptions{
+	if clickHouseStore != nil && options.PendingQueue != nil {
+		marketStore.pending = NewClickHousePendingWriter(options.PendingQueue, clickHouseStore, PendingWriterOptions{
 			RetryInterval: options.RetryInterval,
 			RetryBatch:    options.RetryBatch,
-			MaxPending:    options.MaxPending,
+			MaxDeliveries: options.MaxDeliveries,
 		})
 	}
 	return marketStore
@@ -241,6 +242,14 @@ func (s *MarketStore) SetIndicator(ctx context.Context, snapshot model.Indicator
 	return s.redis.SetIndicatorWithOpenTime(ctx, snapshot)
 }
 
+func (s *MarketStore) SetClosedIndicator(
+	ctx context.Context,
+	snapshot model.IndicatorSnapshot,
+	windowSnapshot model.IndicatorWindowSnapshot,
+) error {
+	return s.redis.SetClosedIndicator(ctx, snapshot, windowSnapshot)
+}
+
 func (s *MarketStore) SetLatestIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
 	s.latestMu.Lock()
 	s.indicators[model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)] = snapshot
@@ -329,6 +338,11 @@ func (s *MarketStore) RunClickHouseRetry(ctx context.Context) error {
 func (s *MarketStore) Close() error {
 	if s == nil {
 		return nil
+	}
+	if s.pending != nil {
+		if err := s.pending.Close(); err != nil {
+			return err
+		}
 	}
 	if s.clickhouse == nil {
 		return nil

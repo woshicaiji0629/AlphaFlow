@@ -49,9 +49,13 @@ func TestRunLoadsRoutes(t *testing.T) {
 [redis]
 addr = "localhost:6380"
 
+[nats]
+url = "nats://localhost:4222"
+
 [input]
-stream = "st:decision:stream"
-group = "position-engine"
+stream = "ALPHAFLOW_STRATEGY"
+subject = "strategy.decision"
+durable = "position-engine"
 consumer = "test"
 block = "1s"
 batch = 1
@@ -131,15 +135,19 @@ func TestRunDeadLettersAfterMaxDeliveries(t *testing.T) {
 [redis]
 addr = "localhost:6380"
 
+[nats]
+url = "nats://localhost:4222"
+
 [input]
-stream = "st:decision:stream"
-group = "position-engine"
+stream = "ALPHAFLOW_STRATEGY"
+subject = "strategy.decision"
+durable = "position-engine"
 consumer = "test"
 block = "1s"
 batch = 1
 default_ttl = "60s"
-pending_idle = "30s"
-dead_letter_stream = "st:decision:stream:dead"
+ack_wait = "30s"
+dead_letter_subject = "strategy.decision.dead"
 max_deliveries = 5
 
 [position]

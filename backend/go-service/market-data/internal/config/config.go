@@ -14,7 +14,9 @@ type Config struct {
 	Gate       GateConfig       `toml:"gate"`
 	Bitget     BitgetConfig     `toml:"bitget"`
 	Bybit      BybitConfig      `toml:"bybit"`
+	NATS       NATSConfig       `toml:"nats"`
 	ClickHouse ClickHouseConfig `toml:"clickhouse"`
+	Backfill   BackfillConfig   `toml:"backfill_queue"`
 	Logging    LoggingConfig    `toml:"logging"`
 }
 
@@ -42,17 +44,32 @@ type BybitConfig struct {
 	Symbols              []string `toml:"symbols"`
 }
 
+type NATSConfig struct {
+	URL string `toml:"url"`
+}
+
 type ClickHouseConfig struct {
-	Enabled       bool   `toml:"enabled"`
-	Addr          string `toml:"addr"`
-	Database      string `toml:"database"`
-	Username      string `toml:"username"`
-	Password      string `toml:"password"`
-	DialTimeout   string `toml:"dial_timeout"`
-	ReadTimeout   string `toml:"read_timeout"`
-	RetryInterval string `toml:"retry_interval"`
-	RetryBatch    int    `toml:"retry_batch"`
+	Enabled              bool   `toml:"enabled"`
+	Addr                 string `toml:"addr"`
+	Database             string `toml:"database"`
+	Username             string `toml:"username"`
+	Password             string `toml:"password"`
+	DialTimeout          string `toml:"dial_timeout"`
+	ReadTimeout          string `toml:"read_timeout"`
+	RetryInterval        string `toml:"retry_interval"`
+	RetryBatch           int    `toml:"retry_batch"`
+	MaxPending           int64  `toml:"max_pending"`
+	PendingAckWait       string `toml:"pending_ack_wait"`
+	PendingMaxDeliveries int    `toml:"pending_max_deliveries"`
+}
+
+type BackfillConfig struct {
+	AckWait       string `toml:"ack_wait"`
+	MaxDeliveries int    `toml:"max_deliveries"`
 	MaxPending    int64  `toml:"max_pending"`
+	WorkerEnabled bool   `toml:"worker_enabled"`
+	WorkerBatch   int    `toml:"worker_batch"`
+	WorkerMaxWait string `toml:"worker_max_wait"`
 }
 
 type LoggingConfig struct {
@@ -102,17 +119,30 @@ func defaultConfig() Config {
 			Enabled: false,
 			Symbols: []string{"ETHUSDT"},
 		},
+		NATS: NATSConfig{
+			URL: "nats://localhost:4222",
+		},
 		ClickHouse: ClickHouseConfig{
-			Enabled:       false,
-			Addr:          "localhost:9000",
-			Database:      "alphaflow",
-			Username:      "default",
-			Password:      "",
-			DialTimeout:   "5s",
-			ReadTimeout:   "30s",
-			RetryInterval: "10s",
-			RetryBatch:    100,
-			MaxPending:    100000,
+			Enabled:              false,
+			Addr:                 "localhost:9000",
+			Database:             "alphaflow",
+			Username:             "default",
+			Password:             "",
+			DialTimeout:          "5s",
+			ReadTimeout:          "30s",
+			RetryInterval:        "10s",
+			RetryBatch:           100,
+			MaxPending:           100000,
+			PendingAckWait:       "30s",
+			PendingMaxDeliveries: 5,
+		},
+		Backfill: BackfillConfig{
+			AckWait:       "30m",
+			MaxDeliveries: 3,
+			MaxPending:    10000,
+			WorkerEnabled: false,
+			WorkerBatch:   1,
+			WorkerMaxWait: "1s",
 		},
 		Logging: LoggingConfig{
 			Service:    "market-data",
@@ -133,11 +163,31 @@ func validate(cfg Config) error {
 	validators := []func(Config) error{
 		validateExchangeSymbols,
 		validateClickHouse,
+		validateBackfillQueue,
 	}
 	for _, validator := range validators {
 		if err := validator(cfg); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateBackfillQueue(cfg Config) error {
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty")
+	}
+	if _, err := BackfillAckWait(cfg); err != nil {
+		return err
+	}
+	if cfg.Backfill.MaxDeliveries <= 0 {
+		return fmt.Errorf("backfill_queue.max_deliveries must be positive")
+	}
+	if cfg.Backfill.WorkerBatch <= 0 {
+		return fmt.Errorf("backfill_queue.worker_batch must be positive")
+	}
+	if _, err := BackfillWorkerMaxWait(cfg); err != nil {
+		return err
 	}
 	return nil
 }
@@ -185,6 +235,15 @@ func validateClickHouse(cfg Config) error {
 	if _, err := ClickHouseRetryInterval(cfg); err != nil {
 		return err
 	}
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty when clickhouse enabled")
+	}
+	if _, err := ClickHousePendingAckWait(cfg); err != nil {
+		return err
+	}
+	if cfg.ClickHouse.PendingMaxDeliveries <= 0 {
+		return fmt.Errorf("clickhouse pending_max_deliveries must be positive")
+	}
 	return nil
 }
 
@@ -200,10 +259,14 @@ func resolvePath(configPath string) string {
 }
 
 func normalize(cfg *Config) {
+	cfg.NATS.URL = envOrValue("ALPHAFLOW_NATS_URL", cfg.NATS.URL)
 	cfg.ClickHouse.Addr = envOrValue("ALPHAFLOW_CLICKHOUSE_ADDR", cfg.ClickHouse.Addr)
 	cfg.ClickHouse.Database = envOrValue("ALPHAFLOW_CLICKHOUSE_DATABASE", cfg.ClickHouse.Database)
 	cfg.ClickHouse.Username = envOrValue("ALPHAFLOW_CLICKHOUSE_USERNAME", cfg.ClickHouse.Username)
 	cfg.ClickHouse.Password = envOrValue("ALPHAFLOW_CLICKHOUSE_PASSWORD", cfg.ClickHouse.Password)
+	cfg.ClickHouse.PendingAckWait = strings.TrimSpace(cfg.ClickHouse.PendingAckWait)
+	cfg.Backfill.AckWait = strings.TrimSpace(cfg.Backfill.AckWait)
+	cfg.Backfill.WorkerMaxWait = strings.TrimSpace(cfg.Backfill.WorkerMaxWait)
 
 	for index, symbol := range cfg.Binance.Symbols {
 		cfg.Binance.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))

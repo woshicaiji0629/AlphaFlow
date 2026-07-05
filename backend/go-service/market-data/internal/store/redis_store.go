@@ -652,6 +652,48 @@ func (s *RedisStore) SetIndicatorWindowWithOpenTime(
 	return nil
 }
 
+func (s *RedisStore) SetClosedIndicator(
+	ctx context.Context,
+	snapshot model.IndicatorSnapshot,
+	windowSnapshot model.IndicatorWindowSnapshot,
+) error {
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal indicator: %w", err)
+	}
+	fields, err := indicatorWindowHashFields(windowSnapshot, s.retention.LatestTTL)
+	if err != nil {
+		return err
+	}
+
+	indicatorKey := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	indicatorLastKey := model.IndicatorLastKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	windowKey := model.IndicatorWindowKey(windowSnapshot.Exchange, windowSnapshot.Market, windowSnapshot.Symbol, windowSnapshot.Interval)
+	windowLastKey := model.IndicatorWindowLastKey(windowSnapshot.Exchange, windowSnapshot.Market, windowSnapshot.Symbol, windowSnapshot.Interval)
+
+	pipe := s.client.Pipeline()
+	pipe.Set(ctx, indicatorKey, payload, s.retention.LatestTTL)
+	pipe.Set(ctx, indicatorLastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
+	pipe.HSet(ctx, windowKey, fields...)
+	pipe.Set(ctx, windowLastKey, strconv.FormatInt(windowSnapshot.OpenTime, 10), s.retention.LatestTTL)
+	s.maintainIndicatorKeys([]string{indicatorKey, indicatorLastKey, windowKey, windowLastKey}, func() {
+		pipe.Expire(ctx, indicatorKey, s.retention.LatestTTL)
+		pipe.Expire(ctx, indicatorLastKey, s.retention.LatestTTL)
+		pipe.Expire(ctx, windowKey, s.retention.LatestTTL)
+		pipe.Expire(ctx, windowLastKey, s.retention.LatestTTL)
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set closed indicator: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) SetIndicatorRealtime(
 	ctx context.Context,
 	snapshot model.IndicatorRealtimeSnapshot,

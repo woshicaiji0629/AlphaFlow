@@ -46,7 +46,11 @@ func (s *loadStore) LastIndicatorOpenTime(_ context.Context, exchange string, ma
 	return openTime, ok, nil
 }
 
-func (s *loadStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
+func (s *loadStore) SetClosedIndicator(
+	_ context.Context,
+	snapshot model.IndicatorSnapshot,
+	_ model.IndicatorWindowSnapshot,
+) error {
 	if s.redisLatency > 0 {
 		time.Sleep(s.redisLatency)
 	}
@@ -58,14 +62,6 @@ func (s *loadStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 }
 
 func (s *loadStore) SetLatestIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
-	if s.redisLatency > 0 {
-		time.Sleep(s.redisLatency)
-	}
-	s.redisWrites.Add(1)
-	return nil
-}
-
-func (s *loadStore) SetIndicatorWindow(_ context.Context, snapshot model.IndicatorWindowSnapshot) error {
 	if s.redisLatency > 0 {
 		time.Sleep(s.redisLatency)
 	}

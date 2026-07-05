@@ -31,6 +31,25 @@ enabled = true
 websocket_connections = 14
 symbols = ["ethusdt"]
 
+[nats]
+url = "nats://example:4222"
+
+[clickhouse]
+enabled = true
+addr = "localhost:9000"
+database = "alphaflow"
+retry_interval = "2s"
+pending_ack_wait = "45s"
+pending_max_deliveries = 7
+
+[backfill_queue]
+ack_wait = "10m"
+max_deliveries = 4
+max_pending = 500
+worker_enabled = true
+worker_batch = 2
+worker_max_wait = "3s"
+
 [logging]
 service = "test-service"
 level = "debug"
@@ -97,6 +116,36 @@ compress = true
 	}
 	if got := cfg.Logging.Filename; got != "test.log" {
 		t.Fatalf("log filename = %q, want test.log", got)
+	}
+	if got := cfg.NATS.URL; got != "nats://example:4222" {
+		t.Fatalf("nats url = %q, want nats://example:4222", got)
+	}
+	if got := cfg.ClickHouse.PendingMaxDeliveries; got != 7 {
+		t.Fatalf("pending max deliveries = %d, want 7", got)
+	}
+	if wait, err := ClickHousePendingAckWait(cfg); err != nil {
+		t.Fatalf("ClickHousePendingAckWait() error = %v", err)
+	} else if wait != 45*time.Second {
+		t.Fatalf("pending ack wait = %s, want 45s", wait)
+	}
+	if got := cfg.Backfill.MaxDeliveries; got != 4 {
+		t.Fatalf("backfill max deliveries = %d, want 4", got)
+	}
+	if wait, err := BackfillAckWait(cfg); err != nil {
+		t.Fatalf("BackfillAckWait() error = %v", err)
+	} else if wait != 10*time.Minute {
+		t.Fatalf("backfill ack wait = %s, want 10m", wait)
+	}
+	if !cfg.Backfill.WorkerEnabled {
+		t.Fatal("backfill worker should be enabled")
+	}
+	if got := cfg.Backfill.WorkerBatch; got != 2 {
+		t.Fatalf("backfill worker batch = %d, want 2", got)
+	}
+	if wait, err := BackfillWorkerMaxWait(cfg); err != nil {
+		t.Fatalf("BackfillWorkerMaxWait() error = %v", err)
+	} else if wait != 3*time.Second {
+		t.Fatalf("backfill worker max wait = %s, want 3s", wait)
 	}
 }
 

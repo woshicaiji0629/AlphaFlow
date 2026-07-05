@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -42,9 +43,12 @@ type Store interface {
 		symbol string,
 		interval string,
 	) (int64, bool, error)
-	SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
+	SetClosedIndicator(
+		ctx context.Context,
+		snapshot model.IndicatorSnapshot,
+		windowSnapshot model.IndicatorWindowSnapshot,
+	) error
 	SetLatestIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
-	SetIndicatorWindow(ctx context.Context, snapshot model.IndicatorWindowSnapshot) error
 	SetLatestIndicatorWindow(ctx context.Context, snapshot model.IndicatorWindowSnapshot) error
 	SetIndicatorRealtime(ctx context.Context, snapshot model.IndicatorRealtimeSnapshot) error
 }
@@ -68,6 +72,7 @@ type Runner struct {
 	options                 RunnerOptions
 	mu                      sync.Mutex
 	windows                 map[string]*indicatorcalc.CalculationWindow
+	indicatorSnapshots      map[string][]model.IndicatorSnapshot
 	lastCalculatedOpenTimes map[string]int64
 	now                     func() time.Time
 }
@@ -94,6 +99,7 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 		store:                   store,
 		options:                 options,
 		windows:                 map[string]*indicatorcalc.CalculationWindow{},
+		indicatorSnapshots:      map[string][]model.IndicatorSnapshot{},
 		lastCalculatedOpenTimes: map[string]int64{},
 		now:                     time.Now,
 	}
@@ -233,15 +239,12 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		Signals:   result.Signals,
 		UpdatedAt: r.now().UnixMilli(),
 	}
-	windowSnapshot, err := r.indicatorWindowSnapshot(rule, kline.Symbol, kline.Interval, calcWindow, snapshot.UpdatedAt)
+	windowSnapshot, err := r.indicatorWindowSnapshot(rule, kline.Symbol, kline.Interval, calcWindow, snapshot)
 	if err != nil {
 		return err
 	}
 	if kline.IsClosed {
-		if err := r.store.SetIndicator(ctx, snapshot); err != nil {
-			return err
-		}
-		if err := r.store.SetIndicatorWindow(ctx, windowSnapshot); err != nil {
+		if err := r.store.SetClosedIndicator(ctx, snapshot, windowSnapshot); err != nil {
 			return err
 		}
 		r.rememberCalculatedOpenTime(windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval), snapshot.OpenTime)
@@ -332,14 +335,11 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		Signals:   result.Signals,
 		UpdatedAt: r.now().UnixMilli(),
 	}
-	windowSnapshot, err := r.indicatorWindowSnapshot(rule, symbol, interval, window, snapshot.UpdatedAt)
+	windowSnapshot, err := r.indicatorWindowSnapshot(rule, symbol, interval, window, snapshot)
 	if err != nil {
 		return err
 	}
-	if err := r.store.SetIndicator(ctx, snapshot); err != nil {
-		return err
-	}
-	if err := r.store.SetIndicatorWindow(ctx, windowSnapshot); err != nil {
+	if err := r.store.SetClosedIndicator(ctx, snapshot, windowSnapshot); err != nil {
 		return err
 	}
 	r.rememberCalculatedOpenTime(key, snapshot.OpenTime)
@@ -360,12 +360,18 @@ func (r *Runner) indicatorWindowSnapshot(
 	symbol string,
 	interval string,
 	window *indicatorcalc.CalculationWindow,
-	updatedAt int64,
+	snapshot model.IndicatorSnapshot,
 ) (model.IndicatorWindowSnapshot, error) {
-	snapshots, err := r.indicatorSnapshotsForWindow(window)
-	if err != nil {
-		return model.IndicatorWindowSnapshot{}, err
+	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
+	snapshots, ok := r.cachedIndicatorSnapshots(key, window, snapshot)
+	if !ok {
+		var err error
+		snapshots, err = r.indicatorSnapshotsForWindow(window)
+		if err != nil {
+			return model.IndicatorWindowSnapshot{}, err
+		}
 	}
+	snapshots = r.rememberIndicatorSnapshots(key, snapshots)
 	result, err := indicatorwindow.Analyze(snapshots)
 	if err != nil {
 		return model.IndicatorWindowSnapshot{}, err
@@ -380,7 +386,7 @@ func (r *Runner) indicatorWindowSnapshot(
 		Version:   result.Version,
 		Values:    result.Values,
 		Signals:   result.Signals,
-		UpdatedAt: updatedAt,
+		UpdatedAt: snapshot.UpdatedAt,
 	}, nil
 }
 
@@ -400,8 +406,10 @@ func (r *Runner) indicatorSnapshotsForWindow(
 	}
 	start := len(closed) - lookback
 	snapshots := make([]model.IndicatorSnapshot, 0, lookback)
+	calcWindow := indicatorcalc.NewCalculationWindowFromKlines(closed[:start], len(closed))
 	for index := start; index < len(closed); index++ {
-		result, err := indicatorcalc.Calculate(closed[:index+1], r.options.CalculateOptions)
+		calcWindow.Append([]model.Kline{closed[index]})
+		result, err := indicatorcalc.CalculateWindow(calcWindow, r.options.CalculateOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -419,6 +427,58 @@ func (r *Runner) indicatorSnapshotsForWindow(
 		})
 	}
 	return snapshots, nil
+}
+
+func (r *Runner) cachedIndicatorSnapshots(
+	key string,
+	window *indicatorcalc.CalculationWindow,
+	snapshot model.IndicatorSnapshot,
+) ([]model.IndicatorSnapshot, bool) {
+	if window == nil {
+		return nil, false
+	}
+	closed := window.Klines()
+	if len(closed) == 0 || closed[len(closed)-1].OpenTime != snapshot.OpenTime {
+		return nil, false
+	}
+
+	r.mu.Lock()
+	cached := append([]model.IndicatorSnapshot(nil), r.indicatorSnapshots[key]...)
+	r.mu.Unlock()
+	if len(cached) == 0 {
+		return nil, false
+	}
+	last := cached[len(cached)-1]
+	if last.OpenTime == snapshot.OpenTime {
+		cached[len(cached)-1] = snapshot
+		return trimIndicatorSnapshots(cached), true
+	}
+	if last.OpenTime > snapshot.OpenTime {
+		return nil, false
+	}
+	if len(closed) > 1 && last.OpenTime != closed[len(closed)-2].OpenTime {
+		return nil, false
+	}
+	cached = append(cached, snapshot)
+	return trimIndicatorSnapshots(cached), true
+}
+
+func (r *Runner) rememberIndicatorSnapshots(
+	key string,
+	snapshots []model.IndicatorSnapshot,
+) []model.IndicatorSnapshot {
+	trimmed := trimIndicatorSnapshots(snapshots)
+	r.mu.Lock()
+	r.indicatorSnapshots[key] = append([]model.IndicatorSnapshot(nil), trimmed...)
+	r.mu.Unlock()
+	return trimmed
+}
+
+func trimIndicatorSnapshots(snapshots []model.IndicatorSnapshot) []model.IndicatorSnapshot {
+	if len(snapshots) <= 20 {
+		return append([]model.IndicatorSnapshot(nil), snapshots...)
+	}
+	return append([]model.IndicatorSnapshot(nil), snapshots[len(snapshots)-20:]...)
 }
 
 func (r *Runner) calculatedThrough(key string, openTime int64) bool {
@@ -596,10 +656,17 @@ func (r *Runner) rememberWindow(key string, window *indicatorcalc.CalculationWin
 }
 
 func workerCount(jobCount int) int {
-	if jobCount < indicatorWorkerCount {
+	limit := runtime.NumCPU() * 2
+	if limit < indicatorWorkerCount {
+		limit = indicatorWorkerCount
+	}
+	if limit > 32 {
+		limit = 32
+	}
+	if jobCount < limit {
 		return jobCount
 	}
-	return indicatorWorkerCount
+	return limit
 }
 
 func windowKey(exchange string, market string, symbol string, interval string) string {

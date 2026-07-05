@@ -80,10 +80,15 @@ func (s *fakeStore) LastIndicatorOpenTime(context.Context, string, string, strin
 	return s.lastIndicatorOpenTime, s.hasLastIndicator, s.lastIndicatorOpenTimeErr
 }
 
-func (s *fakeStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
+func (s *fakeStore) SetClosedIndicator(
+	_ context.Context,
+	snapshot model.IndicatorSnapshot,
+	windowSnapshot model.IndicatorWindowSnapshot,
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snapshots = append(s.snapshots, snapshot)
+	s.windowSnapshots = append(s.windowSnapshots, windowSnapshot)
 	return nil
 }
 
@@ -91,16 +96,6 @@ func (s *fakeStore) SetLatestIndicator(_ context.Context, snapshot model.Indicat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.latestSnapshots = append(s.latestSnapshots, snapshot)
-	return nil
-}
-
-func (s *fakeStore) SetIndicatorWindow(
-	_ context.Context,
-	snapshot model.IndicatorWindowSnapshot,
-) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.windowSnapshots = append(s.windowSnapshots, snapshot)
 	return nil
 }
 

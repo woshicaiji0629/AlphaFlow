@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,101 @@ func TestApplyBackfillTaskConfigKeepsExplicitFlags(t *testing.T) {
 	}
 	if opts.warmupBars != 300 {
 		t.Fatalf("warmup bars = %d, want 300", opts.warmupBars)
+	}
+}
+
+func TestBackfillTaskRoundTrip(t *testing.T) {
+	opts := validBackfillOptions()
+	opts.retryDelay = 2 * time.Second
+	task := newBackfillTask(opts)
+	payload, err := encodeBackfillTask(task)
+	if err != nil {
+		t.Fatalf("encodeBackfillTask() error = %v", err)
+	}
+	decoded, err := decodeBackfillTask(payload)
+	if err != nil {
+		t.Fatalf("decodeBackfillTask() error = %v", err)
+	}
+	decodedOptions, err := decoded.options()
+	if err != nil {
+		t.Fatalf("decoded options error = %v", err)
+	}
+	if decodedOptions.exchange != opts.exchange || decodedOptions.symbol != opts.symbol {
+		t.Fatalf("decoded target = %s/%s, want %s/%s", decodedOptions.exchange, decodedOptions.symbol, opts.exchange, opts.symbol)
+	}
+	if decodedOptions.retryDelay != 2*time.Second {
+		t.Fatalf("retry delay = %s, want 2s", decodedOptions.retryDelay)
+	}
+}
+
+func TestNormalizeNATSBackfillTaskQueueOptionsDefaults(t *testing.T) {
+	options := normalizeNATSBackfillTaskQueueOptions(natsBackfillTaskQueueOptions{})
+	if options.Stream != defaultBackfillStream {
+		t.Fatalf("stream = %q, want %q", options.Stream, defaultBackfillStream)
+	}
+	if options.Subject != "market.kline.backfill" {
+		t.Fatalf("subject = %q, want market.kline.backfill", options.Subject)
+	}
+	if options.Durable != "market-data-backfill-worker" {
+		t.Fatalf("durable = %q, want market-data-backfill-worker", options.Durable)
+	}
+	if options.AckWait != 30*time.Minute {
+		t.Fatalf("ack wait = %s, want 30m", options.AckWait)
+	}
+	if options.MaxDeliveries != 3 {
+		t.Fatalf("max deliveries = %d, want 3", options.MaxDeliveries)
+	}
+	if options.MaxPending != 10000 {
+		t.Fatalf("max pending = %d, want 10000", options.MaxPending)
+	}
+	if options.DeadLetterSubject != "market.kline.backfill.dead" {
+		t.Fatalf("dead letter subject = %q, want market.kline.backfill.dead", options.DeadLetterSubject)
+	}
+}
+
+func TestProcessBackfillTaskMessageDeadLettersInvalidTask(t *testing.T) {
+	queue := &fakeBackfillTaskQueue{}
+	message := backfillTaskMessage{
+		ID: "1",
+		Task: backfillTask{
+			Exchange:   "binance",
+			Symbol:     "ETHUSDT",
+			Intervals:  []string{"1m"},
+			Start:      "202606010000",
+			End:        "202607010000",
+			Timezone:   "Asia/Shanghai",
+			Mode:       "skip-existing",
+			RetryDelay: "bad",
+		},
+		DeliveryCount: 1,
+	}
+	if err := processBackfillTaskMessage(context.Background(), "", queue, message, 3); err != nil {
+		t.Fatalf("processBackfillTaskMessage() error = %v", err)
+	}
+	if len(queue.deadLetters) != 1 || queue.deadLetters[0].ID != "1" {
+		t.Fatalf("dead letters = %#v, want message 1", queue.deadLetters)
+	}
+	if len(queue.acked) != 1 || queue.acked[0].ID != "1" {
+		t.Fatalf("acked = %#v, want message 1", queue.acked)
+	}
+}
+
+func TestProcessBackfillTaskMessageDeadLettersDecodeError(t *testing.T) {
+	queue := &fakeBackfillTaskQueue{}
+	message := backfillTaskMessage{
+		ID:            "bad-json",
+		DeliveryCount: 1,
+		DecodeError:   "decode backfill task: invalid character",
+		RawPayload:    []byte("{bad"),
+	}
+	if err := processBackfillTaskMessage(context.Background(), "", queue, message, 3); err != nil {
+		t.Fatalf("processBackfillTaskMessage() error = %v", err)
+	}
+	if len(queue.deadLetters) != 1 || queue.deadLetters[0].ID != "bad-json" {
+		t.Fatalf("dead letters = %#v, want message bad-json", queue.deadLetters)
+	}
+	if len(queue.acked) != 1 || queue.acked[0].ID != "bad-json" {
+		t.Fatalf("acked = %#v, want message bad-json", queue.acked)
 	}
 }
 
@@ -537,4 +633,46 @@ func testKline(
 		Close:     closeValue,
 		IsClosed:  true,
 	}
+}
+
+type fakeBackfillTaskQueue struct {
+	published   []backfillTask
+	messages    []backfillTaskMessage
+	acked       []backfillTaskMessage
+	deadLetters []backfillTaskMessage
+}
+
+func (q *fakeBackfillTaskQueue) Publish(ctx context.Context, task backfillTask) (string, error) {
+	q.published = append(q.published, task)
+	return "1", ctx.Err()
+}
+
+func (q *fakeBackfillTaskQueue) Fetch(ctx context.Context, batch int, maxWait time.Duration) ([]backfillTaskMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(q.messages) == 0 {
+		return nil, nil
+	}
+	count := len(q.messages)
+	if batch > 0 && count > batch {
+		count = batch
+	}
+	messages := append([]backfillTaskMessage(nil), q.messages[:count]...)
+	q.messages = q.messages[count:]
+	return messages, nil
+}
+
+func (q *fakeBackfillTaskQueue) Ack(ctx context.Context, messages []backfillTaskMessage) error {
+	q.acked = append(q.acked, messages...)
+	return ctx.Err()
+}
+
+func (q *fakeBackfillTaskQueue) DeadLetter(ctx context.Context, message backfillTaskMessage, reason string) error {
+	q.deadLetters = append(q.deadLetters, message)
+	return ctx.Err()
+}
+
+func (q *fakeBackfillTaskQueue) Close() error {
+	return nil
 }

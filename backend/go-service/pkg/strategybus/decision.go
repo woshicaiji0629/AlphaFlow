@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	DefaultDecisionStream = "st:decision:stream"
-	StreamPayloadField    = "payload"
+	StreamPayloadField = "payload"
 )
 
 type DecisionEnvelope struct {
@@ -24,6 +23,14 @@ type DecisionEnvelope struct {
 	SignalID  string            `json:"signal_id,omitempty"`
 	CreatedAt int64             `json:"created_at"`
 	ExpiresAt int64             `json:"expires_at"`
+}
+
+type DecisionMessage struct {
+	ID            string
+	Envelope      DecisionEnvelope
+	DeliveryCount int64
+	DecodeError   string
+	RawPayload    []byte
 }
 
 func NewDecisionEnvelope(decision strategy.Decision, createdAt int64, ttl time.Duration) DecisionEnvelope {

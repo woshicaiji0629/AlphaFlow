@@ -18,7 +18,7 @@
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - 独立回测引擎入口、历史读取、滚动 snapshot、模拟成交和结果持久化：`backtest-engine`
 - 独立仓位/执行路由服务：`position-engine`
-- 策略决策 Redis Stream 协议：`pkg/strategybus`
+- 策略决策 NATS JetStream 协议：`pkg/strategybus`
 - 策略结果路由公共包：`pkg/strategyroute`
 - paper 仓位处理器公共包：`pkg/positionhandler/paper`
 - Redis 幂等状态存储：`pkg/idempotency`
@@ -30,11 +30,12 @@
 - ClickHouse 回测交易表：`backtest_trades`
 - ClickHouse 回测摘要表：`backtest_run_summary`
 - paper 当前持仓 scanner：按最新价格滚动评估止盈、止损、移动止损和分批退出
+- 回测基础报告：trade 级权益曲线、逐 K 浮动权益曲线、组合权益曲线、账户资金曲线、最大回撤、胜率、profit factor 和连续亏损统计
 
 尚未实现：
 
 - 真实交易所 order executor
-- 完整回测报告输出、权益曲线、参数化批量回测和结果查询入口
+- 图表化回测报告、参数化批量回测和结果查询入口
 - `testnet` / `live` / `notify` route handler
 - 交易所账户级风控和 symbol 下单能力换算
 - 订单服务级幂等落库和重复订单意图拦截
@@ -51,6 +52,7 @@
 - 策略加载通过 registry 完成；在线可以同时运行多个策略，离线回测一般一次只回测一个策略。
 - Python 策略框架只作为旧原型参考，不作为新架构依赖。
 - 策略引擎只产出策略结果，并通过策略决策总线交给下游路由服务。
+- 服务间策略决策使用 NATS JetStream；Redis 只保留缓存、特征和当前态，不作为队列。
 - 真实订单状态机后续拆到订单服务。
 
 核心要求是在线和回测共享同一套策略逻辑，入口、配置、数据来源、信号路由、成交模型和持久化范围保持独立。
@@ -239,28 +241,30 @@ log
 职责：
 
 - 定义跨服务传递的 `strategy.Decision` envelope。
-- 将 `strategy.Decision` 编码为 Redis Stream payload。
+- 将 `strategy.Decision` 编码为 NATS JetStream payload。
 - 提供 `trace_id`、`signal_id`、result-level signal id 和 `created_at` / `expires_at` 过期边界。
-- 提供 Redis Stream 发布、消费组创建、读取、pending reclaim、dead-letter 和 Ack 能力。
+- 提供 NATS JetStream 发布、durable consumer 创建、读取、dead-letter 和 Ack 能力。
 
 关键文件：
 
 ```text
 backend/go-service/pkg/strategybus/decision.go
-backend/go-service/pkg/strategybus/redis.go
+backend/go-service/pkg/strategybus/nats.go
 ```
 
 当前默认协议：
 
 ```text
-stream: st:decision:stream
-field: payload
-group: position-engine
+stream: ALPHAFLOW_STRATEGY
+subject: strategy.decision
+durable: position-engine
 default_ttl: 60s
-pending_idle: 30s
-dead_letter_stream: st:decision:stream:dead
+ack_wait: 30s
+dead_letter_subject: strategy.decision.dead
 max_deliveries: 5
 ```
+
+这是服务间通信协议，需要在配置和文档中保持明确。与此不同，`market-data` 的 ClickHouse pending 和 backfill 队列属于服务内自产自销队列，stream、subject、durable 和 dead-letter 名称由 `market-data` 代码内部约定，不作为对外配置。
 
 当前 envelope JSON 字段包括：
 
@@ -324,8 +328,8 @@ Redis indwin / indrt
   -> strategy.Snapshot
   -> strategy.Engine(Supertrend)
   -> strategy-engine/internal/runner
-  -> pkg/strategybus.RedisPublisher
-  -> Redis Stream st:decision:stream
+  -> pkg/strategybus.NATSPublisher
+  -> NATS JetStream strategy.decision
 ```
 
 在线引擎职责：
@@ -401,7 +405,7 @@ backend/go-service/backtest-engine/internal/simulator/
 backend/go-service/position-engine/cmd/position-engine/main.go
 ```
 
-当前 `position-engine` 实现入口、配置加载、Redis Stream 输入、长驻消费、pending reclaim、dead-letter、result-level 幂等、paper route 处理和 route 校验：
+当前 `position-engine` 实现入口、配置加载、NATS JetStream 输入、长驻消费、dead-letter、result-level 幂等、paper route 处理和 route 校验：
 
 ```text
 backend/go-service/position-engine/cmd/position-engine/
@@ -426,10 +430,10 @@ strategy.Decision / strategy.Result
 - 维护 paper/backtest/testnet/live 各自独立的仓位状态。
 - 生成仓位计划、订单意图、成交事件或通知消息。
 - 允许不同策略使用不同 sink，互不干扰。
-- 对 Redis Stream 消息和 result-level signal 做幂等控制。
+- 对 NATS JetStream 消息和 result-level signal 做幂等控制。
 - 对 paper 当前持仓做滚动扫描，用最新价格触发退出规则。
 
-在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 Redis Stream 上，`position-engine` 通过消费组长驻读取 decision，并从 Redis `lp/mp` 价格 key 补最新价格上下文。处理成功后 Ack；空批次带 backoff；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的 pending 消息可 reclaim，超过投递上限后进入 dead-letter stream。幂等优先使用 result-level signal id，兼容旧消息的 envelope signal id 或 message id。backtest/live/notify handler 后续补齐。
+在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 NATS JetStream 上，`position-engine` 通过 durable consumer 长驻读取 decision，并从 Redis `lp/mp` 价格 key 补最新价格上下文。处理成功后 Ack；空批次带 backoff；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的消息由 JetStream 按 ack wait 重投递，超过投递上限后进入 dead-letter subject。幂等优先使用 result-level signal id，兼容旧消息的 envelope signal id 或 message id。backtest/live/notify handler 后续补齐。
 
 当前 paper 持仓 scanner 使用 `position.Store.ListPositions` 读取 paper scope 当前仓位，按最新价格刷新最高价/最低价，并复用 `position.Manager.PlanWithPrice` 判断退出规则。触发后仍走既有 dispatcher 和 paper handler，因此扫描退出和策略信号退出共享同一套事件、成交和仓位更新路径。
 
@@ -908,8 +912,8 @@ position_side
 
 ## 当前限制
 
-- 回测已经有历史读取、时间推进、模拟成交、交易明细和 run 级摘要，但还没有权益曲线、图表/文件报告、参数化批量回测和结果查询 API。
-- position-engine 已接入 Redis Stream `strategy.Decision` 输入、长驻消费、空批次 backoff、pending reclaim、dead-letter、result-level 幂等和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决。
+- 回测已经有历史读取、时间推进、模拟成交、交易明细、run 级摘要和基础权益曲线数据，但还没有图表化报告、参数化批量回测和结果查询 API。
+- position-engine 已接入 NATS JetStream `strategy.Decision` 输入、长驻消费、空批次 backoff、dead-letter、result-level 幂等和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决。
 - position-engine 已接入 paper 当前持仓 scanner，但还没有 backtest/live/notify handler 实现。
 - 还没有真实交易所订单服务。
 - 还没有交易所精度、张数、最小下单量换算。

@@ -17,9 +17,13 @@ scan_interval = "2s"
 [redis]
 addr = "localhost:6380"
 
+[nats]
+url = "nats://localhost:4222"
+
 [output]
 mode = "bus"
-stream = "st:decision:stream"
+stream = "ALPHAFLOW_STRATEGY"
+subject = "strategy.decision"
 default_ttl = "45s"
 
 [position]

@@ -90,3 +90,45 @@ func ClickHouseRetryInterval(cfg Config) (time.Duration, error) {
 	}
 	return interval, nil
 }
+
+func ClickHousePendingAckWait(cfg Config) (time.Duration, error) {
+	if cfg.ClickHouse.PendingAckWait == "" {
+		return 30 * time.Second, nil
+	}
+	wait, err := time.ParseDuration(cfg.ClickHouse.PendingAckWait)
+	if err != nil {
+		return 0, fmt.Errorf("parse clickhouse pending_ack_wait: %w", err)
+	}
+	if wait <= 0 {
+		return 0, fmt.Errorf("clickhouse pending_ack_wait must be positive")
+	}
+	return wait, nil
+}
+
+func BackfillAckWait(cfg Config) (time.Duration, error) {
+	if cfg.Backfill.AckWait == "" {
+		return 30 * time.Minute, nil
+	}
+	wait, err := time.ParseDuration(cfg.Backfill.AckWait)
+	if err != nil {
+		return 0, fmt.Errorf("parse backfill_queue ack_wait: %w", err)
+	}
+	if wait <= 0 {
+		return 0, fmt.Errorf("backfill_queue ack_wait must be positive")
+	}
+	return wait, nil
+}
+
+func BackfillWorkerMaxWait(cfg Config) (time.Duration, error) {
+	if cfg.Backfill.WorkerMaxWait == "" {
+		return time.Second, nil
+	}
+	wait, err := time.ParseDuration(cfg.Backfill.WorkerMaxWait)
+	if err != nil {
+		return 0, fmt.Errorf("parse backfill_queue worker_max_wait: %w", err)
+	}
+	if wait <= 0 {
+		return 0, fmt.Errorf("backfill_queue worker_max_wait must be positive")
+	}
+	return wait, nil
+}

@@ -3,30 +3,41 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
-	"github.com/redis/go-redis/v9"
 )
 
 const (
-	clickHousePendingKey    = "market-data:clickhouse:pending"
-	clickHouseProcessingKey = "market-data:clickhouse:processing"
-	pendingKindKline        = "kline"
-	pendingFlushDebounce    = 50 * time.Millisecond
+	pendingKindKline     = "kline"
+	pendingFlushDebounce = 50 * time.Millisecond
 )
 
 type PendingWriterOptions struct {
 	RetryInterval time.Duration
 	RetryBatch    int
-	MaxPending    int64
+	MaxDeliveries int
+}
+
+type pendingQueue interface {
+	Publish(ctx context.Context, payloads [][]byte) error
+	Fetch(ctx context.Context, batch int, maxWait time.Duration) ([]pendingQueueMessage, error)
+	Ack(ctx context.Context, messages []pendingQueueMessage) error
+	DeadLetter(ctx context.Context, message pendingQueueMessage, reason string) error
+	Close() error
+}
+
+type pendingQueueMessage struct {
+	ID            string
+	Payload       []byte
+	DeliveryCount int64
+	raw           any
 }
 
 type ClickHousePendingWriter struct {
-	client     *redis.Client
+	queue      pendingQueue
 	clickhouse clickHouseWriter
 	options    PendingWriterOptions
 	wake       chan struct{}
@@ -42,16 +53,18 @@ type pendingClickHouseRecord struct {
 }
 
 type claimedPendingRecord struct {
+	message pendingQueueMessage
 	payload string
 	record  pendingClickHouseRecord
 }
 
 type pendingRecordBatch struct {
-	klineClaims []claimedPendingRecord
+	klineClaims   []claimedPendingRecord
+	ackOnlyClaims []claimedPendingRecord
 }
 
 func NewClickHousePendingWriter(
-	client *redis.Client,
+	queue pendingQueue,
 	clickhouse clickHouseWriter,
 	options PendingWriterOptions,
 ) *ClickHousePendingWriter {
@@ -61,11 +74,11 @@ func NewClickHousePendingWriter(
 	if options.RetryBatch <= 0 {
 		options.RetryBatch = 100
 	}
-	if options.MaxPending <= 0 {
-		options.MaxPending = 100000
+	if options.MaxDeliveries <= 0 {
+		options.MaxDeliveries = 5
 	}
 	return &ClickHousePendingWriter{
-		client:     client,
+		queue:      queue,
 		clickhouse: clickhouse,
 		options:    options,
 		wake:       make(chan struct{}, 1),
@@ -101,9 +114,6 @@ func (w *ClickHousePendingWriter) EnqueueKlines(ctx context.Context, klines []mo
 }
 
 func (w *ClickHousePendingWriter) Run(ctx context.Context) error {
-	if err := w.recoverProcessing(ctx); err != nil {
-		return err
-	}
 	w.flushUntilIdleWithLogging(ctx)
 
 	ticker := time.NewTicker(w.options.RetryInterval)
@@ -124,6 +134,13 @@ func (w *ClickHousePendingWriter) Run(ctx context.Context) error {
 	}
 }
 
+func (w *ClickHousePendingWriter) Close() error {
+	if w == nil || w.queue == nil {
+		return nil
+	}
+	return w.queue.Close()
+}
+
 func waitPendingFlushDebounce(ctx context.Context, delay time.Duration) error {
 	if delay <= 0 {
 		return nil
@@ -142,7 +159,10 @@ func (w *ClickHousePendingWriter) enqueueMany(ctx context.Context, records []pen
 	if len(records) == 0 {
 		return nil
 	}
-	payloads := make([]any, 0, len(records))
+	if w == nil || w.queue == nil {
+		return fmt.Errorf("clickhouse pending queue is nil")
+	}
+	payloads := make([][]byte, 0, len(records))
 	for _, record := range records {
 		payload, err := json.Marshal(record)
 		if err != nil {
@@ -150,10 +170,7 @@ func (w *ClickHousePendingWriter) enqueueMany(ctx context.Context, records []pen
 		}
 		payloads = append(payloads, payload)
 	}
-	pipe := w.client.TxPipeline()
-	pipe.LPush(ctx, clickHousePendingKey, payloads...)
-	pipe.LTrim(ctx, clickHousePendingKey, 0, w.options.MaxPending-1)
-	if _, err := pipe.Exec(ctx); err != nil {
+	if err := w.queue.Publish(ctx, payloads); err != nil {
 		return fmt.Errorf("enqueue clickhouse pending record: %w", err)
 	}
 	w.signalFlush()
@@ -164,24 +181,6 @@ func (w *ClickHousePendingWriter) signalFlush() {
 	select {
 	case w.wake <- struct{}{}:
 	default:
-	}
-}
-
-func (w *ClickHousePendingWriter) recoverProcessing(ctx context.Context) error {
-	for {
-		_, err := w.client.LMove(
-			ctx,
-			clickHouseProcessingKey,
-			clickHousePendingKey,
-			"RIGHT",
-			"LEFT",
-		).Result()
-		if errors.Is(err, redis.Nil) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("recover clickhouse processing queue: %w", err)
-		}
 	}
 }
 
@@ -232,31 +231,32 @@ func shouldContinuePendingFlush(count int, retryBatch int) bool {
 }
 
 func (w *ClickHousePendingWriter) Flush(ctx context.Context) (int, error) {
-	claims := make([]claimedPendingRecord, 0, w.options.RetryBatch)
-	for len(claims) < w.options.RetryBatch {
-		payload, err := w.client.LMove(
-			ctx,
-			clickHousePendingKey,
-			clickHouseProcessingKey,
-			"RIGHT",
-			"LEFT",
-		).Result()
-		if errors.Is(err, redis.Nil) {
-			return w.writeClaimedRecords(ctx, claims)
-		}
-		if err != nil {
-			return 0, fmt.Errorf("claim clickhouse pending record: %w", err)
-		}
-
+	if w == nil || w.queue == nil {
+		return 0, nil
+	}
+	messages, err := w.queue.Fetch(ctx, w.options.RetryBatch, w.options.RetryInterval)
+	if err != nil {
+		return 0, fmt.Errorf("claim clickhouse pending record: %w", err)
+	}
+	claims := make([]claimedPendingRecord, 0, len(messages))
+	for _, message := range messages {
+		payload := string(message.Payload)
 		record, err := decodePendingRecord(payload)
 		if err != nil {
-			if removeErr := w.removeProcessing(ctx, payload); removeErr != nil {
-				return 0, removeErr
+			if deadErr := w.queue.DeadLetter(ctx, message, err.Error()); deadErr != nil {
+				return 0, deadErr
+			}
+			if ackErr := w.queue.Ack(ctx, []pendingQueueMessage{message}); ackErr != nil {
+				return 0, ackErr
 			}
 			slog.Error("drop invalid clickhouse pending record", "error", err)
 			continue
 		}
-		claims = append(claims, claimedPendingRecord{payload: payload, record: record})
+		claims = append(claims, claimedPendingRecord{
+			message: message,
+			payload: payload,
+			record:  record,
+		})
 	}
 	return w.writeClaimedRecords(ctx, claims)
 }
@@ -284,6 +284,12 @@ func (w *ClickHousePendingWriter) writeClaimedRecords(
 	}
 
 	flushed := 0
+	if len(batch.ackOnlyClaims) > 0 {
+		if err := w.ackClaims(ctx, batch.ackOnlyClaims); err != nil {
+			return flushed, err
+		}
+		flushed += len(batch.ackOnlyClaims)
+	}
 	if len(batch.klineClaims) > 0 {
 		if err := w.writeKlineClaims(ctx, batch.klineClaims); err != nil {
 			return flushed, err
@@ -295,7 +301,8 @@ func (w *ClickHousePendingWriter) writeClaimedRecords(
 
 func splitClaimedRecords(claims []claimedPendingRecord) (pendingRecordBatch, error) {
 	batch := pendingRecordBatch{
-		klineClaims: make([]claimedPendingRecord, 0, len(claims)),
+		klineClaims:   make([]claimedPendingRecord, 0, len(claims)),
+		ackOnlyClaims: make([]claimedPendingRecord, 0),
 	}
 	for _, claim := range claims {
 		switch claim.record.Kind {
@@ -303,6 +310,7 @@ func splitClaimedRecords(claims []claimedPendingRecord) (pendingRecordBatch, err
 			batch.klineClaims = append(batch.klineClaims, claim)
 		case "indicator":
 			slog.Info("drop legacy clickhouse indicator pending record")
+			batch.ackOnlyClaims = append(batch.ackOnlyClaims, claim)
 		default:
 			return pendingRecordBatch{}, fmt.Errorf("unsupported clickhouse pending kind %q", claim.record.Kind)
 		}
@@ -312,75 +320,46 @@ func splitClaimedRecords(claims []claimedPendingRecord) (pendingRecordBatch, err
 
 func (w *ClickHousePendingWriter) writeKlineClaims(ctx context.Context, claims []claimedPendingRecord) error {
 	klines := make([]model.Kline, 0, len(claims))
-	payloads := make([]string, 0, len(claims))
 	for _, claim := range claims {
 		klines = append(klines, claim.record.Kline)
-		payloads = append(payloads, claim.payload)
 	}
 	if err := w.clickhouse.WriteKlines(ctx, klines); err != nil {
-		if requeueErr := w.requeueClaims(ctx, claims, err); requeueErr != nil {
-			return requeueErr
+		if deadErr := w.deadLetterMaxDelivered(ctx, claims, err); deadErr != nil {
+			return deadErr
 		}
 		return err
 	}
-	return w.removeProcessingBatch(ctx, payloads)
+	return w.ackClaims(ctx, claims)
 }
 
-func (w *ClickHousePendingWriter) requeueClaims(
+func (w *ClickHousePendingWriter) deadLetterMaxDelivered(
 	ctx context.Context,
 	claims []claimedPendingRecord,
 	writeErr error,
 ) error {
+	if w.options.MaxDeliveries <= 0 {
+		return nil
+	}
 	for _, claim := range claims {
-		if err := w.requeue(ctx, claim.payload, claim.record, writeErr); err != nil {
+		if claim.message.DeliveryCount < int64(w.options.MaxDeliveries) {
+			continue
+		}
+		if err := w.queue.DeadLetter(ctx, claim.message, errorString(writeErr)); err != nil {
+			return err
+		}
+		if err := w.queue.Ack(ctx, []pendingQueueMessage{claim.message}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (w *ClickHousePendingWriter) requeue(
-	ctx context.Context,
-	payload string,
-	record pendingClickHouseRecord,
-	writeErr error,
-) error {
-	record.Attempts++
-	record.LastError = errorString(writeErr)
-	record.UpdatedAt = time.Now().UnixMilli()
-	updated, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("marshal clickhouse retry record: %w", err)
+func (w *ClickHousePendingWriter) ackClaims(ctx context.Context, claims []claimedPendingRecord) error {
+	messages := make([]pendingQueueMessage, 0, len(claims))
+	for _, claim := range claims {
+		messages = append(messages, claim.message)
 	}
-	pipe := w.client.TxPipeline()
-	pipe.LRem(ctx, clickHouseProcessingKey, 1, payload)
-	pipe.LPush(ctx, clickHousePendingKey, updated)
-	pipe.LTrim(ctx, clickHousePendingKey, 0, w.options.MaxPending-1)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("requeue clickhouse pending record: %w", err)
-	}
-	return nil
-}
-
-func (w *ClickHousePendingWriter) removeProcessing(ctx context.Context, payload string) error {
-	if err := w.client.LRem(ctx, clickHouseProcessingKey, 1, payload).Err(); err != nil {
-		return fmt.Errorf("remove clickhouse processing record: %w", err)
-	}
-	return nil
-}
-
-func (w *ClickHousePendingWriter) removeProcessingBatch(ctx context.Context, payloads []string) error {
-	if len(payloads) == 0 {
-		return nil
-	}
-	pipe := w.client.TxPipeline()
-	for _, payload := range payloads {
-		pipe.LRem(ctx, clickHouseProcessingKey, 1, payload)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("remove clickhouse processing records: %w", err)
-	}
-	return nil
+	return w.queue.Ack(ctx, messages)
 }
 
 func decodePendingRecord(payload string) (pendingClickHouseRecord, error) {
