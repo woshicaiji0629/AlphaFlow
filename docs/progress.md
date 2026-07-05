@@ -43,6 +43,13 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - 已复用公共策略、仓位管理、paper broker 和 route dispatcher 执行回测。
 - 回测仓位使用独立 `bt` scope 和 run id，不写在线 paper 仓位。
 - 已生成并持久化策略事件、回测交易明细和 run 级摘要。
+- 已支持基础回测报告计算和可选 JSON 文件输出，包括 trade 级权益曲线、逐 K 浮动权益曲线、组合权益曲线、模拟账户资金曲线、最大回撤、胜率、profit factor 和连续亏损统计。
+- 回测模拟账户已纳入初始资金、保证金占用、手续费、返佣、可用余额检查和账户权益归零爆仓处理。
+- 回测 run summary 已优先采用模拟账户最终净值、账户回撤、手续费、返佣和爆仓状态作为账户级报告口径。
+- 多 symbol 回测已按 K 线时间线归并执行，同一时间按 symbol 排序保证结果可复现。
+- 同一 K 线时间点的多 symbol 批次会先统一刷新价格和账户浮盈亏，再执行该批次信号和订单，并只生成一条账户快照。
+- 已新增静态 symbol capability，回测/paper 下单前会按 base/contract 单位、contract size、数量步长和最小名义金额做数量归一化。
+- 回测/paper broker 已支持固定 bps 滑点，买入按成交价上浮、卖出按成交价下浮，并可通过 backtest-engine 配置控制。
 
 ### 仓位和执行路由
 
@@ -70,11 +77,13 @@ ClickHouse 历史 K 线 / Redis 实时特征
 
 ## 已知问题
 
-- 回测还没有权益曲线、图表/文件报告和结果查询 API。
+- 回测还没有图表报告和结果查询 API。
 - 回测还没有参数化批量运行和策略参数配置入口。
+- 回测爆仓当前按账户权益归零处理，还没有接入交易所维持保证金、标记价格和阶梯强平公式。
+- 回测滑点当前是固定 bps 模型，还没有按盘口深度、成交量、波动率或订单大小动态估算。
 - position-engine 还没有 `backtest` / `live` / `notify` handler。
 - 真实交易所 order executor 尚未实现。
-- 交易所 symbol 精度、张数、最小下单量和合约面值换算尚未实现。
+- 交易所 symbol capability 目前来自静态配置，尚未接交易所 API 自动同步。
 - 订单服务级幂等落库和重复订单意图拦截尚未实现。
 - 账户级实时风控尚未实现。
 - HTTP 健康检查接口尚未实现。
@@ -83,10 +92,10 @@ ClickHouse 历史 K 线 / Redis 实时特征
 
 ## 建议下一步
 
-1. 补回测权益曲线、报告输出和结果查询入口。
+1. 补回测图表报告和结果查询入口。
 2. 补回测参数化运行和策略配置加载。
 3. 实现 position-engine 的 notify handler。
-4. 增加交易所 symbol capability 缓存和数量换算。
+4. 增加交易所 symbol capability 自动同步和缓存。
 5. 明确过期策略反向退出但无 exit rule 时的 action 协议。
 6. 拆出真实 order executor 服务。
 7. 接入 testnet。
@@ -100,4 +109,4 @@ ClickHouse 历史 K 线 / Redis 实时特征
 GO111MODULE=on go test ./...
 ```
 
-本文档更新只涉及文档，不改变运行时代码。
+本轮回测账户、报告、symbol capability 和滑点更新包含 Go 代码和文档进度同步。

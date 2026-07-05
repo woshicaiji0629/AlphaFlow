@@ -31,9 +31,21 @@ leverage = 20
 fee_rate = 0.001
 rebate_pct = 10
 
+[execution]
+slippage_bps = 2
+
 [result]
 event_batch_size = 123
 trade_batch_size = 45
+report_json_path = " reports/backtest.json "
+
+[[symbol_specs]]
+symbol = "ethusdt"
+quantity_unit = "Base"
+quantity_step = 0.001
+min_quantity = 0.001
+min_notional = 5
+contract_size = 1
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -69,6 +81,19 @@ trade_batch_size = 45
 	if cfg.Result.TradeBatchSize != 45 {
 		t.Fatalf("trade batch size = %d, want 45", cfg.Result.TradeBatchSize)
 	}
+	if cfg.Result.ReportJSONPath != "reports/backtest.json" {
+		t.Fatalf("report json path = %q, want reports/backtest.json", cfg.Result.ReportJSONPath)
+	}
+	if cfg.Execution.SlippageBps != 2 {
+		t.Fatalf("slippage bps = %f, want 2", cfg.Execution.SlippageBps)
+	}
+	if len(cfg.SymbolSpecs) != 1 {
+		t.Fatalf("symbol specs len = %d, want 1", len(cfg.SymbolSpecs))
+	}
+	spec := cfg.SymbolSpecs[0]
+	if spec.Exchange != "binance" || spec.Market != "um" || spec.Symbol != "ETHUSDT" || spec.QuantityUnit != "base" {
+		t.Fatalf("symbol spec = %#v, want normalized exchange/market/symbol/unit", spec)
+	}
 }
 
 func TestLoadRejectsInvalidResultBatchSize(t *testing.T) {
@@ -97,6 +122,34 @@ trade_batch_size = 100
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("Load() error = nil, want result batch validation error")
+	}
+}
+
+func TestLoadRejectsNegativeSlippageBps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[runtime]
+run_id = "run-1"
+strategy_set = "supertrend"
+
+[data]
+exchange = "binance"
+market = "um"
+symbols = ["ETHUSDT"]
+interval = "3m"
+start_time = "2026-01-01T00:00:00Z"
+end_time = "2026-01-02T00:00:00Z"
+
+[execution]
+slippage_bps = -1
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want slippage validation error")
 	}
 }
 

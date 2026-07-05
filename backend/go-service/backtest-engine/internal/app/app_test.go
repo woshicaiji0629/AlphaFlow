@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"alphaflow/go-service/backtest-engine/internal/simulator"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
+	"alphaflow/go-service/pkg/symbolspec"
 )
 
 func TestRunLoadsHistoricalKlines(t *testing.T) {
@@ -94,6 +96,74 @@ output = "stdout"
 	}
 	if persistedStore.summary.RunID != "run-1" {
 		t.Fatalf("summary run id = %q, want run-1", persistedStore.summary.RunID)
+	}
+}
+
+func TestRunWritesBacktestReportJSONWhenConfigured(t *testing.T) {
+	originalBuilder := buildMarketStore
+	originalResultBuilder := buildResultStore
+	t.Cleanup(func() {
+		buildMarketStore = originalBuilder
+		buildResultStore = originalResultBuilder
+	})
+	startTime := mustParseTime(t, "2026-01-01T00:15:00Z")
+	endTime := mustParseTime(t, "2026-01-01T00:30:00Z")
+	store := &fakeMarketStore{
+		klinesBySeries: map[reader.SeriesKey][]marketmodel.Kline{
+			{Symbol: "ETHUSDT", Interval: "3m"}: appTestKlines("ETHUSDT", "3m", startTime.UnixMilli(), endTime.UnixMilli(), int64(3*time.Minute/time.Millisecond)),
+		},
+	}
+	buildMarketStore = func(ctx context.Context, cfg config.Config) (marketStore, error) {
+		return store, nil
+	}
+	buildResultStore = func(ctx context.Context, cfg config.Config) (resultStore, error) {
+		return &fakeResultStore{}, nil
+	}
+	reportPath := filepath.Join(t.TempDir(), "reports", "backtest.json")
+	path := writeConfig(t, `
+[runtime]
+run_id = "run-json"
+strategy_set = "supertrend"
+
+[data]
+exchange = "binance"
+market = "um"
+symbols = ["ETHUSDT"]
+interval = "3m"
+confirm_intervals = []
+warmup_bars = 0
+start_time = "2026-01-01T00:15:00Z"
+end_time = "2026-01-01T00:30:00Z"
+
+[result]
+event_batch_size = 1000
+trade_batch_size = 1000
+report_json_path = "`+reportPath+`"
+
+[clickhouse]
+enabled = true
+
+[logging]
+output = "stdout"
+`)
+
+	if err := Run(context.Background(), path); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	payload, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report json: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v payload=%s", err, payload)
+	}
+	summary := decoded["summary"].(map[string]any)
+	if summary["run_id"] != "run-json" {
+		t.Fatalf("summary run_id = %v, want run-json", summary["run_id"])
+	}
+	if decoded["account_equity_curve"] == nil {
+		t.Fatalf("decoded report keys = %#v, want account_equity_curve", decoded)
 	}
 }
 
@@ -330,6 +400,52 @@ func TestRunStrategyBacktestRejectsUnsupportedStrategySet(t *testing.T) {
 	}
 }
 
+func TestSortBacktestContextsOrdersByOpenTimeThenSymbol(t *testing.T) {
+	contexts := []strategy.Context{
+		appTestContext("ETHUSDT", "3m", 2000),
+		appTestContext("ETHUSDT", "3m", 1000),
+		appTestContext("BTCUSDT", "3m", 1000),
+	}
+
+	sortBacktestContexts(contexts)
+
+	want := []struct {
+		symbol   string
+		openTime int64
+	}{
+		{symbol: "BTCUSDT", openTime: 1000},
+		{symbol: "ETHUSDT", openTime: 1000},
+		{symbol: "ETHUSDT", openTime: 2000},
+	}
+	for index, item := range contexts {
+		if item.Target.Symbol != want[index].symbol || contextOpenTime(item) != want[index].openTime {
+			t.Fatalf("context[%d] = %s/%d, want %s/%d", index, item.Target.Symbol, contextOpenTime(item), want[index].symbol, want[index].openTime)
+		}
+	}
+}
+
+func TestSymbolCapabilitiesBuildsLookupMap(t *testing.T) {
+	capabilities := symbolCapabilities(config.Config{
+		SymbolSpecs: []config.SymbolSpecConfig{{
+			Exchange:     "binance",
+			Market:       "um",
+			Symbol:       "ETHUSDT",
+			QuantityUnit: "base",
+			QuantityStep: 0.001,
+			MinNotional:  5,
+			ContractSize: 1,
+		}},
+	})
+
+	capability, ok := capabilities[symbolspec.NewKey("BINANCE", "UM", "ethusdt")]
+	if !ok {
+		t.Fatalf("capability missing from lookup: %#v", capabilities)
+	}
+	if capability.Symbol != "ETHUSDT" || capability.QuantityStep != 0.001 || capability.MinNotional != 5 {
+		t.Fatalf("capability = %#v, want normalized symbol spec", capability)
+	}
+}
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -346,6 +462,22 @@ func mustParseTime(t *testing.T, value string) time.Time {
 		t.Fatalf("parse time: %v", err)
 	}
 	return parsed
+}
+
+func appTestContext(symbol string, interval string, openTime int64) strategy.Context {
+	return strategy.Context{
+		Target: strategy.Target{
+			Symbol:   symbol,
+			Interval: interval,
+		},
+		Snapshots: map[string]strategy.Snapshot{
+			interval: {
+				Current: marketmodel.Kline{
+					OpenTime: openTime,
+				},
+			},
+		},
+	}
 }
 
 func appTestKlines(symbol string, interval string, start int64, end int64, intervalMillis int64) []marketmodel.Kline {

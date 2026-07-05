@@ -11,6 +11,7 @@ import (
 	"alphaflow/go-service/pkg/position"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategyroute"
+	"alphaflow/go-service/pkg/symbolspec"
 )
 
 type FeeConfig struct {
@@ -19,8 +20,9 @@ type FeeConfig struct {
 }
 
 type SizingConfig struct {
-	MarginQuote float64
-	Leverage    float64
+	MarginQuote  float64
+	Leverage     float64
+	Capabilities map[symbolspec.Key]symbolspec.Capability
 }
 
 type Options struct {
@@ -80,7 +82,7 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 		return err
 	}
 	plan := h.positionManager.PlanWithPrice(result, currentPosition, price)
-	orderPlan, err := h.orderPlanWithQuantity(*plan, price)
+	orderPlan, err := h.orderPlanWithQuantity(input.Target, *plan, price)
 	if err != nil {
 		return fmt.Errorf("build order quantity for strategy %s: %w", result.StrategyName, err)
 	}
@@ -142,7 +144,7 @@ func currentPrice(input strategy.Context) string {
 	return snapshot.Current.Close
 }
 
-func (h *Handler) orderPlanWithQuantity(plan strategy.OrderPlan, price string) (strategy.OrderPlan, error) {
+func (h *Handler) orderPlanWithQuantity(target strategy.Target, plan strategy.OrderPlan, price string) (strategy.OrderPlan, error) {
 	switch plan.Action {
 	case strategy.PositionActionOpenLong, strategy.PositionActionOpenShort:
 		if plan.TargetSize <= 0 {
@@ -154,6 +156,15 @@ func (h *Handler) orderPlanWithQuantity(plan strategy.OrderPlan, price string) (
 		value, ok := parseFloat(price)
 		if !ok || value <= 0 {
 			return strategy.OrderPlan{}, fmt.Errorf("price is required to convert quote notional to quantity")
+		}
+		capability, ok := h.sizingConfig.Capabilities[symbolspec.NewKey(target.Exchange, target.Market, target.Symbol)]
+		if ok {
+			order, err := symbolspec.NormalizeQuoteOrder(capability, value, plan.TargetSize)
+			if err != nil {
+				return strategy.OrderPlan{}, err
+			}
+			plan.TargetSize = order.Quantity
+			return plan, nil
 		}
 		plan.TargetSize = plan.TargetSize / value
 	}

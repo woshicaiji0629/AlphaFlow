@@ -11,13 +11,15 @@ import (
 )
 
 type Config struct {
-	Runtime    RuntimeConfig    `toml:"runtime"`
-	Data       DataConfig       `toml:"data"`
-	Sizing     SizingConfig     `toml:"sizing"`
-	Fee        FeeConfig        `toml:"fee"`
-	Result     ResultConfig     `toml:"result"`
-	ClickHouse ClickHouseConfig `toml:"clickhouse"`
-	Logging    LoggingConfig    `toml:"logging"`
+	Runtime     RuntimeConfig      `toml:"runtime"`
+	Data        DataConfig         `toml:"data"`
+	Sizing      SizingConfig       `toml:"sizing"`
+	Fee         FeeConfig          `toml:"fee"`
+	Execution   ExecutionConfig    `toml:"execution"`
+	Result      ResultConfig       `toml:"result"`
+	SymbolSpecs []SymbolSpecConfig `toml:"symbol_specs"`
+	ClickHouse  ClickHouseConfig   `toml:"clickhouse"`
+	Logging     LoggingConfig      `toml:"logging"`
 }
 
 type RuntimeConfig struct {
@@ -50,9 +52,26 @@ type FeeConfig struct {
 	RebatePct float64 `toml:"rebate_pct"`
 }
 
+type ExecutionConfig struct {
+	SlippageBps float64 `toml:"slippage_bps"`
+}
+
 type ResultConfig struct {
-	EventBatchSize int `toml:"event_batch_size"`
-	TradeBatchSize int `toml:"trade_batch_size"`
+	EventBatchSize int    `toml:"event_batch_size"`
+	TradeBatchSize int    `toml:"trade_batch_size"`
+	ReportJSONPath string `toml:"report_json_path"`
+}
+
+type SymbolSpecConfig struct {
+	Exchange     string  `toml:"exchange"`
+	Market       string  `toml:"market"`
+	Symbol       string  `toml:"symbol"`
+	PriceTick    float64 `toml:"price_tick"`
+	QuantityStep float64 `toml:"quantity_step"`
+	MinQuantity  float64 `toml:"min_quantity"`
+	MinNotional  float64 `toml:"min_notional"`
+	ContractSize float64 `toml:"contract_size"`
+	QuantityUnit string  `toml:"quantity_unit"`
 }
 
 type ClickHouseConfig struct {
@@ -188,6 +207,26 @@ func normalize(cfg *Config) {
 	for index, interval := range cfg.Data.ConfirmIntervals {
 		cfg.Data.ConfirmIntervals[index] = strings.TrimSpace(interval)
 	}
+	for index := range cfg.SymbolSpecs {
+		spec := &cfg.SymbolSpecs[index]
+		spec.Exchange = strings.ToLower(strings.TrimSpace(spec.Exchange))
+		if spec.Exchange == "" {
+			spec.Exchange = cfg.Data.Exchange
+		}
+		spec.Market = strings.ToLower(strings.TrimSpace(spec.Market))
+		if spec.Market == "" {
+			spec.Market = cfg.Data.Market
+		}
+		spec.Symbol = strings.ToUpper(strings.TrimSpace(spec.Symbol))
+		spec.QuantityUnit = strings.ToLower(strings.TrimSpace(spec.QuantityUnit))
+		if spec.QuantityUnit == "" {
+			spec.QuantityUnit = "base"
+		}
+		if spec.ContractSize <= 0 {
+			spec.ContractSize = 1
+		}
+	}
+	cfg.Result.ReportJSONPath = strings.TrimSpace(cfg.Result.ReportJSONPath)
 }
 
 func validate(cfg Config) error {
@@ -196,7 +235,9 @@ func validate(cfg Config) error {
 		validateData,
 		validateSizing,
 		validateFee,
+		validateExecution,
 		validateResult,
+		validateSymbolSpecs,
 		validateClickHouse,
 	}
 	for _, validator := range validators {
@@ -281,12 +322,54 @@ func validateFee(cfg Config) error {
 	return nil
 }
 
+func validateExecution(cfg Config) error {
+	if cfg.Execution.SlippageBps < 0 {
+		return fmt.Errorf("execution.slippage_bps cannot be negative")
+	}
+	return nil
+}
+
 func validateResult(cfg Config) error {
 	if cfg.Result.EventBatchSize <= 0 {
 		return fmt.Errorf("result.event_batch_size must be positive")
 	}
 	if cfg.Result.TradeBatchSize <= 0 {
 		return fmt.Errorf("result.trade_batch_size must be positive")
+	}
+	return nil
+}
+
+func validateSymbolSpecs(cfg Config) error {
+	for index, spec := range cfg.SymbolSpecs {
+		if spec.Exchange == "" {
+			return fmt.Errorf("symbol_specs[%d].exchange cannot be empty", index)
+		}
+		if spec.Market == "" {
+			return fmt.Errorf("symbol_specs[%d].market cannot be empty", index)
+		}
+		if spec.Symbol == "" {
+			return fmt.Errorf("symbol_specs[%d].symbol cannot be empty", index)
+		}
+		if spec.PriceTick < 0 {
+			return fmt.Errorf("symbol_specs[%d].price_tick cannot be negative", index)
+		}
+		if spec.QuantityStep < 0 {
+			return fmt.Errorf("symbol_specs[%d].quantity_step cannot be negative", index)
+		}
+		if spec.MinQuantity < 0 {
+			return fmt.Errorf("symbol_specs[%d].min_quantity cannot be negative", index)
+		}
+		if spec.MinNotional < 0 {
+			return fmt.Errorf("symbol_specs[%d].min_notional cannot be negative", index)
+		}
+		if spec.ContractSize <= 0 {
+			return fmt.Errorf("symbol_specs[%d].contract_size must be positive", index)
+		}
+		switch spec.QuantityUnit {
+		case "base", "contract":
+		default:
+			return fmt.Errorf("symbol_specs[%d].quantity_unit must be base or contract", index)
+		}
 	}
 	return nil
 }

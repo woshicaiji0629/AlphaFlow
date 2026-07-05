@@ -53,6 +53,38 @@ func TestPaperBrokerUsesIntentReferencePrice(t *testing.T) {
 	}
 }
 
+func TestPaperBrokerAppliesSlippageBySide(t *testing.T) {
+	broker := NewPaperBrokerWithOptions(PaperBrokerOptions{
+		Price:       "100",
+		SlippageBps: 10,
+	})
+
+	buyReport, err := broker.Execute(context.Background(), OrderIntent{
+		IntentID: "buy",
+		Type:     OrderTypeMarket,
+		Side:     OrderSideBuy,
+		Quantity: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buyReport.AveragePrice != "100.1" {
+		t.Fatalf("buy average price = %q, want 100.1", buyReport.AveragePrice)
+	}
+	sellReport, err := broker.Execute(context.Background(), OrderIntent{
+		IntentID: "sell",
+		Type:     OrderTypeMarket,
+		Side:     OrderSideSell,
+		Quantity: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sellReport.AveragePrice != "99.9" {
+		t.Fatalf("sell average price = %q, want 99.9", sellReport.AveragePrice)
+	}
+}
+
 func TestPaperBrokerRejectsMissingFillPrice(t *testing.T) {
 	broker := NewPaperBroker("", nil)
 

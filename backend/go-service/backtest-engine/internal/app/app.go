@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
 
 	"alphaflow/go-service/backtest-engine/internal/config"
 	"alphaflow/go-service/backtest-engine/internal/reader"
+	"alphaflow/go-service/backtest-engine/internal/report"
 	"alphaflow/go-service/backtest-engine/internal/simulator"
 	"alphaflow/go-service/pkg/clickhousemarket"
 	"alphaflow/go-service/pkg/logger"
@@ -14,6 +18,7 @@ import (
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategyregistry"
+	"alphaflow/go-service/pkg/symbolspec"
 )
 
 type marketStore interface {
@@ -114,8 +119,47 @@ func Run(ctx context.Context, configPath string) error {
 		"total_trades", summary.RunSummary.TotalTrades,
 		"win_rate", summary.RunSummary.WinRate,
 		"net_pnl", summary.RunSummary.NetPnL,
+		"max_drawdown", summary.RunSummary.MaxDrawdown,
 		"profit_factor", summary.RunSummary.ProfitFactor,
 	)
+	item, err := report.BuildBacktestReportWithInitialEquity(summary.RunSummary, report.RunStats{
+		Contexts:      summary.Contexts,
+		Decisions:     summary.Decisions,
+		Results:       summary.Results,
+		Events:        summary.Events,
+		OrderFills:    summary.OrderFills,
+		OpenPositions: summary.OpenPositions,
+	}, summary.BacktestTrades, cfg.Sizing.InitialEquity, summary.BarEquityCurve)
+	if err != nil {
+		return fmt.Errorf("build backtest report: %w", err)
+	}
+	if len(summary.AccountCurve) > 0 {
+		item.AccountEquityCurve = summary.AccountCurve
+	}
+	slog.Info("backtest report", "report", report.FormatBacktestReport(item))
+	if err := writeBacktestReportJSON(cfg.Result.ReportJSONPath, item); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeBacktestReportJSON(path string, item report.BacktestReport) error {
+	if path == "" {
+		return nil
+	}
+	payload, err := report.MarshalBacktestReport(item)
+	if err != nil {
+		return fmt.Errorf("marshal backtest report json: %w", err)
+	}
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create backtest report dir: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		return fmt.Errorf("write backtest report json: %w", err)
+	}
 	return nil
 }
 
@@ -207,9 +251,18 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 			RebatePct: cfg.Fee.RebatePct,
 		},
 		SizingConfig: paperhandler.SizingConfig{
-			MarginQuote: cfg.Sizing.MarginQuote,
-			Leverage:    cfg.Sizing.Leverage,
+			MarginQuote:  cfg.Sizing.MarginQuote,
+			Leverage:     cfg.Sizing.Leverage,
+			Capabilities: symbolCapabilities(cfg),
 		},
+		AccountConfig: simulator.AccountConfig{
+			InitialEquity: cfg.Sizing.InitialEquity,
+			MarginQuote:   cfg.Sizing.MarginQuote,
+			Leverage:      cfg.Sizing.Leverage,
+			FeeRate:       cfg.Fee.FeeRate,
+			RebatePct:     cfg.Fee.RebatePct,
+		},
+		SlippageBps: cfg.Execution.SlippageBps,
 	})
 	if err != nil {
 		return simulator.ExecutionSummary{}, err
@@ -223,6 +276,7 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		return simulator.ExecutionSummary{}, err
 	}
 	summary := simulator.ExecutionSummary{}
+	contexts := []strategy.Context{}
 	for _, symbol := range cfg.Data.Symbols {
 		target := strategy.Target{
 			Exchange: cfg.Data.Exchange,
@@ -241,34 +295,30 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		if err != nil {
 			return simulator.ExecutionSummary{}, err
 		}
-		contexts, err := builder.Build(ctx)
+		symbolContexts, err := builder.Build(ctx)
 		if err != nil {
 			return simulator.ExecutionSummary{}, err
 		}
-		symbolSummary, err := executor.Execute(ctx, contexts)
-		if err != nil {
-			return simulator.ExecutionSummary{}, fmt.Errorf("execute backtest symbol=%s: %w", symbol, err)
-		}
-		summary.Contexts += symbolSummary.Contexts
-		summary.Decisions += symbolSummary.Decisions
-		summary.Results += symbolSummary.Results
-		summary.Events = symbolSummary.Events
-		summary.OrderFills = symbolSummary.OrderFills
-		summary.OpenPositions = symbolSummary.OpenPositions
-		summary.StrategyEvents = symbolSummary.StrategyEvents
+		contexts = append(contexts, symbolContexts...)
+	}
+	sortBacktestContexts(contexts)
+	summary, err = executor.Execute(ctx, contexts)
+	if err != nil {
+		return simulator.ExecutionSummary{}, fmt.Errorf("execute backtest: %w", err)
 	}
 	trades, err := simulator.BuildBacktestTrades(store.Events())
 	if err != nil {
 		return simulator.ExecutionSummary{}, err
 	}
 	runSummary := simulator.BuildBacktestRunSummary(store.Events(), simulator.SummaryOptions{
-		RunID:       cfg.Runtime.RunID,
-		StrategySet: cfg.Runtime.StrategySet,
-		Exchange:    cfg.Data.Exchange,
-		Market:      cfg.Data.Market,
-		Symbols:     cfg.Data.Symbols,
-		StartTime:   startTime.UnixMilli(),
-		EndTime:     endTime.UnixMilli(),
+		RunID:        cfg.Runtime.RunID,
+		StrategySet:  cfg.Runtime.StrategySet,
+		Exchange:     cfg.Data.Exchange,
+		Market:       cfg.Data.Market,
+		Symbols:      cfg.Data.Symbols,
+		AccountCurve: summary.AccountCurve,
+		StartTime:    startTime.UnixMilli(),
+		EndTime:      endTime.UnixMilli(),
 	})
 	if err := store.SaveBacktestRunSummary(ctx, runSummary); err != nil {
 		return simulator.ExecutionSummary{}, err
@@ -279,6 +329,39 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 	summary.BacktestTrades = trades
 	summary.RunSummary = runSummary
 	return summary, nil
+}
+
+func symbolCapabilities(cfg config.Config) map[symbolspec.Key]symbolspec.Capability {
+	if len(cfg.SymbolSpecs) == 0 {
+		return nil
+	}
+	capabilities := make(map[symbolspec.Key]symbolspec.Capability, len(cfg.SymbolSpecs))
+	for _, item := range cfg.SymbolSpecs {
+		capability := symbolspec.Normalize(symbolspec.Capability{
+			Exchange:     item.Exchange,
+			Market:       item.Market,
+			Symbol:       item.Symbol,
+			PriceTick:    item.PriceTick,
+			QuantityStep: item.QuantityStep,
+			MinQuantity:  item.MinQuantity,
+			MinNotional:  item.MinNotional,
+			ContractSize: item.ContractSize,
+			QuantityUnit: item.QuantityUnit,
+		})
+		capabilities[capability.Key()] = capability
+	}
+	return capabilities
+}
+
+func sortBacktestContexts(contexts []strategy.Context) {
+	sort.SliceStable(contexts, func(i, j int) bool {
+		leftTime := contextOpenTime(contexts[i])
+		rightTime := contextOpenTime(contexts[j])
+		if leftTime == rightTime {
+			return contexts[i].Target.Symbol < contexts[j].Target.Symbol
+		}
+		return leftTime < rightTime
+	})
 }
 
 func contextOpenTime(item strategy.Context) int64 {

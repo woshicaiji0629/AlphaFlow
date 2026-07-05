@@ -9,6 +9,7 @@ import (
 	"alphaflow/go-service/pkg/position"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategyroute"
+	"alphaflow/go-service/pkg/symbolspec"
 )
 
 func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
@@ -72,5 +73,83 @@ func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
 	}
 	if events[0].EventType != strategy.EventTypeSignalGenerated {
 		t.Fatalf("first event = %q, want signal_generated", events[0].EventType)
+	}
+}
+
+func TestHandlerUsesSymbolCapabilityForContractQuantity(t *testing.T) {
+	store := position.NewMemoryStore()
+	handler, err := New(Options{
+		PositionManager: position.NewManager(position.ManagerConfig{
+			MarginQuote:       100,
+			Leverage:          1,
+			MinOpenConfidence: 0.5,
+		}),
+		PositionStore: store,
+		EventStore:    store,
+		Broker:        execution.NewPaperBroker("10", func() int64 { return 2000 }),
+		SizingConfig: SizingConfig{
+			MarginQuote: 100,
+			Leverage:    1,
+			Capabilities: map[symbolspec.Key]symbolspec.Capability{
+				symbolspec.NewKey("gate", "um", "BTCUSDT"): {
+					Exchange:     "gate",
+					Market:       "um",
+					Symbol:       "BTCUSDT",
+					QuantityUnit: symbolspec.QuantityUnitContract,
+					QuantityStep: 1,
+					MinQuantity:  1,
+					MinNotional:  5,
+					ContractSize: 0.1,
+				},
+			},
+		},
+		Now: func() int64 { return 2000 },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	input := strategy.Context{
+		Target: strategy.Target{
+			Scope:    strategy.PositionScopeBacktest,
+			RunID:    "run-1",
+			Exchange: "gate",
+			Market:   "um",
+			Symbol:   "BTCUSDT",
+			Interval: "3m",
+		},
+		Snapshots: map[string]strategy.Snapshot{
+			"3m": {Current: marketmodel.Kline{Close: "10"}},
+		},
+		Positions: map[string]*strategy.Position{"supertrend": nil},
+	}
+	result := strategy.Result{
+		StrategyName: "supertrend",
+		Signal: strategy.Signal{
+			Strategy:   "supertrend",
+			Side:       strategy.SignalSideBuy,
+			Confidence: 0.9,
+			OpenTime:   1000,
+		},
+	}
+
+	if err := handler.HandleResult(context.Background(), input, result, strategyroute.Route{Sink: strategyroute.SinkBacktest}); err != nil {
+		t.Fatalf("HandleResult() error = %v", err)
+	}
+	currentPosition, err := store.GetPosition(context.Background(), position.Key{
+		Scope:        strategy.PositionScopeBacktest,
+		RunID:        "run-1",
+		Exchange:     "gate",
+		Market:       "um",
+		Symbol:       "BTCUSDT",
+		StrategyName: "supertrend",
+	})
+	if err != nil {
+		t.Fatalf("GetPosition() error = %v", err)
+	}
+	if currentPosition == nil {
+		t.Fatal("position = nil, want opened position")
+	}
+	if currentPosition.Size != 100 {
+		t.Fatalf("position size = %f, want 100 contracts", currentPosition.Size)
 	}
 }

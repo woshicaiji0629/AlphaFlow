@@ -24,9 +24,23 @@ disable_short_exposure = false
 fee_rate = 0.0006
 rebate_pct = 0
 
+[execution]
+slippage_bps = 2
+
 [result]
 event_batch_size = 1000
 trade_batch_size = 1000
+report_json_path = "../../logs/go-service/backtest-report.json"
+
+[[symbol_specs]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+quantity_unit = "base"
+quantity_step = 0.001
+min_quantity = 0.001
+min_notional = 5
+contract_size = 1
 
 [clickhouse]
 enabled = true
