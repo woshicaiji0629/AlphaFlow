@@ -12,6 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type natsConnection struct {
+	*nats.Conn
+	JetStreamContext nats.JetStreamContext
+}
+
 type queueStatusTarget struct {
 	Name     string
 	Stream   string
@@ -69,20 +74,29 @@ func runQueueStatus(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	conn, err := nats.Connect(cfg.NATS.URL)
+	conn, err := connectNATS(cfg.NATS.URL)
 	if err != nil {
-		return fmt.Errorf("connect nats: %w", err)
+		return err
 	}
 	defer conn.Close()
-	js, err := conn.JetStream()
-	if err != nil {
-		return fmt.Errorf("create nats jetstream context: %w", err)
-	}
-	rows, err := buildQueueStatusRows(ctx, js, queueStatusTargets)
+	rows, err := buildQueueStatusRows(ctx, conn.JetStreamContext, queueStatusTargets)
 	if err != nil {
 		return err
 	}
 	return printQueueStatusRows(rows)
+}
+
+func connectNATS(url string) (*natsConnection, error) {
+	conn, err := nats.Connect(url)
+	if err != nil {
+		return nil, fmt.Errorf("connect nats: %w", err)
+	}
+	js, err := conn.JetStream()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("create nats jetstream context: %w", err)
+	}
+	return &natsConnection{Conn: conn, JetStreamContext: js}, nil
 }
 
 func buildQueueStatusRows(

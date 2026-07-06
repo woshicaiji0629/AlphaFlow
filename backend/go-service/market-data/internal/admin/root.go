@@ -74,6 +74,7 @@ not include the 2026-07-01 00:00 opening kline.
 			"market-data-admin --config configs/market-data.local.toml backfill --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m,10m,15m,30m,1h,2h,4h --start 202606010000 --end 202607010000\n" +
 			"market-data-admin --config configs/market-data.local.toml backfill --async --exchange binance --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
 			"market-data-admin --config configs/market-data.local.toml queue-status\n" +
+			"market-data-admin --config configs/market-data.local.toml market-health --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m\n" +
 			"market-data-admin --config configs/market-data.local.toml stats --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
 			"market-data-admin --config configs/market-data.local.toml duplicates --exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m --start 202606010000 --end 202607010000\n" +
 			"market-data-admin --config configs/market-data.local.toml delete --exchange binance --market um --symbol ETHUSDT --interval 1m --start 202606010000 --end 202607010000",
@@ -84,6 +85,7 @@ not include the 2026-07-01 00:00 opening kline.
 	cmd.AddCommand(newBackfillCommand(ctx, &opts))
 	cmd.AddCommand(newBackfillWorkerCommand(ctx, &opts))
 	cmd.AddCommand(newQueueStatusCommand(ctx, &opts))
+	cmd.AddCommand(newMarketHealthCommand(ctx, &opts))
 	cmd.AddCommand(newStatsCommand(ctx, &opts))
 	cmd.AddCommand(newDuplicatesCommand(ctx, &opts))
 	cmd.AddCommand(newDeleteCommand(ctx, &opts))

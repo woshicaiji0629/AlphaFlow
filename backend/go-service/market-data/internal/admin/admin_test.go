@@ -2,12 +2,15 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/model"
 	"alphaflow/go-service/pkg/marketmodel"
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 )
 
@@ -60,6 +63,81 @@ func TestParseListTrimsAndDeduplicates(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("parseList[%d] = %q, want %q", index, got[index], want[index])
 		}
+	}
+}
+
+type fakeRedisStringGetter struct {
+	values map[string]string
+}
+
+func (g fakeRedisStringGetter) Get(_ context.Context, key string) *redis.StringCmd {
+	cmd := redis.NewStringCmd(context.Background())
+	if value, ok := g.values[key]; ok {
+		cmd.SetVal(value)
+		return cmd
+	}
+	cmd.SetErr(redis.Nil)
+	return cmd
+}
+
+func TestValidateMarketHealthOptions(t *testing.T) {
+	opts := marketHealthOptions{
+		exchange:  "binance",
+		market:    "um",
+		symbol:    "ETHUSDT",
+		intervals: []string{"1m", "3m"},
+	}
+	if err := validateMarketHealthOptions(opts); err != nil {
+		t.Fatalf("validateMarketHealthOptions() error = %v", err)
+	}
+
+	opts.intervals = []string{"bad"}
+	if err := validateMarketHealthOptions(opts); err == nil {
+		t.Fatal("validateMarketHealthOptions() error = nil, want invalid interval error")
+	}
+}
+
+func TestReadMarketHealthRowsMarksMissingAndReady(t *testing.T) {
+	health := model.DataHealth{
+		Exchange:              "binance",
+		Market:                "um",
+		Symbol:                "ETHUSDT",
+		Interval:              "1m",
+		KlineStatus:           model.HealthStatusOK,
+		IndicatorStatus:       model.HealthStatusOK,
+		LastKlineOpenTime:     1000,
+		LastIndicatorOpenTime: 1000,
+		UpdatedAt:             1100,
+	}
+	payload, err := json.Marshal(health)
+	if err != nil {
+		t.Fatalf("marshal health: %v", err)
+	}
+	opts := marketHealthOptions{
+		exchange:  "binance",
+		market:    "um",
+		symbol:    "ETHUSDT",
+		intervals: []string{"1m", "3m"},
+	}
+	rows, err := readMarketHealthRows(context.Background(), fakeRedisStringGetter{
+		values: map[string]string{
+			model.DataHealthKey("binance", "um", "ETHUSDT", "1m"): string(payload),
+		},
+	}, opts)
+	if err != nil {
+		t.Fatalf("readMarketHealthRows() error = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if !rows[0].Ready {
+		t.Fatalf("rows[0].Ready = false, want true")
+	}
+	if rows[1].Status != "missing" || rows[1].Ready {
+		t.Fatalf("rows[1] = %#v, want missing and not ready", rows[1])
+	}
+	if marketHealthReady(rows) {
+		t.Fatal("marketHealthReady() = true, want false with missing interval")
 	}
 }
 

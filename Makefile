@@ -47,6 +47,7 @@ help:
 	@echo "  make market-data-down  Stop market-data"
 	@echo "  make market-data-logs  Tail market-data logs"
 	@echo "  make queue-status      Print NATS JetStream queue lag"
+	@echo "  make market-health     Print Redis market health and NATS queue lag"
 	@echo "  make kline-check       Run kline integrity check with ClickHouse only"
 	@echo "  make kline-backfill    Run kline backfill with ClickHouse only"
 	@echo "  make kline-delete-dryrun  Preview kline delete range with ClickHouse only"
@@ -216,6 +217,10 @@ market-data-logs:
 .PHONY: queue-status
 queue-status:
 	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data-admin --config configs/market-data.local.toml queue-status
+
+.PHONY: market-health
+market-health:
+	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data-admin --config configs/market-data.local.toml market-health $(ARGS)
 
 .PHONY: kline-check
 kline-check:
