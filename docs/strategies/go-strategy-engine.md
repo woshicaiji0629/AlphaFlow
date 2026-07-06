@@ -14,6 +14,8 @@
 - 在线服务入口：`strategy-engine/cmd/strategy-engine`
 - 在线配置加载：`strategy-engine/internal/config`
 - Redis snapshot reader：`strategy-engine/internal/reader`
+- NATS market snapshot 协议：`pkg/marketbus`
+- 在线内存市场态：`strategy-engine/internal/marketstate`
 - 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - 独立回测引擎入口、历史读取、滚动 snapshot、模拟成交和结果持久化：`backtest-engine`
@@ -52,7 +54,7 @@
 - 策略加载通过 registry 完成；在线可以同时运行多个策略，离线回测一般一次只回测一个策略。
 - Python 策略框架只作为旧原型参考，不作为新架构依赖。
 - 策略引擎只产出策略结果，并通过策略决策总线交给下游路由服务。
-- 服务间策略决策使用 NATS JetStream；Redis 只保留缓存、特征和当前态，不作为队列。
+- 服务间行情快照和策略决策使用 NATS JetStream；Redis 只保留缓存、特征恢复数据和当前态，不作为队列。
 - 真实订单状态机后续拆到订单服务。
 
 核心要求是在线和回测共享同一套策略逻辑，入口、配置、数据来源、信号路由、成交模型和持久化范围保持独立。
@@ -148,6 +150,7 @@ backend/go-service/pkg/execution/paper.go
 
 - 从 `PositionStore` 读取每个策略的当前仓位
 - 调用 `strategy.Engine`
+- 在行情输入降级时拒绝新开仓，保留平仓、减仓和止损等退出路径
 - 将 `strategy.Decision` 交给 decision publisher
 
 `runner` 不负责：
@@ -279,6 +282,52 @@ expires_at
 
 `signal_id` 是 envelope 级幂等和追踪标识，基于 target 以及每个 result 的 `strategy_name`、`signal.strategy`、`signal.side`、`signal.open_time` 生成；result 顺序变化不会改变 envelope 级 `signal_id`。`position-engine` 处理时会进一步使用 `NewResultSignalID(target, result)` 生成 result-level 幂等 key。
 
+### `pkg/marketbus`
+
+职责：
+
+- 定义 `market-data -> strategy-engine` 的 market snapshot envelope。
+- 区分已收盘 K 线指标和当前未收盘 K 线实时指标。
+- 提供 `created_at` / `expires_at` 实时性边界和 `trace_id`。
+- 提供 NATS JetStream 发布、durable consumer 创建、读取、dead-letter 和 Ack 能力。
+
+关键文件：
+
+```text
+backend/go-service/pkg/marketbus/snapshot.go
+backend/go-service/pkg/marketbus/nats.go
+```
+
+当前默认协议：
+
+```text
+stream: ALPHAFLOW_MARKET
+closed_subject: market.snapshot.closed
+realtime_subject: market.snapshot.realtime
+durable: strategy-engine-market
+dead_letter_subject: market.snapshot.dead
+max_message_age: 10s
+realtime_stale_after: 15s
+```
+
+`market.snapshot.closed` 携带已收盘底层指标和窗口特征；`market.snapshot.realtime` 携带当前未收盘 K 线、实时指标和价格上下文。Redis `indwin` / `indrt` 仍作为启动恢复、故障恢复、观测和兼容缓存。
+
+### `strategy-engine/internal/marketstate`
+
+职责：
+
+- 启动时接收 Redis reader 构造出的 `strategy.Context` 作为初始市场态。
+- 启动后应用 NATS market snapshot 更新进程内市场态。
+- 按 target 和确认周期构造策略运行所需的 `strategy.Context`。
+- 校验消息实时性，拒绝过期、过旧和低版本 open time / updated at 消息覆盖内存态。
+- 判断行情输入是否降级，并把降级原因交给 runner。
+
+关键文件：
+
+```text
+backend/go-service/strategy-engine/internal/marketstate/state.go
+```
+
 ### `pkg/idempotency`
 
 职责：
@@ -323,8 +372,12 @@ backend/go-service/strategy-engine/internal/runner/
 当前在线路径：
 
 ```text
-Redis indwin / indrt
-  -> strategy-engine/internal/reader
+Redis indwin / indrt / health
+  -> strategy-engine/internal/reader（启动恢复）
+  -> strategy-engine/internal/marketstate
+
+NATS market.snapshot.closed / market.snapshot.realtime
+  -> strategy-engine/internal/marketstate（运行时更新）
   -> strategy.Snapshot
   -> strategy.Engine(Supertrend)
   -> strategy-engine/internal/runner
@@ -335,9 +388,12 @@ Redis indwin / indrt
 在线引擎职责：
 
 - 加载策略、交易对、周期和风控配置。
-- 从 Redis 读取实时指标特征和已收盘窗口特征。
+- 启动时从 Redis 读取实时指标特征和已收盘窗口特征，作为恢复初始态。
+- 启动后消费 NATS market snapshot 并维护内存市场态。
+- 校验 market snapshot 实时性，旧消息不覆盖新状态。
 - 构造公共 `strategy.Snapshot`。
 - 调用公共 `strategy.Engine`。
+- 当行情输入缺失或 stale 时降级，拒绝开新仓但保留退出路径。
 - 发布 `strategy.Decision`。
 - 输出运行日志。
 

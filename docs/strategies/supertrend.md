@@ -4,15 +4,21 @@
 
 SuperTrend 策略是当前第一版主策略原型。它不是单纯看 Supertrend 翻转，而是用 3 分钟触发信号入场，再通过多周期和窗口语义特征过滤假信号。
 
-当前实现位置：
+旧 Python 原型实现位置：
 
 ```text
 backend/python-service/alphaflow-core/src/alphaflow/strategy/strategies/supertrend.py
 ```
 
+当前 Go 在线实现位置：
+
+```text
+backend/go-service/pkg/strategies/supertrend/supertrend.go
+```
+
 ## 数据依赖
 
-策略优先消费 Go 聚合后的 Redis 特征 hash：
+Go 在线策略引擎消费 Go 聚合后的窗口特征：启动时可从 Redis 特征 hash 恢复初始态，启动后主要通过 NATS market snapshot 更新内存态。旧 Python 原型仍直接读取 Redis 特征 hash：
 
 ```text
 {exchange_code}:{market}:indwin:{symbol}:{interval}
@@ -24,7 +30,7 @@ backend/python-service/alphaflow-core/src/alphaflow/strategy/strategies/supertre
 - `indwin`：上一根已收盘 K 线对应的窗口分析结果。
 - `indrt`：当前未收盘 K 线的实时指标表现和 K 线基础信息。
 
-Python reader 会把这些 hash 解码成 `MarketSnapshot`：
+Go 在线路径会把 market snapshot / Redis 恢复数据构造成 `strategy.Snapshot`。旧 Python reader 会把这些 hash 解码成 `MarketSnapshot`：
 
 - `snapshot.indicator`：当前实时指标和当前价格相关字段。
 - `snapshot.indicator_window`：上一根已收盘 K 线的窗口聚合特征。

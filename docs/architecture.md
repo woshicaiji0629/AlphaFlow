@@ -16,7 +16,8 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 - 派生 K 线聚合，用于补齐交易所未直接提供的周期，例如 `10m`。
 - 基于已闭合 K 线的技术指标计算。
 - 基于底层指标序列的 Go 指标窗口聚合。
-- Redis 特征 hash，用于实时策略消费。
+- Redis 特征 hash，用于策略启动恢复、故障恢复、观测和兼容路径。
+- NATS JetStream market snapshot bus，用于 `market-data -> strategy-engine` 的实时特征同步。
 - Go `strategy-engine` 在线策略服务。
 - Go `backtest-engine` 回测入口、滚动 snapshot、模拟成交和结果持久化。
 - Go `position-engine` 仓位/执行路由服务，当前已接入 paper route。
@@ -81,7 +82,8 @@ Go 适合承担：
   -> backend/go-service/market-data
   -> Redis 实时状态 + ClickHouse 底层历史
   -> NATS JetStream 内部补偿队列
-  -> Redis 指标窗口特征
+  -> Redis 指标窗口特征（恢复缓存 / 观测 / 兼容）
+  -> NATS JetStream market snapshot
   -> Go strategy-engine / backtest-engine / 未来 API 工作流
 ```
 
@@ -89,9 +91,10 @@ Go `market-data` 服务当前包含以下内部职责：
 
 - `collector`：交易所 REST 初始化、WebSocket 同步、重连循环、轮询数据同步。
 - `aggregator`：为交易所未直接提供的周期生成派生 K 线。
-- `indicator`：实时指标 runner，负责从存储读取 K 线、调用公共计算包并写入结果。
+- `indicator`：实时指标 runner，负责从存储读取 K 线、调用公共计算包、写入 Redis 缓存并发布 market snapshot。
 - `pkg/indicatorcalc`：基于已闭合 K 线计算技术指标的纯计算包。
 - `pkg/indicatorwindow`：基于最近指标序列生成窗口特征和策略语义字段的纯计算包。
+- `pkg/marketbus`：`market-data` 向 `strategy-engine` 发布已收盘窗口特征和当前未收盘 K 线实时指标的 NATS JetStream 协议。
 - `pkg/exchangeclient`：交易所 REST K 线请求客户端，可被实时采集和历史回填复用。
 - `pkg/clickhousemarket`：ClickHouse K 线历史读写。
 - `pkg/marketmodel`：跨实时服务、历史回填和回测服务复用的 K 线、指标快照和持仓量模型。
@@ -110,17 +113,21 @@ Go `market-data` 服务当前包含以下内部职责：
 
 ## 当前策略流程
 
-在线策略主路径已经迁移到 Go。`strategy-engine` 从 Redis 读取 Go 已聚合的特征快照，对每个目标交易对执行已配置策略，并把策略决策发布到 NATS JetStream。`position-engine` 长驻消费决策消息，当前接入 paper route，并把当前仓位写入 Redis、事件写入 ClickHouse。
+在线策略主路径已经迁移到 Go。`strategy-engine` 启动时从 Redis 读取 Go 已聚合的特征快照作为恢复初始态；启动后消费 NATS JetStream market snapshot，更新进程内市场态，对每个目标交易对执行已配置策略，并把策略决策发布到 NATS JetStream。`position-engine` 长驻消费决策消息，当前接入 paper route，并把当前仓位写入 Redis、事件写入 ClickHouse。
 
 ```text
-Redis 已收盘窗口特征 indwin
-Redis 当前 K 线实时特征 indrt
+NATS JetStream market.snapshot.closed / market.snapshot.realtime
+  -> strategy-engine 内存市场态
   -> strategy.Snapshot
   -> strategy.Engine
   -> NATS JetStream strategy.decision
   -> position-engine
   -> Redis paper 当前仓位 + ClickHouse strategy_events
 ```
+
+- Redis `indwin` / `indrt` / health 在策略引擎启动时用于恢复初始态；如果恢复数据缺失或过期，策略引擎会等待 NATS market snapshot 补齐。
+- `strategy-engine` 会校验 market snapshot 的 `created_at`、`expires_at`、open time 和 updated at，旧消息不会覆盖更新的内存态。
+- 当行情输入缺失或过期时，在线策略进入降级状态：拒绝新开仓，保留平仓、减仓和止损等退出路径。
 
 Python `alphaflow-core` 保留为旧策略原型参考，不作为新策略架构的主路径。
 
@@ -166,15 +173,17 @@ Redis 当前用于：
 - 最新指标快照存储。
 - 已收盘指标窗口特征存储。
 - 当前 K 线实时指标特征存储。
+- `strategy-engine` 启动恢复和故障恢复缓存。
 - 当前活跃 paper 仓位存储。
 
-Redis 不是队列，也不是最终的长期历史行情存储。ClickHouse 负责存储已闭合 K 线，供分析类消费者、回测和指标重算使用。指标和窗口特征都属于可重算的二级数据，实时策略只需要读取 Redis 中的最新缓存。
+Redis 不是队列，也不是最终的长期历史行情存储。ClickHouse 负责存储已闭合 K 线，供分析类消费者、回测和指标重算使用。指标和窗口特征都属于可重算的二级数据。在线策略启动后主要消费 NATS market snapshot 并维护内存态，Redis 特征 hash 主要用于恢复、观测和兼容。
 
 ## NATS JetStream 职责
 
 NATS JetStream 当前用于：
 
 - 服务间策略决策通信：`strategy-engine -> position-engine`。
+- 服务间行情快照通信：`market-data -> strategy-engine`，默认 stream 为 `ALPHAFLOW_MARKET`，subject 为 `market.snapshot.closed` / `market.snapshot.realtime`。
 - `market-data` 内部 ClickHouse pending 重试队列。
 - `market-data` 内部 K 线 backfill 异步任务队列。
 
@@ -242,7 +251,7 @@ backend/python-service/
 - `market-data` 将实时行情模型写入 Redis。
 - `market-data` 在启用 ClickHouse 时只写入已闭合 K 线。
 - `market-data` 在 Go 内部基于底层指标序列生成窗口特征。
-- 实时策略消费者优先从 Redis 读取 `indwin` 和 `indrt` 特征 hash。
+- Go 在线策略消费者启动时从 Redis `indwin` 和 `indrt` 恢复，启动后优先消费 NATS market snapshot 并维护内存态。
 - Python 侧不再要求每次策略评估都读取几十到几百根历史指标。
 - 历史研究、回测、API 消费者应从 ClickHouse 读取 K 线历史，并按需计算指标。
 - 当前 paper 策略仓位存储在 Redis。

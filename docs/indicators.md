@@ -1,8 +1,8 @@
 # 指标文档
 
-本文档描述 Go `market-data` 服务当前输出的底层指标快照字段、窗口聚合特征，以及 Python 策略侧的使用方式。
+本文档描述 Go `market-data` 服务当前输出的底层指标快照字段、窗口聚合特征，以及策略侧的使用方式。
 
-指标计算只使用已闭合 K 线。每个底层快照按交易所、市场、交易对、周期和 open time 写入 Redis 最新状态；指标不写入 ClickHouse 历史。
+指标计算只使用已闭合 K 线。每个底层快照按交易所、市场、交易对、周期和 open time 写入 Redis 最新状态，并通过 NATS market snapshot 发布给在线 `strategy-engine`；指标不写入 ClickHouse 历史。
 
 ## 底层指标存储模型
 
@@ -11,23 +11,25 @@
 - `values`：数值型字段，统一以字符串存储，策略侧会按需解析为浮点数。
 - `signals`：枚举或状态型字段，统一以字符串存储。
 
-新增指标通常不需要改数据库字段。只要 Go 计算端写入新的 `values["key"]` 或 `signals["key"]`，Redis 最新快照会随之保存。窗口聚合层会枚举当前计算窗口里的指标 key：
+新增指标通常不需要改数据库字段。只要 Go 计算端写入新的 `values["key"]` 或 `signals["key"]`，Redis 最新快照和 market snapshot 会随之携带。窗口聚合层会枚举当前计算窗口里的指标 key：
 
 - 数值字段会生成最新值、前值、变化、斜率、方向、连续上升/下降次数、区间位置。
 - 信号字段会生成最新状态、前值、是否变化、稳定持续次数、距上次变化多久。
 
 注意：新字段只会出现在部署后的新快照里，老历史不会补齐。
 
-底层指标序列不作为长期事实数据保留。K 线才是事实数据；窗口聚合口径或策略特征变化时，从 ClickHouse K 线重新计算指标。Redis 中的指标和窗口特征只是实时缓存。
+底层指标序列不作为长期事实数据保留。K 线才是事实数据；窗口聚合口径或策略特征变化时，从 ClickHouse K 线重新计算指标。Redis 中的指标和窗口特征是恢复缓存、观测和兼容数据；在线策略启动后主要消费 NATS market snapshot 并维护内存态。
 
 ## 窗口聚合特征层
 
-当前实时策略路径优先消费 Go `indicatorwindow` 输出的窗口聚合特征，而不是让 Python 策略自己拉取大量历史指标再计算窗口。
+当前实时策略路径优先消费 Go `indicatorwindow` 输出的窗口聚合特征。Go `strategy-engine` 启动时可从 Redis hash 恢复初始态，启动后主要通过 NATS market snapshot 接收这些特征，而不是让策略自己拉取大量历史指标再计算窗口。
 
-窗口聚合层分两份 Redis hash：
+窗口聚合层分两份 Redis hash，并同步发布到 market snapshot：
 
 - `indwin`：上一根已收盘 K 线的窗口聚合结果。
 - `indrt`：当前未收盘 K 线的实时指标表现和 K 线基础信息。
+- `market.snapshot.closed`：已收盘底层指标和窗口聚合结果。
+- `market.snapshot.realtime`：当前未收盘 K 线、实时指标和价格上下文。
 
 窗口聚合层解决的问题：
 
