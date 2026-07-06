@@ -176,6 +176,28 @@ func assertHashField(t *testing.T, fields map[string]string, key string, want st
 	}
 }
 
+func TestRedisStoreMaintainIndicatorKeysDeduplicatesByKey(t *testing.T) {
+	store := &RedisStore{indicatorMaintenance: lcache.MustNew(10)}
+	callsByKey := map[string]int{}
+
+	store.maintainIndicatorKeys([]string{"indicator:key", "indicator:last"}, func(key string) {
+		callsByKey[key]++
+	})
+	store.maintainIndicatorKeys([]string{"indicator:key", "indicator:window"}, func(key string) {
+		callsByKey[key]++
+	})
+
+	if got := callsByKey["indicator:key"]; got != 1 {
+		t.Fatalf("indicator:key calls = %d, want 1", got)
+	}
+	if got := callsByKey["indicator:last"]; got != 1 {
+		t.Fatalf("indicator:last calls = %d, want 1", got)
+	}
+	if got := callsByKey["indicator:window"]; got != 1 {
+		t.Fatalf("indicator:window calls = %d, want 1", got)
+	}
+}
+
 func TestRedisStoreMaintainLiquidationKeyUsesFreqCall(t *testing.T) {
 	store := &RedisStore{liquidationMaintenance: lcache.MustNew(10)}
 	calls := 0

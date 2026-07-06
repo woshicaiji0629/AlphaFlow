@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
@@ -391,7 +390,7 @@ func (s *RedisStore) SetLatestBatch(
 		}
 		key := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 		pipe.Set(ctx, key, payload, s.retention.LatestTTL)
-		s.maintainIndicatorKeys([]string{key}, func() {
+		s.maintainIndicatorKey(key, func() {
 			pipe.Expire(ctx, key, s.retention.LatestTTL)
 			hasWrites = true
 		})
@@ -404,7 +403,7 @@ func (s *RedisStore) SetLatestBatch(
 		}
 		key := model.IndicatorWindowLatestKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 		pipe.HSet(ctx, key, fields...)
-		s.maintainIndicatorKeys([]string{key}, func() {
+		s.maintainIndicatorKey(key, func() {
 			pipe.Expire(ctx, key, s.retention.LatestTTL)
 			hasWrites = true
 		})
@@ -417,7 +416,7 @@ func (s *RedisStore) SetLatestBatch(
 		}
 		key := model.IndicatorRealtimeKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 		pipe.HSet(ctx, key, fields...)
-		s.maintainIndicatorKeys([]string{key}, func() {
+		s.maintainIndicatorKey(key, func() {
 			pipe.Expire(ctx, key, s.retention.LatestTTL)
 			hasWrites = true
 		})
@@ -440,16 +439,21 @@ func (s *RedisStore) maintainKlineKey(key string, fn func()) {
 	s.klineMaintenance.FreqCall(key, klineMaintenanceInterval, fn)
 }
 
-func (s *RedisStore) maintainIndicatorKeys(keys []string, fn func()) {
-	if len(keys) == 0 {
-		return
-	}
+func (s *RedisStore) maintainIndicatorKey(key string, fn func()) {
 	if s.indicatorMaintenance == nil {
 		fn()
 		return
 	}
-	cacheKey := strings.Join(keys, "\x00")
-	s.indicatorMaintenance.FreqCall(cacheKey, indicatorMaintenanceInterval, fn)
+	s.indicatorMaintenance.FreqCall(key, indicatorMaintenanceInterval, fn)
+}
+
+func (s *RedisStore) maintainIndicatorKeys(keys []string, fn func(string)) {
+	for _, key := range keys {
+		key := key
+		s.maintainIndicatorKey(key, func() {
+			fn(key)
+		})
+	}
 }
 
 func klineDataKey(baseKey string) string {
@@ -613,9 +617,8 @@ func (s *RedisStore) SetIndicatorWithOpenTime(ctx context.Context, snapshot mode
 	pipe := s.client.Pipeline()
 	pipe.Set(ctx, indicatorKey, payload, s.retention.LatestTTL)
 	pipe.Set(ctx, lastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
-	s.maintainIndicatorKeys([]string{indicatorKey, lastKey}, func() {
-		pipe.Expire(ctx, indicatorKey, s.retention.LatestTTL)
-		pipe.Expire(ctx, lastKey, s.retention.LatestTTL)
+	s.maintainIndicatorKeys([]string{indicatorKey, lastKey}, func(key string) {
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("set indicator: %w", err)
@@ -642,9 +645,8 @@ func (s *RedisStore) SetIndicatorWindowWithOpenTime(
 	pipe := s.client.Pipeline()
 	pipe.HSet(ctx, windowKey, fields...)
 	pipe.Set(ctx, lastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
-	s.maintainIndicatorKeys([]string{windowKey, lastKey}, func() {
-		pipe.Expire(ctx, windowKey, s.retention.LatestTTL)
-		pipe.Expire(ctx, lastKey, s.retention.LatestTTL)
+	s.maintainIndicatorKeys([]string{windowKey, lastKey}, func(key string) {
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("set indicator window: %w", err)
@@ -682,11 +684,8 @@ func (s *RedisStore) SetClosedIndicator(
 	pipe.Set(ctx, indicatorLastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
 	pipe.HSet(ctx, windowKey, fields...)
 	pipe.Set(ctx, windowLastKey, strconv.FormatInt(windowSnapshot.OpenTime, 10), s.retention.LatestTTL)
-	s.maintainIndicatorKeys([]string{indicatorKey, indicatorLastKey, windowKey, windowLastKey}, func() {
-		pipe.Expire(ctx, indicatorKey, s.retention.LatestTTL)
-		pipe.Expire(ctx, indicatorLastKey, s.retention.LatestTTL)
-		pipe.Expire(ctx, windowKey, s.retention.LatestTTL)
-		pipe.Expire(ctx, windowLastKey, s.retention.LatestTTL)
+	s.maintainIndicatorKeys([]string{indicatorKey, indicatorLastKey, windowKey, windowLastKey}, func(key string) {
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("set closed indicator: %w", err)
@@ -711,7 +710,7 @@ func (s *RedisStore) SetIndicatorRealtime(
 	}
 	pipe := s.client.Pipeline()
 	pipe.HSet(ctx, key, fields...)
-	s.maintainIndicatorKeys([]string{key}, func() {
+	s.maintainIndicatorKey(key, func() {
 		pipe.Expire(ctx, key, s.retention.LatestTTL)
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
