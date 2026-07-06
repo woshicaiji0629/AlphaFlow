@@ -22,6 +22,7 @@ import (
 	"alphaflow/go-service/pkg/constants"
 	"alphaflow/go-service/pkg/httpclient"
 	"alphaflow/go-service/pkg/logger"
+	"alphaflow/go-service/pkg/marketbus"
 	"alphaflow/go-service/pkg/redisclient"
 )
 
@@ -38,7 +39,7 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("connect redis: %w", err)
 	}
-	collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, restartDelay, err := buildRuntime(ctx, cfg, redisManager)
+	collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, closePublisher, restartDelay, err := buildRuntime(ctx, cfg, redisManager)
 	if err != nil {
 		if closeErr := redisManager.Close(); closeErr != nil {
 			slog.Error("close redis failed", "error", closeErr)
@@ -46,6 +47,7 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer func() {
+		closePublisher()
 		if err := marketStore.Close(); err != nil {
 			slog.Error("close market store failed", "error", err)
 		}
@@ -87,8 +89,9 @@ func buildRuntime(
 	ctx context.Context,
 	cfg config.Config,
 	redisManager *redisclient.Manager,
-) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *health.Runner, *store.MarketStore, time.Duration, error) {
+) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *health.Runner, *store.MarketStore, func(), time.Duration, error) {
 	reconnectDelay := collector.DefaultReconnectDelay()
+	closePublisher := func() {}
 
 	redisStore := store.NewRedisStore(redisManager.Get(constants.RedisDefaultInstance), store.Retention{
 		KlineLimit:     config.KlineLimit(),
@@ -99,7 +102,12 @@ func buildRuntime(
 	})
 	marketStore, err := buildStore(ctx, cfg, redisStore)
 	if err != nil {
-		return nil, nil, nil, nil, nil, 0, err
+		return nil, nil, nil, nil, nil, closePublisher, 0, err
+	}
+	publisher, closePublisher, err := buildMarketSnapshotPublisher(cfg)
+	if err != nil {
+		_ = marketStore.Close()
+		return nil, nil, nil, nil, nil, closePublisher, 0, err
 	}
 	httpClient := httpclient.New()
 
@@ -179,7 +187,8 @@ func buildRuntime(
 	}
 	if len(collectors) == 0 {
 		_ = marketStore.Close()
-		return nil, nil, nil, nil, nil, 0, fmt.Errorf("no exchange enabled")
+		closePublisher()
+		return nil, nil, nil, nil, nil, closePublisher, 0, fmt.Errorf("no exchange enabled")
 	}
 	klineAggregator := aggregator.New(marketStore, aggregator.Options{
 		Rules:           aggregationRules(cfg),
@@ -190,17 +199,29 @@ func buildRuntime(
 		Rules:           indicatorRules(cfg),
 		ScanInterval:    config.IndicatorScanInterval(),
 		LookbackPeriods: config.IndicatorLookbackPeriods(),
+		Publisher:       publisher,
+	}
+	if publisher != nil {
+		publishTTL, err := config.MarketBusDefaultTTL(cfg)
+		if err != nil {
+			_ = marketStore.Close()
+			closePublisher()
+			return nil, nil, nil, nil, nil, closePublisher, 0, err
+		}
+		indicatorRunnerOptions.PublishTTL = publishTTL
 	}
 	if cfg.Indicator.Enabled {
 		indicatorAckWait, err := config.IndicatorQueueAckWait(cfg)
 		if err != nil {
 			_ = marketStore.Close()
-			return nil, nil, nil, nil, nil, 0, err
+			closePublisher()
+			return nil, nil, nil, nil, nil, closePublisher, 0, err
 		}
 		indicatorWorkerMaxWait, err := config.IndicatorQueueWorkerMaxWait(cfg)
 		if err != nil {
 			_ = marketStore.Close()
-			return nil, nil, nil, nil, nil, 0, err
+			closePublisher()
+			return nil, nil, nil, nil, nil, closePublisher, 0, err
 		}
 		indicatorQueue, err := indicator.NewNATSTaskQueue(indicator.NATSTaskQueueOptions{
 			URL:           cfg.NATS.URL,
@@ -210,7 +231,8 @@ func buildRuntime(
 		})
 		if err != nil {
 			_ = marketStore.Close()
-			return nil, nil, nil, nil, nil, 0, fmt.Errorf("connect nats indicator task queue: %w", err)
+			closePublisher()
+			return nil, nil, nil, nil, nil, closePublisher, 0, fmt.Errorf("connect nats indicator task queue: %w", err)
 		}
 		indicatorRunnerOptions.TaskQueue = indicatorQueue
 		indicatorRunnerOptions.TaskBatch = cfg.Indicator.WorkerBatch
@@ -235,7 +257,27 @@ func buildRuntime(
 		GapLookback:  config.HealthGapLookback(),
 	})
 	marketStore.AddKlineHandler(indicatorRunner.HandleKline)
-	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, reconnectDelay, nil
+	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, closePublisher, reconnectDelay, nil
+}
+
+func buildMarketSnapshotPublisher(cfg config.Config) (indicator.SnapshotPublisher, func(), error) {
+	if !cfg.MarketBus.Enabled {
+		return nil, func() {}, nil
+	}
+	publisher, err := marketbus.NewNATSPublisher(marketbus.NATSPublisherOptions{
+		URL:             cfg.NATS.URL,
+		Stream:          cfg.MarketBus.Stream,
+		ClosedSubject:   cfg.MarketBus.ClosedSubject,
+		RealtimeSubject: cfg.MarketBus.RealtimeSubject,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect nats market snapshot publisher: %w", err)
+	}
+	return publisher, func() {
+		if err := publisher.Close(); err != nil {
+			slog.Error("close market snapshot publisher failed", "error", err)
+		}
+	}, nil
 }
 
 func buildStore(ctx context.Context, cfg config.Config, redisStore *store.RedisStore) (*store.MarketStore, error) {

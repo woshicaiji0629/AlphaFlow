@@ -18,6 +18,7 @@ type Config struct {
 	ClickHouse ClickHouseConfig     `toml:"clickhouse"`
 	Backfill   BackfillConfig       `toml:"backfill_queue"`
 	Indicator  IndicatorQueueConfig `toml:"indicator_queue"`
+	MarketBus  MarketBusConfig      `toml:"market_bus"`
 	Logging    LoggingConfig        `toml:"logging"`
 }
 
@@ -81,6 +82,14 @@ type IndicatorQueueConfig struct {
 	WorkerBatch   int    `toml:"worker_batch"`
 	WorkerMaxWait string `toml:"worker_max_wait"`
 	WorkerCount   int    `toml:"worker_count"`
+}
+
+type MarketBusConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	Stream          string `toml:"stream"`
+	ClosedSubject   string `toml:"closed_subject"`
+	RealtimeSubject string `toml:"realtime_subject"`
+	DefaultTTL      string `toml:"default_ttl"`
 }
 
 type LoggingConfig struct {
@@ -164,6 +173,13 @@ func defaultConfig() Config {
 			WorkerMaxWait: "1s",
 			WorkerCount:   0,
 		},
+		MarketBus: MarketBusConfig{
+			Enabled:         true,
+			Stream:          "ALPHAFLOW_MARKET",
+			ClosedSubject:   "market.snapshot.closed",
+			RealtimeSubject: "market.snapshot.realtime",
+			DefaultTTL:      "30s",
+		},
 		Logging: LoggingConfig{
 			Service:    "market-data",
 			Level:      "info",
@@ -185,11 +201,34 @@ func validate(cfg Config) error {
 		validateClickHouse,
 		validateBackfillQueue,
 		validateIndicatorQueue,
+		validateMarketBus,
 	}
 	for _, validator := range validators {
 		if err := validator(cfg); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateMarketBus(cfg Config) error {
+	if !cfg.MarketBus.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty when market_bus enabled")
+	}
+	if strings.TrimSpace(cfg.MarketBus.Stream) == "" {
+		return fmt.Errorf("market_bus.stream cannot be empty when enabled")
+	}
+	if strings.TrimSpace(cfg.MarketBus.ClosedSubject) == "" {
+		return fmt.Errorf("market_bus.closed_subject cannot be empty when enabled")
+	}
+	if strings.TrimSpace(cfg.MarketBus.RealtimeSubject) == "" {
+		return fmt.Errorf("market_bus.realtime_subject cannot be empty when enabled")
+	}
+	if _, err := MarketBusDefaultTTL(cfg); err != nil {
+		return err
 	}
 	return nil
 }
@@ -315,6 +354,10 @@ func normalize(cfg *Config) {
 	cfg.Backfill.WorkerMaxWait = strings.TrimSpace(cfg.Backfill.WorkerMaxWait)
 	cfg.Indicator.AckWait = strings.TrimSpace(cfg.Indicator.AckWait)
 	cfg.Indicator.WorkerMaxWait = strings.TrimSpace(cfg.Indicator.WorkerMaxWait)
+	cfg.MarketBus.Stream = strings.TrimSpace(cfg.MarketBus.Stream)
+	cfg.MarketBus.ClosedSubject = strings.TrimSpace(cfg.MarketBus.ClosedSubject)
+	cfg.MarketBus.RealtimeSubject = strings.TrimSpace(cfg.MarketBus.RealtimeSubject)
+	cfg.MarketBus.DefaultTTL = strings.TrimSpace(cfg.MarketBus.DefaultTTL)
 
 	for index, symbol := range cfg.Binance.Symbols {
 		cfg.Binance.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))

@@ -48,6 +48,13 @@ worker_batch = 32
 worker_max_wait = "1s"
 worker_count = 0
 
+[market_bus]
+enabled = true
+stream = "ALPHAFLOW_MARKET"
+closed_subject = "market.snapshot.closed"
+realtime_subject = "market.snapshot.realtime"
+default_ttl = "30s"
+
 [logging]
 service = "market-data"
 level = "info"

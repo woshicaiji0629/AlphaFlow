@@ -11,6 +11,22 @@ min_idle_conns = 5
 [nats]
 url = "nats://localhost:4222"
 
+[market_input]
+mode = "bus"
+stream = "ALPHAFLOW_MARKET"
+closed_subject = "market.snapshot.closed"
+realtime_subject = "market.snapshot.realtime"
+durable = "strategy-engine-market"
+batch = 32
+block = "1s"
+ack_wait = "30s"
+max_deliveries = 5
+dead_letter_subject = "market.snapshot.dead"
+max_message_age = "10s"
+realtime_stale_after = "15s"
+closed_stale_factor = 2
+reject_open_when_degraded = true
+
 [output]
 mode = "bus"
 stream = "ALPHAFLOW_STRATEGY"

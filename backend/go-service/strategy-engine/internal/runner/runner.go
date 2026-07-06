@@ -29,10 +29,11 @@ type Options struct {
 }
 
 type Runner struct {
-	engine        *strategy.Engine
-	dispatcher    *strategyroute.Dispatcher
-	publisher     DecisionPublisher
-	positionStore position.Store
+	engine          *strategy.Engine
+	dispatcher      *strategyroute.Dispatcher
+	publisher       DecisionPublisher
+	positionManager *position.Manager
+	positionStore   position.Store
 }
 
 type DecisionPublisher interface {
@@ -55,10 +56,11 @@ func New(options Options) (*Runner, error) {
 		dispatcher = built
 	}
 	return &Runner{
-		engine:        options.Engine,
-		dispatcher:    dispatcher,
-		publisher:     options.Publisher,
-		positionStore: options.PositionStore,
+		engine:          options.Engine,
+		dispatcher:      dispatcher,
+		publisher:       options.Publisher,
+		positionManager: options.PositionManager,
+		positionStore:   options.PositionStore,
 	}, nil
 }
 
@@ -88,12 +90,24 @@ func buildPaperDispatcher(options Options) (*strategyroute.Dispatcher, error) {
 }
 
 func (r *Runner) Handle(ctx context.Context, input strategy.Context) (strategy.Decision, error) {
+	return r.HandleWithDegradation(ctx, input, false, "")
+}
+
+func (r *Runner) HandleWithDegradation(
+	ctx context.Context,
+	input strategy.Context,
+	degraded bool,
+	degradedReason string,
+) (strategy.Decision, error) {
 	if err := r.hydratePositions(ctx, &input); err != nil {
 		return strategy.Decision{}, err
 	}
 	decision, err := r.engine.Evaluate(ctx, input)
 	if err != nil {
 		return strategy.Decision{}, err
+	}
+	if degraded {
+		decision = r.rejectOpenResults(input, decision, degradedReason)
 	}
 	if r.publisher != nil {
 		if err := r.publisher.PublishDecision(ctx, decision); err != nil {
@@ -106,6 +120,36 @@ func (r *Runner) Handle(ctx context.Context, input strategy.Context) (strategy.D
 		}
 	}
 	return decision, nil
+}
+
+func (r *Runner) rejectOpenResults(
+	input strategy.Context,
+	decision strategy.Decision,
+	reason string,
+) strategy.Decision {
+	if r.positionManager == nil {
+		return decision
+	}
+	if reason == "" {
+		reason = "market data degraded"
+	}
+	filtered := make([]strategy.Result, 0, len(decision.Results))
+	for _, result := range decision.Results {
+		currentPosition := input.Positions[result.StrategyName]
+		plan := r.positionManager.PlanWithPrice(result, currentPosition, input.Snapshots[input.Target.Interval].Price.LastPrice)
+		if plan == nil || (plan.Action != strategy.PositionActionOpenLong && plan.Action != strategy.PositionActionOpenShort) {
+			filtered = append(filtered, result)
+			continue
+		}
+		result.Signal.Side = strategy.SignalSideHold
+		result.Signal.Score = 0
+		result.Signal.Confidence = 0
+		result.Signal.Reason = "reject open: " + reason
+		result.ExitRules = nil
+		filtered = append(filtered, result)
+	}
+	decision.Results = filtered
+	return decision
 }
 
 func (r *Runner) hydratePositions(ctx context.Context, input *strategy.Context) error {

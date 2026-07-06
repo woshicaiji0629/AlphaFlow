@@ -13,17 +13,18 @@ import (
 )
 
 type Config struct {
-	Runtime    RuntimeConfig    `toml:"runtime"`
-	Redis      RedisConfig      `toml:"redis"`
-	NATS       NATSConfig       `toml:"nats"`
-	Output     OutputConfig     `toml:"output"`
-	Position   PositionConfig   `toml:"position"`
-	Strategies StrategiesConfig `toml:"strategies"`
-	Sizing     SizingConfig     `toml:"sizing"`
-	Fee        FeeConfig        `toml:"fee"`
-	ClickHouse ClickHouseConfig `toml:"clickhouse"`
-	Targets    []TargetConfig   `toml:"targets"`
-	Logging    LoggingConfig    `toml:"logging"`
+	Runtime     RuntimeConfig     `toml:"runtime"`
+	Redis       RedisConfig       `toml:"redis"`
+	NATS        NATSConfig        `toml:"nats"`
+	MarketInput MarketInputConfig `toml:"market_input"`
+	Output      OutputConfig      `toml:"output"`
+	Position    PositionConfig    `toml:"position"`
+	Strategies  StrategiesConfig  `toml:"strategies"`
+	Sizing      SizingConfig      `toml:"sizing"`
+	Fee         FeeConfig         `toml:"fee"`
+	ClickHouse  ClickHouseConfig  `toml:"clickhouse"`
+	Targets     []TargetConfig    `toml:"targets"`
+	Logging     LoggingConfig     `toml:"logging"`
 }
 
 type RuntimeConfig struct {
@@ -47,6 +48,23 @@ type OutputConfig struct {
 	Stream     string `toml:"stream"`
 	Subject    string `toml:"subject"`
 	DefaultTTL string `toml:"default_ttl"`
+}
+
+type MarketInputConfig struct {
+	Mode                   string `toml:"mode"`
+	Stream                 string `toml:"stream"`
+	ClosedSubject          string `toml:"closed_subject"`
+	RealtimeSubject        string `toml:"realtime_subject"`
+	Durable                string `toml:"durable"`
+	Batch                  int    `toml:"batch"`
+	Block                  string `toml:"block"`
+	AckWait                string `toml:"ack_wait"`
+	MaxDeliveries          int    `toml:"max_deliveries"`
+	DeadLetterSubject      string `toml:"dead_letter_subject"`
+	MaxMessageAge          string `toml:"max_message_age"`
+	RealtimeStaleAfter     string `toml:"realtime_stale_after"`
+	ClosedStaleFactor      int64  `toml:"closed_stale_factor"`
+	RejectOpenWhenDegraded bool   `toml:"reject_open_when_degraded"`
 }
 
 type PositionConfig struct {
@@ -128,6 +146,22 @@ func defaultConfig() Config {
 		NATS: NATSConfig{
 			URL: "nats://localhost:4222",
 		},
+		MarketInput: MarketInputConfig{
+			Mode:                   "bus",
+			Stream:                 "ALPHAFLOW_MARKET",
+			ClosedSubject:          "market.snapshot.closed",
+			RealtimeSubject:        "market.snapshot.realtime",
+			Durable:                "strategy-engine-market",
+			Batch:                  32,
+			Block:                  "1s",
+			AckWait:                "30s",
+			MaxDeliveries:          5,
+			DeadLetterSubject:      "market.snapshot.dead",
+			MaxMessageAge:          "10s",
+			RealtimeStaleAfter:     "15s",
+			ClosedStaleFactor:      2,
+			RejectOpenWhenDegraded: true,
+		},
 		Output: OutputConfig{
 			Mode:       "bus",
 			Stream:     "ALPHAFLOW_STRATEGY",
@@ -195,6 +229,34 @@ func ClickHouseReadTimeout(cfg Config) (time.Duration, error) {
 
 func OutputDefaultTTL(cfg Config) (time.Duration, error) {
 	return parseDuration("output.default_ttl", cfg.Output.DefaultTTL)
+}
+
+func MarketInputBlock(cfg Config) (time.Duration, error) {
+	if strings.TrimSpace(cfg.MarketInput.Block) == "" {
+		return time.Second, nil
+	}
+	return parseDuration("market_input.block", cfg.MarketInput.Block)
+}
+
+func MarketInputAckWait(cfg Config) (time.Duration, error) {
+	if strings.TrimSpace(cfg.MarketInput.AckWait) == "" {
+		return 30 * time.Second, nil
+	}
+	return parseDuration("market_input.ack_wait", cfg.MarketInput.AckWait)
+}
+
+func MarketInputMaxMessageAge(cfg Config) (time.Duration, error) {
+	if strings.TrimSpace(cfg.MarketInput.MaxMessageAge) == "" {
+		return 10 * time.Second, nil
+	}
+	return parseDuration("market_input.max_message_age", cfg.MarketInput.MaxMessageAge)
+}
+
+func MarketInputRealtimeStaleAfter(cfg Config) (time.Duration, error) {
+	if strings.TrimSpace(cfg.MarketInput.RealtimeStaleAfter) == "" {
+		return 15 * time.Second, nil
+	}
+	return parseDuration("market_input.realtime_stale_after", cfg.MarketInput.RealtimeStaleAfter)
 }
 
 func RedisClientConfig(cfg Config) redisclient.Config {
@@ -271,6 +333,16 @@ func normalize(cfg *Config) {
 	}
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
+	cfg.MarketInput.Mode = strings.ToLower(strings.TrimSpace(cfg.MarketInput.Mode))
+	cfg.MarketInput.Stream = strings.TrimSpace(cfg.MarketInput.Stream)
+	cfg.MarketInput.ClosedSubject = strings.TrimSpace(cfg.MarketInput.ClosedSubject)
+	cfg.MarketInput.RealtimeSubject = strings.TrimSpace(cfg.MarketInput.RealtimeSubject)
+	cfg.MarketInput.Durable = strings.TrimSpace(cfg.MarketInput.Durable)
+	cfg.MarketInput.Block = strings.TrimSpace(cfg.MarketInput.Block)
+	cfg.MarketInput.AckWait = strings.TrimSpace(cfg.MarketInput.AckWait)
+	cfg.MarketInput.DeadLetterSubject = strings.TrimSpace(cfg.MarketInput.DeadLetterSubject)
+	cfg.MarketInput.MaxMessageAge = strings.TrimSpace(cfg.MarketInput.MaxMessageAge)
+	cfg.MarketInput.RealtimeStaleAfter = strings.TrimSpace(cfg.MarketInput.RealtimeStaleAfter)
 	cfg.Output.Mode = strings.ToLower(strings.TrimSpace(cfg.Output.Mode))
 	cfg.Output.Stream = strings.TrimSpace(cfg.Output.Stream)
 	cfg.Output.Subject = strings.TrimSpace(cfg.Output.Subject)
@@ -280,6 +352,7 @@ func validate(cfg Config) error {
 	validators := []func(Config) error{
 		validateRuntime,
 		validateRedis,
+		validateMarketInput,
 		validateOutput,
 		validatePosition,
 		validateStrategies,
@@ -306,6 +379,54 @@ func validateRuntime(cfg Config) error {
 func validateRedis(cfg Config) error {
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		return fmt.Errorf("redis addr cannot be empty")
+	}
+	return nil
+}
+
+func validateMarketInput(cfg Config) error {
+	switch cfg.MarketInput.Mode {
+	case "bus", "poll":
+	default:
+		return fmt.Errorf("unsupported market_input.mode %q", cfg.MarketInput.Mode)
+	}
+	if cfg.MarketInput.Mode == "poll" {
+		return nil
+	}
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty when market_input.mode is bus")
+	}
+	if strings.TrimSpace(cfg.MarketInput.Stream) == "" {
+		return fmt.Errorf("market_input.stream cannot be empty when market_input.mode is bus")
+	}
+	if strings.TrimSpace(cfg.MarketInput.ClosedSubject) == "" {
+		return fmt.Errorf("market_input.closed_subject cannot be empty when market_input.mode is bus")
+	}
+	if strings.TrimSpace(cfg.MarketInput.RealtimeSubject) == "" {
+		return fmt.Errorf("market_input.realtime_subject cannot be empty when market_input.mode is bus")
+	}
+	if strings.TrimSpace(cfg.MarketInput.Durable) == "" {
+		return fmt.Errorf("market_input.durable cannot be empty when market_input.mode is bus")
+	}
+	if cfg.MarketInput.Batch <= 0 {
+		return fmt.Errorf("market_input.batch must be positive")
+	}
+	if cfg.MarketInput.MaxDeliveries <= 0 {
+		return fmt.Errorf("market_input.max_deliveries must be positive")
+	}
+	if cfg.MarketInput.ClosedStaleFactor <= 0 {
+		return fmt.Errorf("market_input.closed_stale_factor must be positive")
+	}
+	if _, err := MarketInputBlock(cfg); err != nil {
+		return err
+	}
+	if _, err := MarketInputAckWait(cfg); err != nil {
+		return err
+	}
+	if _, err := MarketInputMaxMessageAge(cfg); err != nil {
+		return err
+	}
+	if _, err := MarketInputRealtimeStaleAfter(cfg); err != nil {
+		return err
 	}
 	return nil
 }

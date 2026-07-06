@@ -160,3 +160,17 @@ func IndicatorQueueWorkerMaxWait(cfg Config) (time.Duration, error) {
 	}
 	return wait, nil
 }
+
+func MarketBusDefaultTTL(cfg Config) (time.Duration, error) {
+	if cfg.MarketBus.DefaultTTL == "" {
+		return 30 * time.Second, nil
+	}
+	ttl, err := time.ParseDuration(cfg.MarketBus.DefaultTTL)
+	if err != nil {
+		return 0, fmt.Errorf("parse market_bus default_ttl: %w", err)
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("market_bus default_ttl must be positive")
+	}
+	return ttl, nil
+}

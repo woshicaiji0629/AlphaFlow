@@ -14,6 +14,7 @@ import (
 	"alphaflow/go-service/market-data/internal/model"
 	"alphaflow/go-service/pkg/indicatorcalc"
 	"alphaflow/go-service/pkg/indicatorwindow"
+	"alphaflow/go-service/pkg/marketbus"
 )
 
 const indicatorWorkerCount = 8
@@ -65,11 +66,17 @@ type RunnerOptions struct {
 	ScanInterval      time.Duration
 	LookbackPeriods   int64
 	CalculateOptions  indicatorcalc.Options
+	Publisher         SnapshotPublisher
+	PublishTTL        time.Duration
 	TaskQueue         TaskQueue
 	TaskBatch         int
 	TaskMaxWait       time.Duration
 	TaskMaxDeliveries int
 	TaskWorkers       int
+}
+
+type SnapshotPublisher interface {
+	PublishSnapshot(ctx context.Context, envelope marketbus.SnapshotEnvelope) (string, error)
 }
 
 type Runner struct {
@@ -111,6 +118,9 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 	}
 	if options.TaskWorkers <= 0 {
 		options.TaskWorkers = workerCount(1000)
+	}
+	if options.PublishTTL <= 0 {
+		options.PublishTTL = 30 * time.Second
 	}
 	return &Runner{
 		store:                   store,
@@ -434,6 +444,9 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		if err := r.store.SetClosedIndicator(ctx, snapshot, windowSnapshot); err != nil {
 			return err
 		}
+		if err := r.publishClosedSnapshot(ctx, snapshot, windowSnapshot); err != nil {
+			return err
+		}
 		r.rememberCalculatedOpenTime(windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval), snapshot.OpenTime)
 		return nil
 	}
@@ -443,7 +456,7 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 	if err := r.store.SetLatestIndicatorWindow(ctx, windowSnapshot); err != nil {
 		return err
 	}
-	return r.store.SetIndicatorRealtime(ctx, model.IndicatorRealtimeSnapshot{
+	realtimeSnapshot := model.IndicatorRealtimeSnapshot{
 		Exchange:  rule.Exchange,
 		Market:    rule.Market,
 		Symbol:    kline.Symbol,
@@ -454,7 +467,11 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		Values:    snapshot.Values,
 		Signals:   snapshot.Signals,
 		UpdatedAt: snapshot.UpdatedAt,
-	})
+	}
+	if err := r.store.SetIndicatorRealtime(ctx, realtimeSnapshot); err != nil {
+		return err
+	}
+	return r.publishRealtimeSnapshot(ctx, realtimeSnapshot)
 }
 
 func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol string, interval string) error {
@@ -529,6 +546,9 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err := r.store.SetClosedIndicator(ctx, snapshot, windowSnapshot); err != nil {
 		return err
 	}
+	if err := r.publishClosedSnapshot(ctx, snapshot, windowSnapshot); err != nil {
+		return err
+	}
 	r.rememberCalculatedOpenTime(key, snapshot.OpenTime)
 	slog.Debug(
 		"calculated indicators",
@@ -538,6 +558,55 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		"interval", interval,
 		"open_time", result.OpenTime,
 		"values", len(result.Values),
+	)
+	return nil
+}
+
+func (r *Runner) publishClosedSnapshot(
+	ctx context.Context,
+	snapshot model.IndicatorSnapshot,
+	windowSnapshot model.IndicatorWindowSnapshot,
+) error {
+	if r.options.Publisher == nil {
+		return nil
+	}
+	envelope := marketbus.NewClosedEnvelope(snapshot, windowSnapshot, r.now().UnixMilli(), r.options.PublishTTL)
+	messageID, err := r.options.Publisher.PublishSnapshot(ctx, envelope)
+	if err != nil {
+		return err
+	}
+	slog.Debug(
+		"published closed market snapshot",
+		"message_id", messageID,
+		"exchange", snapshot.Exchange,
+		"market", snapshot.Market,
+		"symbol", snapshot.Symbol,
+		"interval", snapshot.Interval,
+		"open_time", snapshot.OpenTime,
+	)
+	return nil
+}
+
+func (r *Runner) publishRealtimeSnapshot(
+	ctx context.Context,
+	snapshot model.IndicatorRealtimeSnapshot,
+) error {
+	if r.options.Publisher == nil {
+		return nil
+	}
+	envelope := marketbus.NewRealtimeEnvelope(snapshot, r.now().UnixMilli(), r.options.PublishTTL)
+	messageID, err := r.options.Publisher.PublishSnapshot(ctx, envelope)
+	if err != nil {
+		return err
+	}
+	slog.Debug(
+		"published realtime market snapshot",
+		"message_id", messageID,
+		"exchange", snapshot.Exchange,
+		"market", snapshot.Market,
+		"symbol", snapshot.Symbol,
+		"interval", snapshot.Interval,
+		"open_time", snapshot.OpenTime,
 	)
 	return nil
 }

@@ -123,6 +123,52 @@ func timeframesFromSnapshots(snapshots map[string]strategy.Snapshot) map[string]
 	return timeframes
 }
 
+func IndicatorViewFromSnapshot(snapshot marketmodel.IndicatorSnapshot) strategy.IndicatorView {
+	return strategy.IndicatorView{
+		OpenTime:  snapshot.OpenTime,
+		CloseTime: snapshot.CloseTime,
+		Values:    snapshot.Values,
+		Signals:   snapshot.Signals,
+		UpdatedAt: snapshot.UpdatedAt,
+	}
+}
+
+func WindowViewFromSnapshot(snapshot marketmodel.IndicatorWindowSnapshot) (strategy.IndicatorWindowView, error) {
+	fields := map[string]string{
+		"meta:open_time":  strconv.FormatInt(snapshot.OpenTime, 10),
+		"meta:close_time": strconv.FormatInt(snapshot.CloseTime, 10),
+		"meta:version":    snapshot.Version,
+		"meta:updated_at": strconv.FormatInt(snapshot.UpdatedAt, 10),
+	}
+	for key, value := range snapshot.Values {
+		fields["value:"+key] = value
+	}
+	for key, value := range snapshot.Signals {
+		fields["signal:"+key] = value
+	}
+	values, sampleCount, err := parseNumericSeries(fields)
+	if err != nil {
+		return strategy.IndicatorWindowView{}, err
+	}
+	signals, err := parseSignalSeries(fields)
+	if err != nil {
+		return strategy.IndicatorWindowView{}, err
+	}
+	return strategy.IndicatorWindowView{
+		OpenTime:    snapshot.OpenTime,
+		CloseTime:   snapshot.CloseTime,
+		Version:     snapshot.Version,
+		SampleCount: sampleCount,
+		Values:      values,
+		Signals:     signals,
+		UpdatedAt:   snapshot.UpdatedAt,
+	}, nil
+}
+
+func PriceFromRealtime(indicator strategy.IndicatorView, current marketmodel.Kline) strategy.PriceView {
+	return priceFromRealtime(indicator, current)
+}
+
 func (r *Reader) readSnapshot(
 	ctx context.Context,
 	target strategy.Target,
