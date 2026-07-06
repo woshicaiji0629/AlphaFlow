@@ -46,6 +46,7 @@ help:
 	@echo "  make market-data-up    Start market-data with Docker"
 	@echo "  make market-data-down  Stop market-data"
 	@echo "  make market-data-logs  Tail market-data logs"
+	@echo "  make queue-status      Print NATS JetStream queue lag"
 	@echo "  make kline-check       Run kline integrity check with ClickHouse only"
 	@echo "  make kline-backfill    Run kline backfill with ClickHouse only"
 	@echo "  make kline-delete-dryrun  Preview kline delete range with ClickHouse only"
@@ -211,6 +212,10 @@ market-data-down:
 .PHONY: market-data-logs
 market-data-logs:
 	docker compose logs -f market-data
+
+.PHONY: queue-status
+queue-status:
+	cd $(GO_SERVICE_DIR) && go run ./market-data/cmd/market-data-admin --config configs/market-data.local.toml queue-status
 
 .PHONY: kline-check
 kline-check:
