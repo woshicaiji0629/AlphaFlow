@@ -44,6 +44,11 @@ func TestKeysUseExistingRedisProtocol(t *testing.T) {
 			want: "bn:um:indrt:ETHUSDT:3m",
 		},
 		{
+			name: "data health",
+			got:  DataHealthKey("binance", "um", "ETHUSDT", "3m"),
+			want: "bn:um:health:ETHUSDT:3m",
+		},
+		{
 			name: "last price",
 			got:  LastPriceKey("binance", "um", "ETHUSDT"),
 			want: "bn:um:lp:ETHUSDT",

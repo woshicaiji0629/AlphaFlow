@@ -186,10 +186,48 @@ func buildRuntime(
 		ScanInterval:    config.AggregationScanInterval(),
 		LookbackPeriods: config.KlineLimit(),
 	})
-	indicatorRunner := indicator.NewRunner(marketStore, indicator.RunnerOptions{
+	indicatorRunnerOptions := indicator.RunnerOptions{
 		Rules:           indicatorRules(cfg),
 		ScanInterval:    config.IndicatorScanInterval(),
 		LookbackPeriods: config.IndicatorLookbackPeriods(),
+	}
+	if cfg.Indicator.Enabled {
+		indicatorAckWait, err := config.IndicatorQueueAckWait(cfg)
+		if err != nil {
+			_ = marketStore.Close()
+			return nil, nil, nil, nil, nil, 0, err
+		}
+		indicatorWorkerMaxWait, err := config.IndicatorQueueWorkerMaxWait(cfg)
+		if err != nil {
+			_ = marketStore.Close()
+			return nil, nil, nil, nil, nil, 0, err
+		}
+		indicatorQueue, err := indicator.NewNATSTaskQueue(indicator.NATSTaskQueueOptions{
+			URL:           cfg.NATS.URL,
+			AckWait:       indicatorAckWait,
+			MaxDeliveries: cfg.Indicator.MaxDeliveries,
+			MaxPending:    cfg.Indicator.MaxPending,
+		})
+		if err != nil {
+			_ = marketStore.Close()
+			return nil, nil, nil, nil, nil, 0, fmt.Errorf("connect nats indicator task queue: %w", err)
+		}
+		indicatorRunnerOptions.TaskQueue = indicatorQueue
+		indicatorRunnerOptions.TaskBatch = cfg.Indicator.WorkerBatch
+		indicatorRunnerOptions.TaskMaxWait = indicatorWorkerMaxWait
+		indicatorRunnerOptions.TaskMaxDeliveries = cfg.Indicator.MaxDeliveries
+		indicatorRunnerOptions.TaskWorkers = cfg.Indicator.WorkerCount
+	}
+	indicatorRunner := indicator.NewRunner(marketStore, indicator.RunnerOptions{
+		Rules:             indicatorRunnerOptions.Rules,
+		ScanInterval:      indicatorRunnerOptions.ScanInterval,
+		LookbackPeriods:   indicatorRunnerOptions.LookbackPeriods,
+		CalculateOptions:  indicatorRunnerOptions.CalculateOptions,
+		TaskQueue:         indicatorRunnerOptions.TaskQueue,
+		TaskBatch:         indicatorRunnerOptions.TaskBatch,
+		TaskMaxWait:       indicatorRunnerOptions.TaskMaxWait,
+		TaskMaxDeliveries: indicatorRunnerOptions.TaskMaxDeliveries,
+		TaskWorkers:       indicatorRunnerOptions.TaskWorkers,
 	})
 	healthRunner := health.NewRunner(marketStore, health.Options{
 		Rules:        healthRules(cfg),

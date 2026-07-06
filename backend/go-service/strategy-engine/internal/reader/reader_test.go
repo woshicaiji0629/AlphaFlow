@@ -13,11 +13,32 @@ type fakeHashReader struct {
 	hashes map[string]map[string]string
 }
 
+type fakeStringReader struct {
+	values map[string]string
+}
+
 func (r fakeHashReader) HGetAll(ctx context.Context, key string) (map[string]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return r.hashes[key], nil
+}
+
+func (r fakeStringReader) Get(ctx context.Context, key string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	value, ok := r.values[key]
+	if !ok {
+		return "", redisNil{}
+	}
+	return value, nil
+}
+
+type redisNil struct{}
+
+func (redisNil) Error() string {
+	return "redis: nil"
 }
 
 func TestReaderReadBuildsStrategyContext(t *testing.T) {
@@ -234,6 +255,43 @@ func TestReaderReadReturnsStaleSnapshotError(t *testing.T) {
 	_, err = reader.Read(context.Background(), target, nil)
 	if err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("Read() error = %v, want stale snapshot error", err)
+	}
+}
+
+func TestReaderReadReturnsUnhealthyIndicatorError(t *testing.T) {
+	target := strategy.Target{
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "3m",
+	}
+	reader, err := New(Options{
+		Hashes: fakeHashReader{hashes: map[string]map[string]string{
+			marketkeys.IndicatorWindowKey("binance", "um", "ETHUSDT", "3m"): {
+				"meta:open_time":    "3000",
+				"meta:close_time":   "4000",
+				"meta:age_limit_ms": "6000",
+				"meta:updated_at":   "3500",
+			},
+			marketkeys.IndicatorRealtimeKey("binance", "um", "ETHUSDT", "3m"): {
+				"meta:open_time":    "4000",
+				"meta:close_time":   "5000",
+				"meta:age_limit_ms": "6000",
+				"meta:updated_at":   "4500",
+			},
+		}},
+		Strings: fakeStringReader{values: map[string]string{
+			marketkeys.DataHealthKey("binance", "um", "ETHUSDT", "3m"): `{"kline_status":"ok","indicator_status":"stale","last_kline_open_time":4000,"last_indicator_open_time":2000,"reason":"indicator stale","updated_at":4500}`,
+		}},
+		Now: func() int64 { return 5000 },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = reader.Read(context.Background(), target, nil)
+	if err == nil || !strings.Contains(err.Error(), "not ok") {
+		t.Fatalf("Read() error = %v, want health not ok error", err)
 	}
 }
 

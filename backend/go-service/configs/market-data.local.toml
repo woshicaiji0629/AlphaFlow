@@ -39,6 +39,15 @@ worker_enabled = true
 worker_batch = 1
 worker_max_wait = "1s"
 
+[indicator_queue]
+enabled = true
+ack_wait = "30s"
+max_deliveries = 5
+max_pending = 100000
+worker_batch = 32
+worker_max_wait = "1s"
+worker_count = 0
+
 [logging]
 service = "market-data"
 level = "info"

@@ -2,6 +2,7 @@ package reader
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,6 +16,10 @@ import (
 
 type HashReader interface {
 	HGetAll(ctx context.Context, key string) (map[string]string, error)
+}
+
+type StringReader interface {
+	Get(ctx context.Context, key string) (string, error)
 }
 
 type RedisHashReader struct {
@@ -32,14 +37,23 @@ func (r RedisHashReader) HGetAll(ctx context.Context, key string) (map[string]st
 	return r.client.HGetAll(ctx, key).Result()
 }
 
+func (r RedisHashReader) Get(ctx context.Context, key string) (string, error) {
+	if r.client == nil {
+		return "", fmt.Errorf("redis client is required")
+	}
+	return r.client.Get(ctx, key).Result()
+}
+
 type Options struct {
-	Hashes HashReader
-	Now    func() int64
+	Hashes  HashReader
+	Strings StringReader
+	Now     func() int64
 }
 
 type Reader struct {
-	hashes HashReader
-	now    func() int64
+	hashes  HashReader
+	strings StringReader
+	now     func() int64
 }
 
 func New(options Options) (*Reader, error) {
@@ -50,8 +64,9 @@ func New(options Options) (*Reader, error) {
 		options.Now = func() int64 { return time.Now().UnixMilli() }
 	}
 	return &Reader{
-		hashes: options.Hashes,
-		now:    options.Now,
+		hashes:  options.Hashes,
+		strings: options.Strings,
+		now:     options.Now,
 	}, nil
 }
 
@@ -118,6 +133,10 @@ func (r *Reader) readSnapshot(
 	if err != nil {
 		return strategy.Snapshot{}, err
 	}
+	health, err := r.readHealth(ctx, target, interval, window.OpenTime)
+	if err != nil {
+		return strategy.Snapshot{}, err
+	}
 	realtime := strategy.IndicatorView{}
 	current := marketmodel.Kline{}
 	if requireRealtime {
@@ -132,7 +151,7 @@ func (r *Reader) readSnapshot(
 		Indicator: realtime,
 		Window:    window,
 		Price:     priceFromRealtime(realtime, current),
-		Health:    strategy.HealthView{OK: true, UpdatedAt: maxInt64(realtime.UpdatedAt, window.UpdatedAt)},
+		Health:    healthWithUpdatedAt(health, maxInt64(health.UpdatedAt, realtime.UpdatedAt, window.UpdatedAt)),
 		UpdatedAt: maxInt64(realtime.UpdatedAt, window.UpdatedAt),
 	}, nil
 }
@@ -192,6 +211,46 @@ func (r *Reader) readRealtime(
 	}, klineFromFields(target, interval, fields), nil
 }
 
+type dataHealth struct {
+	KlineStatus           string `json:"kline_status"`
+	IndicatorStatus       string `json:"indicator_status"`
+	LastKlineOpenTime     int64  `json:"last_kline_open_time,omitempty"`
+	LastIndicatorOpenTime int64  `json:"last_indicator_open_time,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+	UpdatedAt             int64  `json:"updated_at"`
+}
+
+func (r *Reader) readHealth(ctx context.Context, target strategy.Target, interval string, windowOpenTime int64) (strategy.HealthView, error) {
+	if r.strings == nil {
+		return strategy.HealthView{OK: true}, nil
+	}
+	key := marketkeys.DataHealthKey(target.Exchange, target.Market, target.Symbol, interval)
+	raw, err := r.strings.Get(ctx, key)
+	if err != nil {
+		return strategy.HealthView{}, fmt.Errorf("read data health %s: %w", key, err)
+	}
+	var health dataHealth
+	if err := json.Unmarshal([]byte(raw), &health); err != nil {
+		return strategy.HealthView{}, fmt.Errorf("decode data health %s: %w", key, err)
+	}
+	if health.KlineStatus != "ok" || health.IndicatorStatus != "ok" {
+		return strategy.HealthView{}, fmt.Errorf("data health %s not ok: kline=%s indicator=%s reason=%s",
+			key,
+			health.KlineStatus,
+			health.IndicatorStatus,
+			health.Reason,
+		)
+	}
+	if windowOpenTime > 0 && health.LastIndicatorOpenTime > 0 && health.LastIndicatorOpenTime < windowOpenTime {
+		return strategy.HealthView{}, fmt.Errorf("data health %s indicator cursor behind window: indicator_open_time=%d window_open_time=%d",
+			key,
+			health.LastIndicatorOpenTime,
+			windowOpenTime,
+		)
+	}
+	return strategy.HealthView{OK: true, Reason: health.Reason, UpdatedAt: health.UpdatedAt}, nil
+}
+
 func (r *Reader) readHash(ctx context.Context, key string) (map[string]string, error) {
 	fields, err := r.hashes.HGetAll(ctx, key)
 	if err != nil {
@@ -201,6 +260,11 @@ func (r *Reader) readHash(ctx context.Context, key string) (map[string]string, e
 		return nil, fmt.Errorf("redis hash %s missing", key)
 	}
 	return fields, nil
+}
+
+func healthWithUpdatedAt(h strategy.HealthView, updatedAt int64) strategy.HealthView {
+	h.UpdatedAt = updatedAt
+	return h
 }
 
 func checkFreshness(fields map[string]string, now int64) error {
@@ -437,9 +501,12 @@ func parseInt(value string) (int64, error) {
 	return strconv.ParseInt(value, 10, 64)
 }
 
-func maxInt64(left int64, right int64) int64 {
-	if left > right {
-		return left
+func maxInt64(values ...int64) int64 {
+	var max int64
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
 	}
-	return right
+	return max
 }

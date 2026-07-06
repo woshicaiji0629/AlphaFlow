@@ -132,3 +132,31 @@ func BackfillWorkerMaxWait(cfg Config) (time.Duration, error) {
 	}
 	return wait, nil
 }
+
+func IndicatorQueueAckWait(cfg Config) (time.Duration, error) {
+	if cfg.Indicator.AckWait == "" {
+		return 30 * time.Second, nil
+	}
+	wait, err := time.ParseDuration(cfg.Indicator.AckWait)
+	if err != nil {
+		return 0, fmt.Errorf("parse indicator_queue ack_wait: %w", err)
+	}
+	if wait <= 0 {
+		return 0, fmt.Errorf("indicator_queue ack_wait must be positive")
+	}
+	return wait, nil
+}
+
+func IndicatorQueueWorkerMaxWait(cfg Config) (time.Duration, error) {
+	if cfg.Indicator.WorkerMaxWait == "" {
+		return time.Second, nil
+	}
+	wait, err := time.ParseDuration(cfg.Indicator.WorkerMaxWait)
+	if err != nil {
+		return 0, fmt.Errorf("parse indicator_queue worker_max_wait: %w", err)
+	}
+	if wait <= 0 {
+		return 0, fmt.Errorf("indicator_queue worker_max_wait must be positive")
+	}
+	return wait, nil
+}

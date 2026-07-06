@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	Binance    BinanceConfig    `toml:"binance"`
-	Gate       GateConfig       `toml:"gate"`
-	Bitget     BitgetConfig     `toml:"bitget"`
-	Bybit      BybitConfig      `toml:"bybit"`
-	NATS       NATSConfig       `toml:"nats"`
-	ClickHouse ClickHouseConfig `toml:"clickhouse"`
-	Backfill   BackfillConfig   `toml:"backfill_queue"`
-	Logging    LoggingConfig    `toml:"logging"`
+	Binance    BinanceConfig        `toml:"binance"`
+	Gate       GateConfig           `toml:"gate"`
+	Bitget     BitgetConfig         `toml:"bitget"`
+	Bybit      BybitConfig          `toml:"bybit"`
+	NATS       NATSConfig           `toml:"nats"`
+	ClickHouse ClickHouseConfig     `toml:"clickhouse"`
+	Backfill   BackfillConfig       `toml:"backfill_queue"`
+	Indicator  IndicatorQueueConfig `toml:"indicator_queue"`
+	Logging    LoggingConfig        `toml:"logging"`
 }
 
 type BinanceConfig struct {
@@ -70,6 +71,16 @@ type BackfillConfig struct {
 	WorkerEnabled bool   `toml:"worker_enabled"`
 	WorkerBatch   int    `toml:"worker_batch"`
 	WorkerMaxWait string `toml:"worker_max_wait"`
+}
+
+type IndicatorQueueConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	AckWait       string `toml:"ack_wait"`
+	MaxDeliveries int    `toml:"max_deliveries"`
+	MaxPending    int64  `toml:"max_pending"`
+	WorkerBatch   int    `toml:"worker_batch"`
+	WorkerMaxWait string `toml:"worker_max_wait"`
+	WorkerCount   int    `toml:"worker_count"`
 }
 
 type LoggingConfig struct {
@@ -144,6 +155,15 @@ func defaultConfig() Config {
 			WorkerBatch:   1,
 			WorkerMaxWait: "1s",
 		},
+		Indicator: IndicatorQueueConfig{
+			Enabled:       true,
+			AckWait:       "30s",
+			MaxDeliveries: 5,
+			MaxPending:    100000,
+			WorkerBatch:   32,
+			WorkerMaxWait: "1s",
+			WorkerCount:   0,
+		},
 		Logging: LoggingConfig{
 			Service:    "market-data",
 			Level:      "info",
@@ -164,11 +184,37 @@ func validate(cfg Config) error {
 		validateExchangeSymbols,
 		validateClickHouse,
 		validateBackfillQueue,
+		validateIndicatorQueue,
 	}
 	for _, validator := range validators {
 		if err := validator(cfg); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateIndicatorQueue(cfg Config) error {
+	if !cfg.Indicator.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.NATS.URL) == "" {
+		return fmt.Errorf("nats url cannot be empty when indicator_queue enabled")
+	}
+	if _, err := IndicatorQueueAckWait(cfg); err != nil {
+		return err
+	}
+	if cfg.Indicator.MaxDeliveries <= 0 {
+		return fmt.Errorf("indicator_queue.max_deliveries must be positive")
+	}
+	if cfg.Indicator.WorkerBatch <= 0 {
+		return fmt.Errorf("indicator_queue.worker_batch must be positive")
+	}
+	if cfg.Indicator.WorkerCount < 0 {
+		return fmt.Errorf("indicator_queue.worker_count cannot be negative")
+	}
+	if _, err := IndicatorQueueWorkerMaxWait(cfg); err != nil {
+		return err
 	}
 	return nil
 }
@@ -267,6 +313,8 @@ func normalize(cfg *Config) {
 	cfg.ClickHouse.PendingAckWait = strings.TrimSpace(cfg.ClickHouse.PendingAckWait)
 	cfg.Backfill.AckWait = strings.TrimSpace(cfg.Backfill.AckWait)
 	cfg.Backfill.WorkerMaxWait = strings.TrimSpace(cfg.Backfill.WorkerMaxWait)
+	cfg.Indicator.AckWait = strings.TrimSpace(cfg.Indicator.AckWait)
+	cfg.Indicator.WorkerMaxWait = strings.TrimSpace(cfg.Indicator.WorkerMaxWait)
 
 	for index, symbol := range cfg.Binance.Symbols {
 		cfg.Binance.Symbols[index] = strings.ToUpper(strings.TrimSpace(symbol))

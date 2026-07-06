@@ -61,10 +61,15 @@ type Rule struct {
 }
 
 type RunnerOptions struct {
-	Rules            []Rule
-	ScanInterval     time.Duration
-	LookbackPeriods  int64
-	CalculateOptions indicatorcalc.Options
+	Rules             []Rule
+	ScanInterval      time.Duration
+	LookbackPeriods   int64
+	CalculateOptions  indicatorcalc.Options
+	TaskQueue         TaskQueue
+	TaskBatch         int
+	TaskMaxWait       time.Duration
+	TaskMaxDeliveries int
+	TaskWorkers       int
 }
 
 type Runner struct {
@@ -95,6 +100,18 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 		len(options.CalculateOptions.WMAPeriods) == 0 {
 		options.CalculateOptions = indicatorcalc.DefaultOptions()
 	}
+	if options.TaskBatch <= 0 {
+		options.TaskBatch = 32
+	}
+	if options.TaskMaxWait <= 0 {
+		options.TaskMaxWait = time.Second
+	}
+	if options.TaskMaxDeliveries <= 0 {
+		options.TaskMaxDeliveries = 5
+	}
+	if options.TaskWorkers <= 0 {
+		options.TaskWorkers = workerCount(1000)
+	}
 	return &Runner{
 		store:                   store,
 		options:                 options,
@@ -106,6 +123,9 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
+	if r.options.TaskQueue != nil {
+		return r.runQueued(ctx)
+	}
 	r.runOnceWithLogging(ctx)
 
 	ticker := time.NewTicker(r.options.ScanInterval)
@@ -121,32 +141,136 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
-func (r *Runner) RunOnce(ctx context.Context) error {
-	var errs []error
-	jobs := make([]indicatorJob, 0)
-	for _, rule := range r.options.Rules {
-		if err := validateRule(rule); err != nil {
-			errs = append(errs, err)
-			continue
+func (r *Runner) runQueued(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		if err := r.options.TaskQueue.Close(); err != nil {
+			slog.Error("close indicator task queue failed", "error", err)
 		}
-		available, err := r.store.IsMarketAvailable(ctx, rule.Exchange, rule.Market)
+	}()
+
+	errCh := make(chan error, r.options.TaskWorkers+1)
+	var wg sync.WaitGroup
+	for worker := 0; worker < r.options.TaskWorkers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- r.runTaskWorker(ctx)
+		}()
+	}
+
+	r.enqueueDueJobsWithLogging(ctx)
+	ticker := time.NewTicker(r.options.ScanInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			wg.Wait()
+			return nil
+		case err := <-errCh:
+			cancel()
+			wg.Wait()
+			if err == nil || ctx.Err() != nil {
+				return nil
+			}
+			return err
+		case <-ticker.C:
+			r.enqueueDueJobsWithLogging(ctx)
+		}
+	}
+}
+
+func (r *Runner) runTaskWorker(ctx context.Context) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		messages, err := r.options.TaskQueue.Fetch(ctx, r.options.TaskBatch, r.options.TaskMaxWait)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("read market status %s %s: %w", rule.Exchange, rule.Market, err))
-			continue
+			return err
 		}
-		if !available {
-			slog.Warn("skip indicators for unavailable market", "exchange", rule.Exchange, "market", rule.Market)
-			continue
-		}
-		for _, symbol := range rule.Symbols {
-			for _, interval := range rule.Intervals {
-				jobs = append(jobs, indicatorJob{
-					rule:     rule,
-					symbol:   symbol,
-					interval: interval,
-				})
+		for _, message := range messages {
+			if err := r.processTaskMessage(ctx, message); err != nil {
+				slog.Error("process indicator task failed", "message_id", message.ID, "error", err)
 			}
 		}
+	}
+}
+
+func (r *Runner) processTaskMessage(ctx context.Context, message TaskMessage) error {
+	if message.DecodeError != "" {
+		if err := r.options.TaskQueue.DeadLetter(ctx, message, message.DecodeError); err != nil {
+			return err
+		}
+		return r.options.TaskQueue.Ack(ctx, []TaskMessage{message})
+	}
+	rule := Rule{
+		Exchange:  message.Task.Exchange,
+		Market:    message.Task.Market,
+		Symbols:   []string{message.Task.Symbol},
+		Intervals: []string{message.Task.Interval},
+	}
+	err := r.calculateSymbolInterval(ctx, rule, message.Task.Symbol, message.Task.Interval)
+	if err == nil {
+		return r.options.TaskQueue.Ack(ctx, []TaskMessage{message})
+	}
+	if message.DeliveryCount >= int64(r.options.TaskMaxDeliveries) {
+		if dlqErr := r.options.TaskQueue.DeadLetter(ctx, message, err.Error()); dlqErr != nil {
+			return dlqErr
+		}
+		if ackErr := r.options.TaskQueue.Ack(ctx, []TaskMessage{message}); ackErr != nil {
+			return ackErr
+		}
+		return err
+	}
+	return err
+}
+
+func (r *Runner) enqueueDueJobsWithLogging(ctx context.Context) {
+	if err := r.EnqueueDueJobs(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("enqueue indicator tasks failed", "error", err)
+	}
+}
+
+func (r *Runner) EnqueueDueJobs(ctx context.Context) error {
+	if r.options.TaskQueue == nil {
+		return r.RunOnce(ctx)
+	}
+	jobs, err := r.dueJobs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		lastOpenTime, ok, err := r.store.LastOpenTime(ctx, job.rule.Exchange, job.rule.Market, job.symbol, job.interval)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if _, err := r.options.TaskQueue.Publish(ctx, Task{
+			Exchange:     job.rule.Exchange,
+			Market:       job.rule.Market,
+			Symbol:       job.symbol,
+			Interval:     job.interval,
+			LastOpenTime: lastOpenTime,
+		}); err != nil {
+			return err
+		}
+	}
+	if len(jobs) > 0 {
+		slog.Debug("enqueued indicator tasks", "tasks", len(jobs))
+	}
+	return nil
+}
+
+func (r *Runner) RunOnce(ctx context.Context) error {
+	var errs []error
+	jobs, err := r.dueJobs(ctx)
+	if err != nil {
+		errs = append(errs, err)
 	}
 
 	if len(jobs) == 0 {
@@ -190,6 +314,69 @@ sendJobs:
 	close(jobCh)
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+func (r *Runner) dueJobs(ctx context.Context) ([]indicatorJob, error) {
+	var errs []error
+	jobs := make([]indicatorJob, 0)
+	for _, rule := range r.options.Rules {
+		if err := validateRule(rule); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		available, err := r.store.IsMarketAvailable(ctx, rule.Exchange, rule.Market)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read market status %s %s: %w", rule.Exchange, rule.Market, err))
+			continue
+		}
+		if !available {
+			slog.Warn("skip indicators for unavailable market", "exchange", rule.Exchange, "market", rule.Market)
+			continue
+		}
+		for _, symbol := range rule.Symbols {
+			for _, interval := range rule.Intervals {
+				if due, err := r.needsCalculation(ctx, rule, symbol, interval); err != nil {
+					errs = append(errs, fmt.Errorf("check indicator task %s %s %s %s: %w",
+						rule.Exchange,
+						rule.Market,
+						symbol,
+						interval,
+						err,
+					))
+				} else if due {
+					jobs = append(jobs, indicatorJob{
+						rule:     rule,
+						symbol:   symbol,
+						interval: interval,
+					})
+				}
+			}
+		}
+	}
+	return jobs, errors.Join(errs...)
+}
+
+func (r *Runner) needsCalculation(ctx context.Context, rule Rule, symbol string, interval string) (bool, error) {
+	lastOpenTime, ok, err := r.store.LastOpenTime(ctx, rule.Exchange, rule.Market, symbol, interval)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
+	if r.calculatedThrough(key, lastOpenTime) {
+		return false, nil
+	}
+	lastIndicatorOpenTime, hasLastIndicator, err := r.store.LastIndicatorOpenTime(ctx, rule.Exchange, rule.Market, symbol, interval)
+	if err != nil {
+		return false, err
+	}
+	if hasLastIndicator && lastIndicatorOpenTime >= lastOpenTime {
+		r.rememberCalculatedOpenTime(key, lastIndicatorOpenTime)
+		return false, nil
+	}
+	return true, nil
 }
 
 func (r *Runner) runOnceWithLogging(ctx context.Context) {

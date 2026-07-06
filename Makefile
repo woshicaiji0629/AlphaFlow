@@ -41,7 +41,7 @@ help:
 	@echo "  make postgres-down     Stop local PostgreSQL"
 	@echo "  make postgres-logs     Tail PostgreSQL logs"
 	@echo "  make postgres-shell    Open psql in the PostgreSQL container"
-	@echo "  make infra-up          Start Redis, ClickHouse, and PostgreSQL"
+	@echo "  make infra-up          Start Redis, NATS, ClickHouse, and PostgreSQL"
 	@echo "  make live-up           Start live market-data stack"
 	@echo "  make market-data-up    Start market-data with Docker"
 	@echo "  make market-data-down  Stop market-data"
@@ -50,7 +50,8 @@ help:
 	@echo "  make kline-backfill    Run kline backfill with ClickHouse only"
 	@echo "  make kline-delete-dryrun  Preview kline delete range with ClickHouse only"
 	@echo "  make kline-delete-confirm Submit kline delete mutation with ClickHouse only"
-	@echo "  make stack-up          Start Redis, ClickHouse, PostgreSQL, and market-data"
+	@echo "  make stack-up          Start Redis, NATS, ClickHouse, PostgreSQL, and market-data"
+	@echo "  make stack-down        Stop all Docker Compose profile services"
 	@echo "  make check            Run all available checks"
 
 .PHONY: py-sync
@@ -149,7 +150,7 @@ redis-up:
 
 .PHONY: redis-down
 redis-down:
-	docker compose down
+	docker compose stop redis
 
 .PHONY: redis-logs
 redis-logs:
@@ -230,6 +231,10 @@ kline-delete-confirm:
 .PHONY: stack-up
 stack-up:
 	docker compose --profile infra --profile live up -d --build
+
+.PHONY: stack-down
+stack-down:
+	docker compose --profile infra --profile live --profile jobs down --remove-orphans
 
 .PHONY: check
 check: py-check go-market-data-check

@@ -48,7 +48,8 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer closePublisher()
-	runtime, err := buildRuntime(cfg, reader.NewRedisHashReader(redisClient), positionStore, eventStore, publisher)
+	redisReader := reader.NewRedisHashReader(redisClient)
+	runtime, err := buildRuntime(cfg, redisReader, redisReader, positionStore, eventStore, publisher)
 	if err != nil {
 		return err
 	}
@@ -71,11 +72,12 @@ type runtimeState struct {
 func buildRuntime(
 	cfg config.Config,
 	hashes reader.HashReader,
+	strings reader.StringReader,
 	positionStore position.Store,
 	eventStore position.EventStore,
 	publisher runner.DecisionPublisher,
 ) (runtimeState, error) {
-	snapshotReader, err := reader.New(reader.Options{Hashes: hashes})
+	snapshotReader, err := reader.New(reader.Options{Hashes: hashes, Strings: strings})
 	if err != nil {
 		return runtimeState{}, err
 	}

@@ -30,6 +30,10 @@ func IndicatorRealtimeKey(exchange string, market string, symbol string, interva
 	return fmt.Sprintf("%s:%s:indrt:%s:%s", ExchangeCode(exchange), market, symbol, interval)
 }
 
+func DataHealthKey(exchange string, market string, symbol string, interval string) string {
+	return fmt.Sprintf("%s:%s:health:%s:%s", ExchangeCode(exchange), market, symbol, interval)
+}
+
 func LastPriceKey(exchange string, market string, symbol string) string {
 	return fmt.Sprintf("%s:%s:lp:%s", ExchangeCode(exchange), market, symbol)
 }
