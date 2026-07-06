@@ -259,6 +259,20 @@ dead_letter_subject: market.indicator.calculate.dead
 
 策略决策不直接依赖队列是否为空。可决策条件以 Redis health/cursor 为准：`kline_status == ok`、`indicator_status == ok`，并且 `last_indicator_open_time` 已追上对应窗口 open time。`strategy-engine` 读取 Redis snapshot 时会读取 `health` key；如果指标还在异步队列中导致 health 为 `missing` 或 `stale`，reader 会返回错误，策略不会拿到可决策 snapshot。
 
+本地可用 `queue-status` 查看队列积压：
+
+```sh
+make queue-status
+```
+
+可用 `market-health` 同时查看 Redis health/cursor 和 NATS queue lag：
+
+```sh
+make market-health ARGS='--exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m'
+```
+
+`market-health` 输出的 `DECISION_READY=true` 只表示指定交易对和周期的 Redis health 已满足策略 reader 的基本门槛：K 线和指标状态均为 `ok`，且传入 `--window-open-time` 时指标 cursor 没有落后该窗口。它不是完整的 ClickHouse 历史完整性验收；历史缺口仍使用 `stats`、`check` 和 `backfill` 处理。
+
 `pkg/clickhousemarket` 同时提供历史读取接口：
 
 - `RangeKlines`：按交易所、市场、交易对、周期和 open time 范围读取 K 线历史。
@@ -576,6 +590,42 @@ make go-market-data-run
 ```
 
 也可以用 `market-data-admin backfill-worker` 手工消费队列做排查或补偿，不作为默认部署形态。stream、subject、durable 和 dead-letter subject 由 `market-data` 代码内部约定；`backfill_queue` 只保留 ack wait、最大投递次数、积压上限和进程内 worker 开关等运行参数。执行成功后 Ack；失败时等待 JetStream 重投递；达到最大投递次数后写入 dead-letter subject 并 Ack 原任务。当前第一版不提供任务状态查询 API。
+
+#### queue-status
+
+`queue-status` 是只读观测命令，用于查看当前 NATS JetStream stream 和 durable consumer 的积压：
+
+```sh
+make queue-status
+```
+
+当前覆盖：
+
+- `ALPHAFLOW_MARKET_INDICATOR` / `market-data-indicator-worker`
+- `ALPHAFLOW_MARKET_PENDING` / `market-data-clickhouse-pending`
+- `ALPHAFLOW_MARKET_BACKFILL` / `market-data-backfill-worker`
+- `ALPHAFLOW_STRATEGY` / `position-engine`
+
+输出中的 `missing_stream` 或 `missing_consumer` 通常表示对应服务尚未启动或尚未创建该队列；这本身不是数据丢失结论。
+
+#### market-health
+
+`market-health` 是策略决策前的只读观测命令，用于把 Redis health/cursor 和 NATS queue lag 放在同一次输出里：
+
+```sh
+make market-health ARGS='--exchange binance --market um --symbol ETHUSDT --intervals 1m,3m,5m'
+```
+
+核心字段：
+
+- `KLINE`：Redis health 中的 `kline_status`。
+- `INDICATOR`：Redis health 中的 `indicator_status`。
+- `LAST_KLINE`：最新已闭合 K 线 open time。
+- `LAST_INDICATOR`：最新已计算指标 open time。
+- `READY`：该周期是否满足可读 snapshot 的基本 health 条件。
+- `DECISION_READY`：所有请求周期都 ready 时为 `true`。
+
+可选传入 `--window-open-time`，用于检查 `last_indicator_open_time` 是否追上某个策略窗口 open time。
 
 Docker 下可以用短命令跑同一类 K 线维护任务；它们使用 `jobs` profile，只会按需启动 ClickHouse：
 

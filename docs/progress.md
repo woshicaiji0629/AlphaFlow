@@ -72,6 +72,7 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - 本地 Docker Compose 已加入 NATS JetStream，文件存储目录为 `data/nats`。
 - 最近一次清空 Redis 和 ClickHouse 后的全链路本地验证已跑通：`market-data` 能重新写入 Redis 缓存和 ClickHouse K 线，NATS strategy bus smoke 通过。
 - `strategy-engine` 读取 Redis snapshot 时已接入 health gate；指标异步队列未追上导致 health 为 `missing` 或 `stale` 时，不会产出可决策 snapshot。
+- 已新增 `queue-status` 和 `market-health` 本地观测命令：前者查看 NATS JetStream stream/consumer 积压，后者合并展示 Redis health/cursor、`DECISION_READY` 和队列状态。
 
 ## 关键决策
 
@@ -97,11 +98,11 @@ ClickHouse 历史 K 线 / Redis 实时特征
 - HTTP 健康检查接口尚未实现。
 - 管理 API 和前端尚未实现。
 - ClickHouse 表当前通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
-- top500 指标队列积压、Redis ops 和实时采集延迟仍需要长时间全链路压测确认；不能把最近一次小样本压测结果当作生产 SLA。
+- top500 场景下的 Redis ops、NATS 队列积压、ClickHouse 写入和实时采集延迟仍需要长时间全链路压测确认；不能把最近一次小样本压测结果当作生产 SLA。
 
 ## 建议下一步
 
-1. 做一次 top500 长时间全链路压测，观察 Redis、NATS、ClickHouse、market-data 和策略链路积压。
+1. 做一次 top500 长时间全链路压测，观察 Redis、NATS、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
 2. 根据压测结果继续优化指标 worker 数、batch、增量预热或更细粒度缓存。
 3. 补回测图表报告和结果查询入口。
 4. 补回测参数化运行和策略配置加载。
@@ -120,4 +121,4 @@ ClickHouse 历史 K 线 / Redis 实时特征
 GO111MODULE=on go test ./...
 ```
 
-最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证、指标 runner 性能优化和指标扫描任务队列化。
+最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证、指标 runner 性能优化、指标扫描任务队列化，以及 `queue-status` / `market-health` 观测命令。
