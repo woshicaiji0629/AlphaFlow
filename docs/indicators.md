@@ -45,6 +45,36 @@
 
 策略应优先使用适配语义字段；只有当策略需要更细粒度判断时，再读取通用窗口字段。
 
+## 计算窗口和 realtime 性能
+
+`market-data/internal/indicator` 的 runner 会缓存每个交易所、市场、交易对和周期的 `CalculationWindow`。窗口缓存只包含已闭合 K 线；当前未收盘 K 线进入 realtime 路径时，会基于缓存窗口 clone 一个临时窗口，再把 open kline 临时标记为 closed 后追加计算。临时窗口不会写回 runner 缓存，因此不会污染后续 closed K 线窗口。
+
+`pkg/indicatorcalc.CalculationWindow` 支持基础指标流式状态。runner 在长期缓存窗口和窗口快照递推窗口上启用该状态，连续追加 K 线时复用以下中间结果：
+
+- SMA 和 volume SMA。
+- EMA。
+- RSI 14 序列。
+- ATR 14 序列。
+- 标准 MACD 和快速 MACD 序列。
+- OBV。
+- VWAP。
+
+这些状态只用于减少重复计算；指标输出仍由 `CalculateWindow` 统一生成。窗口出现缺口或需要替换最后一根 K 线时，runner 会回退到重新构建窗口，优先保持语义正确。
+
+当前可用 benchmark：
+
+```text
+go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTemporaryKlineRealtime -benchmem
+```
+
+它覆盖 realtime open kline 的临时窗口构造和 `CalculateWindow` 完整特征计算。一次本地基线结果为：
+
+```text
+BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 B/op    4830 allocs/op
+```
+
+该基线表明 realtime 路径仍主要受完整特征计算成本影响。后续如果继续降 CPU，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+
 ## 策略常用语义特征
 
 ### 拉盘/砸盘窗口
