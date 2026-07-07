@@ -123,8 +123,15 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 	atr14Offset := len(closes) - len(atr14)
 	stATROffset := len(closes) - len(stATR)
 	sources := [][]float64{opens, highs, lows, closes}
+	featureCaches := [4]aiSourceFeatureCache{}
+	for sourceID := range sources {
+		featureCaches[sourceID] = newAISourceFeatureCache(sources[sourceID])
+	}
 	banks := make([][]aiSourceRow, 4)
-	allBank := []aiSourceRow{}
+	for sourceID := range banks {
+		banks[sourceID] = make([]aiSourceRow, 0, cfg.memoryDepth)
+	}
+	allBank := make([]aiSourceRow, 0, cfg.memoryDepth*4)
 	weights := [6]float64{1, 1, 1, 1, 1, 1}
 	neural := aiSourceNeuralState{weights: [6]float64{0.01, 0.01, 0.01, 0.01, 0.01, 0.01}}
 	smoothedSource := make([]float64, 0, len(closes))
@@ -144,13 +151,13 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 		validFeatures := [4]bool{}
 		atrValue := atrValueAt(index, atr14, atr14Offset)
 		for sourceID := 0; sourceID < 4; sourceID++ {
-			features[sourceID], validFeatures[sourceID] = aiSourceFeatures(sources[sourceID], highs, lows, index, atrValue)
+			features[sourceID], validFeatures[sourceID] = aiSourceFeaturesFromCache(featureCaches[sourceID], sources[sourceID], highs, lows, index, atrValue)
 		}
 		if sampleIndex := index - cfg.horizonBars; sampleIndex >= 0 {
 			outcome := aiSourceOutcome(closes, sampleIndex, index, atrValueAt(sampleIndex, atr14, atr14Offset), cfg.learnATRFactor)
 			for sourceID := 0; sourceID < 4; sourceID++ {
 				if outcome != 0 {
-					sampleFeatures, ok := aiSourceFeatures(sources[sourceID], highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
+					sampleFeatures, ok := aiSourceFeaturesFromCache(featureCaches[sourceID], sources[sourceID], highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
 					if ok {
 						row := aiSourceRow{features: sampleFeatures, outcome: outcome}
 						banks[sourceID] = prependAISourceRow(banks[sourceID], row, cfg.memoryDepth)
@@ -158,7 +165,7 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 					}
 				}
 			}
-			closeFeatures, ok := aiSourceFeatures(closes, highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
+			closeFeatures, ok := aiSourceFeaturesFromCache(featureCaches[aiSourceClose], closes, highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
 			if ok && outcome != 0 {
 				aiSourceTrainNeural(&neural, closeFeatures, outcome, cfg)
 			}
@@ -266,6 +273,98 @@ func validAISourceInput(opens []float64, highs []float64, lows []float64, closes
 	return len(closes) >= minLength && len(opens) == len(closes) && len(highs) == len(closes) && len(lows) == len(closes)
 }
 
+type aiSourceFeatureCache struct {
+	points []aiSourceFeatureCachePoint
+}
+
+type aiSourceFeatureCachePoint struct {
+	ema10      float64
+	ema34      float64
+	sma30      float64
+	stddev30   float64
+	stddev20   float64
+	volLow100  float64
+	volHigh100 float64
+}
+
+func newAISourceFeatureCache(source []float64) aiSourceFeatureCache {
+	cache := aiSourceFeatureCache{
+		points: make([]aiSourceFeatureCachePoint, len(source)),
+	}
+	ema10 := newAISourceEMAState(10)
+	ema34 := newAISourceEMAState(34)
+	sum30 := 0.0
+	sumSq30 := 0.0
+	sum20 := 0.0
+	sumSq20 := 0.0
+	volLowWindow := newFloatMonotonicWindow(false)
+	volHighWindow := newFloatMonotonicWindow(true)
+	for index, value := range source {
+		point := &cache.points[index]
+		point.ema10 = ema10.append(value)
+		point.ema34 = ema34.append(value)
+		sum30 += value
+		sumSq30 += value * value
+		if index >= 30 {
+			drop := source[index-30]
+			sum30 -= drop
+			sumSq30 -= drop * drop
+		}
+		if index >= 29 {
+			mean := sum30 / 30
+			point.sma30 = mean
+			point.stddev30 = math.Sqrt(math.Max(sumSq30/30-mean*mean, 0))
+		}
+		sum20 += value
+		sumSq20 += value * value
+		if index >= 20 {
+			drop := source[index-20]
+			sum20 -= drop
+			sumSq20 -= drop * drop
+		}
+		if index >= 19 {
+			mean := sum20 / 20
+			point.stddev20 = math.Sqrt(math.Max(sumSq20/20-mean*mean, 0))
+			volLowWindow.push(index, point.stddev20)
+			volHighWindow.push(index, point.stddev20)
+			volLowWindow.expireBefore(index - 99)
+			volHighWindow.expireBefore(index - 99)
+			point.volLow100, _ = volLowWindow.value()
+			point.volHigh100, _ = volHighWindow.value()
+		}
+	}
+	return cache
+}
+
+func aiSourceFeaturesFromCache(cache aiSourceFeatureCache, source []float64, highs []float64, lows []float64, index int, atrValue float64) ([6]float64, bool) {
+	var result [6]float64
+	if index < 100 || index >= len(source) || atrValue <= 0 {
+		return result, false
+	}
+	point := cache.points[index]
+	fast := point.ema10
+	slow := point.ema34
+	mean := point.sma30
+	dev := point.stddev30
+	if dev == 0 || source[index-14] == 0 {
+		return result, false
+	}
+	volNow := point.stddev20
+	volLow := point.volLow100
+	volHigh := point.volHigh100
+	priceRange := highs[index] - lows[index]
+	if priceRange == 0 {
+		priceRange = 1
+	}
+	result[0] = clampFloat((fast-slow)/atrValue, -3, 3) / 3
+	result[1] = clampFloat(-(source[index]-mean)/dev, -3, 3) / 3
+	result[2] = clampFloat(((source[index]/source[index-14])-1)/0.05, -3, 3) / 3
+	result[3] = scaleValue01(volNow, volLow, volHigh)*2 - 1
+	result[4] = clampFloat(((source[index]-lows[index])/priceRange)*2-1, -1, 1)
+	result[5] = clampFloat((source[index]-source[index-3])/atrValue, -3, 3) / 3
+	return result, true
+}
+
 func aiSourceFeatures(source []float64, highs []float64, lows []float64, index int, atrValue float64) ([6]float64, bool) {
 	var result [6]float64
 	if index < 100 || index >= len(source) || atrValue <= 0 {
@@ -330,10 +429,14 @@ func aiSourceOutcome(closes []float64, sampleIndex int, currentIndex int, atrVal
 }
 
 func prependAISourceRow(rows []aiSourceRow, row aiSourceRow, limit int) []aiSourceRow {
-	rows = append([]aiSourceRow{row}, rows...)
-	if len(rows) > limit {
-		rows = rows[:limit]
+	if limit <= 0 {
+		return rows[:0]
 	}
+	if len(rows) < limit {
+		rows = append(rows, aiSourceRow{})
+	}
+	copy(rows[1:], rows[:len(rows)-1])
+	rows[0] = row
 	return rows
 }
 
@@ -396,6 +499,44 @@ func aiSourceFisherWeights(rows []aiSourceRow, minRows int, floor float64) [6]fl
 }
 
 func aiSourceKNNScore(features [6]float64, bank []aiSourceRow, weights [6]float64, cfg aiSourceConfig) aiSourceScore {
+	if cfg.kNeighbors <= 0 {
+		return aiSourceScore{}
+	}
+	if cfg.kNeighbors > 16 {
+		return aiSourceKNNScoreBatch(features, bank, weights, cfg)
+	}
+	var gaps [16]float64
+	var classes [16]int
+	count := 0
+	for index, row := range bank {
+		if index >= cfg.memoryDepth {
+			break
+		}
+		if index%cfg.spacingBars != 0 || row.outcome == 0 {
+			continue
+		}
+		gap := aiSourceGap(features, row.features, weights)
+		if count < cfg.kNeighbors {
+			gaps[count] = gap
+			classes[count] = row.outcome
+			count++
+			continue
+		}
+		worst := 0
+		for gapIndex := 0; gapIndex < count; gapIndex++ {
+			if gaps[gapIndex] > gaps[worst] {
+				worst = gapIndex
+			}
+		}
+		if gap < gaps[worst] {
+			gaps[worst] = gap
+			classes[worst] = row.outcome
+		}
+	}
+	return aiSourceKNNScoreFromNeighbors(gaps[:], classes[:], count, weights)
+}
+
+func aiSourceKNNScoreBatch(features [6]float64, bank []aiSourceRow, weights [6]float64, cfg aiSourceConfig) aiSourceScore {
 	gaps := []float64{}
 	classes := []int{}
 	for index, row := range bank {
@@ -422,12 +563,17 @@ func aiSourceKNNScore(features [6]float64, bank []aiSourceRow, weights [6]float6
 			classes[worst] = row.outcome
 		}
 	}
-	score := aiSourceScore{count: len(gaps)}
+	return aiSourceKNNScoreFromNeighbors(gaps, classes, len(gaps), weights)
+}
+
+func aiSourceKNNScoreFromNeighbors(gaps []float64, classes []int, count int, weights [6]float64) aiSourceScore {
+	score := aiSourceScore{count: count}
 	total := 0.0
 	bull := 0.0
 	bear := 0.0
 	gapSum := 0.0
-	for index, gap := range gaps {
+	for index := 0; index < count; index++ {
+		gap := gaps[index]
 		weight := 1 / (1 + gap)
 		class := classes[index]
 		total += weight
@@ -454,7 +600,7 @@ func aiSourceKNNScore(features [6]float64, bank []aiSourceRow, weights [6]float6
 	} else if dir == -1 {
 		score.agree = bear / total
 	}
-	avgGap := gapSum / float64(len(gaps))
+	avgGap := gapSum / float64(count)
 	gapScale := (sumArray(weights[:]) * 0.45) + 0.000001
 	score.tight = clampFloat(1-avgGap/gapScale, 0, 1)
 	return score

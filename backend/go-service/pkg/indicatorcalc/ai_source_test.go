@@ -76,6 +76,92 @@ func TestAISourceFisherWeightsSeparateOutcomes(t *testing.T) {
 	}
 }
 
+func TestAISourceFeaturesFromCacheMatchesBatch(t *testing.T) {
+	_, highs, lows, closes := aiSourceTestOHLC(180)
+	cache := newAISourceFeatureCache(closes)
+	atrValues, ok := atrSeries(highs, lows, closes, 14)
+	if !ok {
+		t.Fatal("atrSeries returned false")
+	}
+	atrOffset := len(closes) - len(atrValues)
+
+	for _, index := range []int{100, 120, 150, 179} {
+		atrValue := atrValueAt(index, atrValues, atrOffset)
+		got, ok := aiSourceFeaturesFromCache(cache, closes, highs, lows, index, atrValue)
+		if !ok {
+			t.Fatalf("aiSourceFeaturesFromCache(%d) returned false", index)
+		}
+		want, ok := aiSourceFeatures(closes, highs, lows, index, atrValue)
+		if !ok {
+			t.Fatalf("aiSourceFeatures(%d) returned false", index)
+		}
+		for featureIndex := range got {
+			assertFloatClose(t, "ai source feature", got[featureIndex], want[featureIndex])
+		}
+	}
+}
+
+func TestPrependAISourceRowReusesLimitedWindow(t *testing.T) {
+	rows := make([]aiSourceRow, 0, 3)
+	for _, outcome := range []int{1, 2, 3, 4} {
+		rows = prependAISourceRow(rows, aiSourceRow{outcome: outcome}, 3)
+	}
+
+	if len(rows) != 3 {
+		t.Fatalf("rows length = %d, want 3", len(rows))
+	}
+	for index, want := range []int{4, 3, 2} {
+		if rows[index].outcome != want {
+			t.Fatalf("rows[%d].outcome = %d, want %d", index, rows[index].outcome, want)
+		}
+	}
+	if got := cap(rows); got != 3 {
+		t.Fatalf("rows cap = %d, want 3", got)
+	}
+
+	rows = prependAISourceRow(rows, aiSourceRow{outcome: 5}, 0)
+	if len(rows) != 0 {
+		t.Fatalf("rows length after zero limit = %d, want 0", len(rows))
+	}
+}
+
+func TestAISourceKNNScoreFixedMatchesBatch(t *testing.T) {
+	cfg := defaultAISourceConfig()
+	cfg.memoryDepth = 12
+	cfg.kNeighbors = 5
+	cfg.spacingBars = 1
+	weights := [6]float64{1.2, 0.8, 1.5, 1, 0.7, 1.1}
+	features := [6]float64{0.2, -0.1, 0.4, 0.1, -0.3, 0.5}
+	bank := make([]aiSourceRow, 0, cfg.memoryDepth)
+	for index := 0; index < cfg.memoryDepth; index++ {
+		outcome := 1
+		if index%3 == 0 {
+			outcome = -1
+		}
+		bank = append(bank, aiSourceRow{
+			features: [6]float64{
+				float64(index%4) * 0.1,
+				float64(index%5) * -0.08,
+				float64(index%6) * 0.07,
+				float64(index%3) * 0.05,
+				float64(index%7) * -0.03,
+				float64(index%4) * 0.09,
+			},
+			outcome: outcome,
+		})
+	}
+
+	got := aiSourceKNNScore(features, bank, weights, cfg)
+	want := aiSourceKNNScoreBatch(features, bank, weights, cfg)
+
+	if got.count != want.count {
+		t.Fatalf("knn count = %d, want %d", got.count, want.count)
+	}
+	assertFloatClose(t, "knn analog", got.analog, want.analog)
+	assertFloatClose(t, "knn agree", got.agree, want.agree)
+	assertFloatClose(t, "knn tight", got.tight, want.tight)
+}
+
 func TestAISourceEMAStateMatchesEMALast(t *testing.T) {
 	values := linearValues(80, 100, 0.7)
 	state := newAISourceEMAState(50)
