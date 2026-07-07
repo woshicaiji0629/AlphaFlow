@@ -2,7 +2,7 @@ package indicatorcalc
 
 import "math"
 
-func addMoneyFlowFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64) {
+func addMoneyFlowFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
 	if len(closes) < 20 || len(volumes) != len(closes) {
 		return
 	}
@@ -16,9 +16,21 @@ func addMoneyFlowFeatures(values map[string]string, signals map[string]string, h
 	setValue(values, "rolling_vwap20", rollingVWAP, ok)
 	setValue(values, "rolling_vwap_distance_pct", percentDistance(closes[last], rollingVWAP), ok && rollingVWAP != 0)
 
-	obvSeries := obvSeries(closes, volumes)
-	obvSlope := slope(obvSeries, 5)
-	setValue(values, "obv_slope5", obvSlope, len(obvSeries) >= 5)
+	obvSlope, pvt, pvtSlope, adLine, adLineSlope, streamMoneyFlowOK := moneyFlowStateValues(basic, closes)
+	if !streamMoneyFlowOK {
+		obvSeries := obvSeries(closes, volumes)
+		obvSlope = slope(obvSeries, 5)
+		pvtSeries := priceVolumeTrendSeries(closes, volumes)
+		pvt = pvtSeries[len(pvtSeries)-1]
+		pvtSlope = slope(pvtSeries, 5)
+		adValues := accumulationDistributionSeries(highs, lows, closes, volumes)
+		adLine = adValues[len(adValues)-1]
+		adLineSlope = slope(adValues, 5)
+		signals["price_volume_confirmation"] = priceVolumeConfirmation(closes, obvSeries, pvtSeries)
+	} else {
+		signals["price_volume_confirmation"] = priceVolumeConfirmationFromSlopes(closes, obvSlope, pvtSlope)
+	}
+	setValue(values, "obv_slope5", obvSlope, len(closes) >= 5)
 
 	volumeZScore, ok := zScore(volumes, 20)
 	setValue(values, "volume_zscore20", volumeZScore, ok)
@@ -33,18 +45,14 @@ func addMoneyFlowFeatures(values map[string]string, signals map[string]string, h
 	pressure := volumePressure(closes, volumes, 20)
 	setValue(values, "volume_pressure20", pressure, true)
 
-	pvtSeries := priceVolumeTrendSeries(closes, volumes)
-	pvt := pvtSeries[len(pvtSeries)-1]
 	setValue(values, "price_volume_trend", pvt, true)
 	cmfValue, ok := chaikinMoneyFlow(highs, lows, closes, volumes, 20)
 	setValue(values, "cmf20", cmfValue, ok)
-	adValues := accumulationDistributionSeries(highs, lows, closes, volumes)
-	setValue(values, "ad_line", adValues[len(adValues)-1], len(adValues) > 0)
-	setValue(values, "ad_line_slope5", slope(adValues, 5), len(adValues) >= 5)
+	setValue(values, "ad_line", adLine, true)
+	setValue(values, "ad_line_slope5", adLineSlope, len(closes) >= 5)
 
 	signals["money_flow"] = moneyFlowSignal(mfi, pressure)
 	signals["volume_state"] = volumeState(volumeZScore, ok)
-	signals["price_volume_confirmation"] = priceVolumeConfirmation(closes, obvSeries, pvtSeries)
 	signals["cmf_state"] = cmfState(cmfValue, ok)
 	signals["price_volume_action"] = priceVolumeAction(closes, volumes, volumeRatio5, ok5)
 	signals["breakout_volume_confirm"] = breakoutVolumeConfirm(highs, closes, volumeBreakoutRatio, okBreakout)
@@ -78,7 +86,10 @@ func addVolumeFlowIndicatorFeatures(
 	volumeCoef float64,
 	signalLength int,
 ) {
-	result, ok := volumeFlowIndicator(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+	result, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+	if !ok {
+		result, ok = volumeFlowIndicator(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+	}
 	if !ok {
 		return
 	}
@@ -90,6 +101,118 @@ func addVolumeFlowIndicatorFeatures(
 	signals["vfi_state"] = vfiState(result.value)
 	signals["vfi_cross"] = crossSignal(result.previousValue, result.previousSignal, result.value, result.signal)
 	signals["vfi_momentum"] = vfiMomentum(result.hist)
+}
+
+func volumeFlowIndicatorCompact(
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+	length int,
+	coef float64,
+	volumeCoef float64,
+	signalLength int,
+) (volumeFlowIndicatorResult, bool) {
+	if length <= 0 || coef <= 0 || volumeCoef <= 0 || signalLength <= 0 ||
+		len(closes) != len(highs) || len(closes) != len(lows) || len(closes) != len(volumes) ||
+		len(closes) < length*2+signalLength {
+		return volumeFlowIndicatorResult{}, false
+	}
+	signalEMA := newStreamEMAState(signalLength)
+	var vcpSum float64
+	invalidCount := 1
+	interWindow := make([]float64, 30)
+	vcpWindow := make([]float64, length)
+	validWindow := make([]bool, length)
+	previousTypical := (highs[0] + lows[0] + closes[0]) / 3
+	var volumeSum float64
+	vfiCount := 0
+	previousValue := 0.0
+	currentValue := 0.0
+	lastPriceCutoff := 0.0
+	lastVolumeCutoff := 0.0
+	for index := 1; index < len(closes); index++ {
+		volumeSum += volumes[index-1]
+		if dropVolume := index - length - 1; dropVolume >= 0 {
+			volumeSum -= volumes[dropVolume]
+		}
+
+		typical := (highs[index] + lows[index] + closes[index]) / 3
+		interValue := 0.0
+		if typical > 0 && previousTypical > 0 {
+			interValue = math.Log(typical) - math.Log(previousTypical)
+		}
+		interWindow[index%len(interWindow)] = interValue
+
+		vcpValue := 0.0
+		validVCP := false
+		priceCutoff := 0.0
+		volumeCutoff := 0.0
+		if index >= length && index >= len(interWindow) && volumeSum != 0 {
+			volatility := standardDeviationRing(interWindow, index, len(interWindow))
+			volumeAverage := volumeSum / float64(length)
+			priceCutoff = coef * volatility * closes[index]
+			volumeCutoff = volumeAverage * volumeCoef
+			cappedVolume := volumes[index]
+			if cappedVolume > volumeCutoff {
+				cappedVolume = volumeCutoff
+			}
+			moneyFlow := typical - previousTypical
+			switch {
+			case moneyFlow > priceCutoff:
+				vcpValue = cappedVolume
+			case moneyFlow < -priceCutoff:
+				vcpValue = -cappedVolume
+			default:
+				vcpValue = 0
+			}
+			validVCP = true
+		}
+
+		slot := index % length
+		if index >= length {
+			vcpSum -= vcpWindow[slot]
+			if !validWindow[slot] {
+				invalidCount--
+			}
+		}
+		vcpWindow[slot] = vcpValue
+		validWindow[slot] = validVCP
+		vcpSum += vcpValue
+		if !validVCP {
+			invalidCount++
+		}
+		previousTypical = typical
+
+		if index < length-1 || invalidCount > 0 || volumeSum == 0 {
+			continue
+		}
+		volumeAverage := volumeSum / float64(length)
+		value := vcpSum / volumeAverage
+		if vfiCount > 0 {
+			previousValue = currentValue
+		}
+		currentValue = value
+		vfiCount++
+		signalEMA.append(value)
+		if !signalEMA.ready {
+			continue
+		}
+		lastPriceCutoff = priceCutoff
+		lastVolumeCutoff = volumeCutoff
+	}
+	if vfiCount < signalLength+1 || !signalEMA.ready || !signalEMA.hasPrevious {
+		return volumeFlowIndicatorResult{}, false
+	}
+	return volumeFlowIndicatorResult{
+		value:          currentValue,
+		signal:         signalEMA.value,
+		hist:           currentValue - signalEMA.value,
+		previousValue:  previousValue,
+		previousSignal: signalEMA.previous,
+		volumeCutoff:   lastVolumeCutoff,
+		priceCutoff:    lastPriceCutoff,
+	}, true
 }
 
 func volumeFlowIndicator(
@@ -246,6 +369,14 @@ func priceVolumeTrendSeries(closes []float64, volumes []float64) []float64 {
 		}
 	}
 	return values
+}
+
+func moneyFlowStateValues(basic *basicIndicatorState, closes []float64) (float64, float64, float64, float64, float64, bool) {
+	if len(closes) < 5 {
+		return 0, 0, 0, 0, 0, false
+	}
+	_, obvSlope, pvt, pvtSlope, adLine, adLineSlope, ok := basic.moneyFlowValues()
+	return obvSlope, pvt, pvtSlope, adLine, adLineSlope, ok
 }
 
 func rollingVWAP(highs []float64, lows []float64, closes []float64, volumes []float64, period int) (float64, bool) {
@@ -710,6 +841,24 @@ func zScore(values []float64, period int) (float64, bool) {
 	return (values[len(values)-1] - mean) / stddev, true
 }
 
+func standardDeviationRing(values []float64, endIndex int, period int) float64 {
+	if period <= 0 || len(values) < period {
+		return 0
+	}
+	start := endIndex - period + 1
+	var sum float64
+	for index := start; index <= endIndex; index++ {
+		sum += values[index%len(values)]
+	}
+	mean := sum / float64(period)
+	var variance float64
+	for index := start; index <= endIndex; index++ {
+		diff := values[index%len(values)] - mean
+		variance += diff * diff
+	}
+	return math.Sqrt(variance / float64(period))
+}
+
 func slope(values []float64, period int) float64 {
 	if period <= 1 || len(values) < period {
 		return 0
@@ -881,6 +1030,19 @@ func priceVolumeConfirmation(closes []float64, obvValues []float64, pvtValues []
 	priceSlope := slope(closes, 5)
 	obvSlope := slope(obvValues, 5)
 	pvtSlope := slope(pvtValues, 5)
+	return priceVolumeConfirmationFromSlopes(closes, obvSlope, pvtSlope, priceSlope)
+}
+
+func priceVolumeConfirmationFromSlopes(closes []float64, obvSlope float64, pvtSlope float64, priceSlope ...float64) string {
+	if len(closes) < 20 {
+		return "neutral"
+	}
+	currentPriceSlope := 0.0
+	if len(priceSlope) > 0 {
+		currentPriceSlope = priceSlope[0]
+	} else {
+		currentPriceSlope = slope(closes, 5)
+	}
 	last := len(closes) - 1
 	recentHigh, recentLow := highLow(closes[last-19:last], closes[last-19:last])
 	switch {
@@ -888,9 +1050,9 @@ func priceVolumeConfirmation(closes []float64, obvValues []float64, pvtValues []
 		return "divergence_bear"
 	case closes[last] < recentLow && (obvSlope > 0 || pvtSlope > 0):
 		return "divergence_bull"
-	case priceSlope > 0 && obvSlope > 0 && pvtSlope > 0:
+	case currentPriceSlope > 0 && obvSlope > 0 && pvtSlope > 0:
 		return "confirm_up"
-	case priceSlope < 0 && obvSlope < 0 && pvtSlope < 0:
+	case currentPriceSlope < 0 && obvSlope < 0 && pvtSlope < 0:
 		return "confirm_down"
 	default:
 		return "neutral"

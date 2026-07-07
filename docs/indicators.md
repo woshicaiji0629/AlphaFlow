@@ -57,11 +57,22 @@
 - EMA。
 - RSI 14 序列。
 - ATR 14 序列。
+- ADX 14、DI+ 和 DI-。
 - 标准 MACD 和快速 MACD 序列。
 - OBV。
 - VWAP。
+- WaveTrend。
+- MoneyFlow 中的 OBV slope、PVT、PVT slope、AD line 和 AD line slope。
 
 这些状态只用于减少重复计算；指标输出仍由 `CalculateWindow` 统一生成。窗口出现缺口或需要替换最后一根 K 线时，runner 会回退到重新构建窗口，优先保持语义正确。
+
+部分指标还做了局部紧凑化，减少每次窗口分析时的临时数组和重复扫描：
+
+- AI Source 的 source smoothing 和 MA smoothing 使用增量 EMA。
+- HMA 只计算最后输出所需的差分窗口。
+- DEMA/TEMA 使用流式 EMA 状态取最终值。
+- Moving Average、EZ EMA 和脚本均线优先读取 `CalculationWindow` 的 EMA 状态。
+- VFI 使用 compact 路径，以滚动 VCP 和流式 signal EMA 替代旧实现中的嵌套窗口求和与 signal 序列数组；旧批量实现保留为 fallback。
 
 当前可用 benchmark：
 
@@ -75,7 +86,7 @@ go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTem
 BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 B/op    4830 allocs/op
 ```
 
-该基线表明 realtime 路径仍主要受完整特征计算成本影响。后续如果继续降 CPU，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+早期基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。最近几轮本地结果通常约 `35-55ms/op`、`6.7MB/op`、`4842 allocs/op`。该 benchmark 覆盖完整 realtime 特征计算，结果会受本机负载影响；后续如果继续降 CPU，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
 
 ## 策略常用语义特征
 

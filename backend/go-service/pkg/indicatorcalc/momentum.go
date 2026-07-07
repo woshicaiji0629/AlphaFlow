@@ -32,10 +32,10 @@ func addRSIFeaturesFromSeries(values map[string]string, signals map[string]strin
 
 func addOscillatorFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	rsi14Series, _ := rsiSeries(closes, 14)
-	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series)
+	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series, nil)
 }
 
-func addOscillatorFeaturesWithRSI(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, rsi14Series []float64) {
+func addOscillatorFeaturesWithRSI(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, rsi14Series []float64, basic *basicIndicatorState) {
 	k, d, j, ok := kdj(highs, lows, closes, 9)
 	if ok {
 		setValue(values, "kdj_k", k, true)
@@ -74,11 +74,14 @@ func addOscillatorFeaturesWithRSI(values map[string]string, signals map[string]s
 		setValue(values, "roc12", rocValue, true)
 		signals["roc_state"] = rocState(rocValue)
 	}
-	addWaveTrendFeatures(values, signals, highs, lows, closes)
+	addWaveTrendFeatures(values, signals, highs, lows, closes, basic)
 }
 
-func addWaveTrendFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
-	wt1, wt2, previousWT1, previousWT2, previousDelta, ok := waveTrend(highs, lows, closes, 10, 21)
+func addWaveTrendFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, basic *basicIndicatorState) {
+	wt1, wt2, previousWT1, previousWT2, previousDelta, ok := basic.waveTrendValue()
+	if !ok {
+		wt1, wt2, previousWT1, previousWT2, previousDelta, ok = waveTrend(highs, lows, closes, 10, 21)
+	}
 	if !ok {
 		return
 	}

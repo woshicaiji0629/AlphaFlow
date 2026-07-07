@@ -7,7 +7,7 @@ func TestMoneyFlowFeaturesConfirmUp(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}
 
-	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, nil)
 
 	for _, key := range []string{
 		"mfi14",
@@ -65,7 +65,7 @@ func TestVolumeFlowIndicatorOutputsSignals(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}
 
-	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, nil)
 
 	for _, key := range []string{
 		"vfi",
@@ -84,6 +84,26 @@ func TestVolumeFlowIndicatorOutputsSignals(t *testing.T) {
 	if signals["vfi_cross"] == "" || signals["vfi_momentum"] == "" {
 		t.Fatalf("missing vfi signals: %#v", signals)
 	}
+}
+
+func TestVolumeFlowIndicatorCompactMatchesBatch(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(320, 100, 0.3, 100)
+
+	got, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
+	if !ok {
+		t.Fatal("volumeFlowIndicatorCompact returned false")
+	}
+	want, ok := volumeFlowIndicator(highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
+	if !ok {
+		t.Fatal("volumeFlowIndicator returned false")
+	}
+	assertFloatClose(t, "vfi value", got.value, want.value)
+	assertFloatClose(t, "vfi signal", got.signal, want.signal)
+	assertFloatClose(t, "vfi hist", got.hist, want.hist)
+	assertFloatClose(t, "vfi previous value", got.previousValue, want.previousValue)
+	assertFloatClose(t, "vfi previous signal", got.previousSignal, want.previousSignal)
+	assertFloatClose(t, "vfi volume cutoff", got.volumeCutoff, want.volumeCutoff)
+	assertFloatClose(t, "vfi price cutoff", got.priceCutoff, want.priceCutoff)
 }
 
 func TestVolumeStateDetectsSpikeAndDry(t *testing.T) {
@@ -157,7 +177,7 @@ func TestVolumeProfileFeatures(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}
 
-	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, nil)
 
 	for _, key := range []string{
 		"volume_profile_poc",
@@ -190,7 +210,7 @@ func TestSupplyDemandRangeFeatures(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}
 
-	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, nil)
 
 	for _, key := range []string{
 		"supply_zone_top",

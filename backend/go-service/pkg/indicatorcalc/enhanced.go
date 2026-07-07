@@ -1,6 +1,6 @@
 package indicatorcalc
 
-func addEnhanced(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64) {
+func addEnhanced(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
 	addTrendFeatures(values, signals, closes)
 	addCandlePatterns(signals, opens, highs, lows, closes)
 	addHeikinAshiFeatures(values, signals, opens, highs, lows, closes)
@@ -12,7 +12,7 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addPSARFeatures(values, signals, highs, lows, closes)
 	addChandelierExit(values, signals, highs, lows, closes, 22, 3)
 	addIchimokuFeatures(values, signals, highs, lows, closes)
-	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes)
+	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, basic)
 	addDynamicSwingAnchoredVWAP(values, signals, highs, lows, closes, volumes)
 	addSqueezeMomentum(values, signals, highs, lows, closes)
 	addBollingerFeatures(values, signals, closes)

@@ -116,7 +116,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	} else if series, ok := macdSeries(closes, 7, 19, 9); ok {
 		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
 	}
-	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series)
+	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series, basic)
 	if atr14Series, ok := basic.atrSeries14(); ok {
 		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
 	} else if atr14Series, ok := atrSeries(highs, lows, closes, 14); ok {
@@ -151,7 +151,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
 	}
 	addDerived(values, opens, highs, lows, closes, volumes)
-	addEnhanced(values, signals, opens, highs, lows, closes, volumes)
+	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic)
 
 	return Result{
 		OpenTime:  last.OpenTime,

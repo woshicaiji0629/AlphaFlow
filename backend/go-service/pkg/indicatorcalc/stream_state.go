@@ -55,6 +55,26 @@ type streamADXState struct {
 	ready           bool
 }
 
+type streamWaveTrendState struct {
+	channelEMA   streamEMAState
+	deviationEMA streamEMAState
+	ciEMA        streamEMAState
+	values       [5]float64
+	count        int
+}
+
+type streamMoneyFlowState struct {
+	obv      float64
+	obvLast5 [5]float64
+	obvCount int
+	pvt      float64
+	pvtLast5 [5]float64
+	pvtCount int
+	adLine   float64
+	adLast5  [5]float64
+	adCount  int
+}
+
 type basicIndicatorState struct {
 	smaPeriods    []int
 	smaValues     map[int]float64
@@ -63,6 +83,8 @@ type basicIndicatorState struct {
 	rsi14         streamRSIState
 	atr14         streamATRState
 	adx14         streamADXState
+	waveTrend     streamWaveTrendState
+	moneyFlow     streamMoneyFlowState
 	macd          map[macdConfig]*streamMACDState
 	obv           float64
 	vwapWeighted  float64
@@ -91,6 +113,8 @@ func newBasicIndicatorState() *basicIndicatorState {
 		rsi14:      newStreamRSIState(14),
 		atr14:      newStreamATRState(14),
 		adx14:      newStreamADXState(14),
+		waveTrend:  newStreamWaveTrendState(10, 21),
+		moneyFlow:  streamMoneyFlowState{},
 		macd:       macdStates,
 	}
 }
@@ -115,6 +139,8 @@ func (s *basicIndicatorState) clone() *basicIndicatorState {
 		rsi14:         s.rsi14.clone(),
 		atr14:         s.atr14.clone(),
 		adx14:         s.adx14.clone(),
+		waveTrend:     s.waveTrend.clone(),
+		moneyFlow:     s.moneyFlow,
 		macd:          make(map[macdConfig]*streamMACDState, len(s.macd)),
 		obv:           s.obv,
 		vwapWeighted:  s.vwapWeighted,
@@ -166,8 +192,12 @@ func (s *basicIndicatorState) append(highs []float64, lows []float64, closes []f
 		s.rsi14.append(closes[last-1], closeValue)
 		s.atr14.append(highs[last], lows[last], closes[last-1])
 		s.adx14.append(highs[last], lows[last], highs[last-1], lows[last-1], closes[last-1])
+		s.moneyFlow.append(highs[last], lows[last], closeValue, volume, closes[last-1], true)
+	} else {
+		s.moneyFlow.append(highs[last], lows[last], closeValue, volume, 0, false)
 	}
 	typical := (highs[last] + lows[last] + closeValue) / 3
+	s.waveTrend.append(typical)
 	s.vwapWeighted += typical * volume
 	s.vwapVolumeSum += volume
 }
@@ -231,6 +261,13 @@ func (s *basicIndicatorState) adx14Value() (float64, float64, float64, bool) {
 	return s.adx14.value, s.adx14.plusDI, s.adx14.minusDI, true
 }
 
+func (s *basicIndicatorState) waveTrendValue() (float64, float64, float64, float64, float64, bool) {
+	if s == nil {
+		return 0, 0, 0, 0, 0, false
+	}
+	return s.waveTrend.value()
+}
+
 func (s *basicIndicatorState) macdSeries(config macdConfig) ([]macdPoint, bool) {
 	if s == nil {
 		return nil, false
@@ -247,6 +284,13 @@ func (s *basicIndicatorState) obvValue() (float64, bool) {
 		return 0, false
 	}
 	return s.obv, true
+}
+
+func (s *basicIndicatorState) moneyFlowValues() (float64, float64, float64, float64, float64, float64, bool) {
+	if s == nil {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	return s.moneyFlow.values()
 }
 
 func (s *basicIndicatorState) vwapValue(fallback float64) (float64, bool) {
@@ -403,6 +447,101 @@ func (s *streamADXState) append(
 		s.value = s.dxSum / float64(s.period)
 		s.ready = true
 	}
+}
+
+func newStreamWaveTrendState(channelLength int, averageLength int) streamWaveTrendState {
+	return streamWaveTrendState{
+		channelEMA:   *newStreamEMAState(channelLength),
+		deviationEMA: *newStreamEMAState(channelLength),
+		ciEMA:        *newStreamEMAState(averageLength),
+	}
+}
+
+func (s streamWaveTrendState) clone() streamWaveTrendState {
+	return s
+}
+
+func (s *streamWaveTrendState) append(typical float64) {
+	if s == nil {
+		return
+	}
+	s.channelEMA.append(typical)
+	if !s.channelEMA.ready {
+		return
+	}
+	deviation := absFloat(typical - s.channelEMA.value)
+	s.deviationEMA.append(deviation)
+	if !s.deviationEMA.ready {
+		return
+	}
+	ci := 0.0
+	if s.deviationEMA.value != 0 {
+		ci = (typical - s.channelEMA.value) / (0.015 * s.deviationEMA.value)
+	}
+	s.ciEMA.append(ci)
+	if !s.ciEMA.ready {
+		return
+	}
+	if s.count < len(s.values) {
+		s.values[s.count] = s.ciEMA.value
+		s.count++
+		return
+	}
+	copy(s.values[:], s.values[1:])
+	s.values[len(s.values)-1] = s.ciEMA.value
+}
+
+func (s *streamWaveTrendState) value() (float64, float64, float64, float64, float64, bool) {
+	if s == nil || s.count < len(s.values) {
+		return 0, 0, 0, 0, 0, false
+	}
+	wt1 := s.values[4]
+	previousWT1 := s.values[3]
+	wt2 := (s.values[1] + s.values[2] + s.values[3] + s.values[4]) / 4
+	previousWT2 := (s.values[0] + s.values[1] + s.values[2] + s.values[3]) / 4
+	return wt1, wt2, previousWT1, previousWT2, previousWT1 - previousWT2, true
+}
+
+func (s *streamMoneyFlowState) append(high float64, low float64, closeValue float64, volume float64, previousClose float64, hasPrevious bool) {
+	if s == nil {
+		return
+	}
+	if hasPrevious {
+		switch {
+		case closeValue > previousClose:
+			s.obv += volume
+		case closeValue < previousClose:
+			s.obv -= volume
+		}
+		if previousClose != 0 {
+			s.pvt += (closeValue - previousClose) / previousClose * volume
+		}
+	}
+	s.adLine += moneyFlowVolume(high, low, closeValue, volume)
+	s.obvCount = appendFixedFloat5(&s.obvLast5, s.obvCount, s.obv)
+	s.pvtCount = appendFixedFloat5(&s.pvtLast5, s.pvtCount, s.pvt)
+	s.adCount = appendFixedFloat5(&s.adLast5, s.adCount, s.adLine)
+}
+
+func (s *streamMoneyFlowState) values() (float64, float64, float64, float64, float64, float64, bool) {
+	if s == nil || s.obvCount < len(s.obvLast5) || s.pvtCount < len(s.pvtLast5) || s.adCount < len(s.adLast5) {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	return s.obv, slopeFixedFloat5(s.obvLast5), s.pvt, slopeFixedFloat5(s.pvtLast5), s.adLine, slopeFixedFloat5(s.adLast5), true
+}
+
+func appendFixedFloat5(values *[5]float64, count int, value float64) int {
+	if count < len(values) {
+		values[count] = value
+		return count + 1
+	}
+	copy(values[:], values[1:])
+	values[len(values)-1] = value
+	return count
+}
+
+func slopeFixedFloat5(values [5]float64) float64 {
+	return values[len(values)-1] - values[0]
 }
 
 func newStreamMACDState(config macdConfig) *streamMACDState {

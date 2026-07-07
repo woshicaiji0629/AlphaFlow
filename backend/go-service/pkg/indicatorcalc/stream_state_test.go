@@ -85,6 +85,20 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	assertFloatClose(t, "di plus14", gotPlusDI, wantPlusDI)
 	assertFloatClose(t, "di minus14", gotMinusDI, wantMinusDI)
 
+	gotWT1, gotWT2, gotPreviousWT1, gotPreviousWT2, gotPreviousDelta, ok := state.waveTrendValue()
+	if !ok {
+		t.Fatal("missing stream wavetrend")
+	}
+	wantWT1, wantWT2, wantPreviousWT1, wantPreviousWT2, wantPreviousDelta, ok := waveTrend(highs, lows, closes, 10, 21)
+	if !ok {
+		t.Fatal("missing batch wavetrend")
+	}
+	assertFloatClose(t, "wavetrend wt1", gotWT1, wantWT1)
+	assertFloatClose(t, "wavetrend wt2", gotWT2, wantWT2)
+	assertFloatClose(t, "wavetrend previous wt1", gotPreviousWT1, wantPreviousWT1)
+	assertFloatClose(t, "wavetrend previous wt2", gotPreviousWT2, wantPreviousWT2)
+	assertFloatClose(t, "wavetrend previous delta", gotPreviousDelta, wantPreviousDelta)
+
 	for _, config := range []macdConfig{{fast: 12, slow: 26, signal: 9}, {fast: 7, slow: 19, signal: 9}} {
 		gotMACD, ok := state.macdSeries(config)
 		if !ok {
@@ -109,6 +123,19 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		t.Fatal("missing stream obv")
 	}
 	assertFloatClose(t, "obv", gotOBV, obv(closes, volumes))
+
+	_, gotOBVSlope, gotPVT, gotPVTSlope, gotADLine, gotADLineSlope, ok := state.moneyFlowValues()
+	if !ok {
+		t.Fatal("missing stream money flow")
+	}
+	wantOBVSeries := obvSeries(closes, volumes)
+	wantPVTSeries := priceVolumeTrendSeries(closes, volumes)
+	wantADSeries := accumulationDistributionSeries(highs, lows, closes, volumes)
+	assertFloatClose(t, "money flow obv slope", gotOBVSlope, slope(wantOBVSeries, 5))
+	assertFloatClose(t, "money flow pvt", gotPVT, wantPVTSeries[len(wantPVTSeries)-1])
+	assertFloatClose(t, "money flow pvt slope", gotPVTSlope, slope(wantPVTSeries, 5))
+	assertFloatClose(t, "money flow ad line", gotADLine, wantADSeries[len(wantADSeries)-1])
+	assertFloatClose(t, "money flow ad line slope", gotADLineSlope, slope(wantADSeries, 5))
 
 	gotVWAP, ok := state.vwapValue(closes[len(closes)-1])
 	if !ok {
