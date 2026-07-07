@@ -1,14 +1,24 @@
 package indicatorcalc
 
 func addVolatilityCoreFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
-	atrValue, ok := atr(highs, lows, closes, period)
-	setValue(values, "atr14", atrValue, ok)
-	if ok {
-		last := closes[len(closes)-1]
-		setValue(values, "atr_pct14", atrValue/last*100, last != 0)
-		setValue(values, "natr14", atrValue/last*100, last != 0)
-		signals["volatility_state"] = volatilityState(highs, lows, closes, period)
+	series, ok := atrSeries(highs, lows, closes, period)
+	if !ok {
+		return
 	}
+	addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, period, series)
+}
+
+func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64) {
+	if len(series) == 0 {
+		return
+	}
+	atrValue := series[len(series)-1]
+	setValue(values, "atr14", atrValue, true)
+	last := closes[len(closes)-1]
+	setValue(values, "atr_pct14", atrValue/last*100, last != 0)
+	setValue(values, "natr14", atrValue/last*100, last != 0)
+	signals["volatility_state"] = volatilityStateFromATR(series)
+
 	adxValue, plusDI, minusDI, ok := adx(highs, lows, closes, period)
 	if ok {
 		setValue(values, "adx14", adxValue, true)
@@ -115,7 +125,14 @@ func directionalIndex(smoothedTR float64, smoothedPlusDM float64, smoothedMinusD
 
 func volatilityState(highs []float64, lows []float64, closes []float64, period int) string {
 	series, ok := atrSeries(highs, lows, closes, period)
-	if !ok || len(series) < 6 {
+	if !ok {
+		return "normal"
+	}
+	return volatilityStateFromATR(series)
+}
+
+func volatilityStateFromATR(series []float64) string {
+	if len(series) < 6 {
 		return "normal"
 	}
 	last := len(series) - 1

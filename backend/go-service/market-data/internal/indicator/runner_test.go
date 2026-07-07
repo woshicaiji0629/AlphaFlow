@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
+	"alphaflow/go-service/pkg/indicatorcalc"
 	"alphaflow/go-service/pkg/indicatorwindow"
 )
 
@@ -508,6 +509,76 @@ func TestRunnerWritesRealtimeSnapshotForOpenKlineFromHandler(t *testing.T) {
 	if realtime.Values["vwap"] == "" {
 		t.Fatalf("missing realtime vwap: %#v", realtime.Values)
 	}
+	key := windowKey("binance", "um", "ETHUSDT", "1m")
+	runner.mu.Lock()
+	cachedWindow := runner.windows[key].Clone()
+	runner.mu.Unlock()
+	cachedKlines := cachedWindow.Klines()
+	if len(cachedKlines) != 5 {
+		t.Fatalf("cached window length = %d, want 5", len(cachedKlines))
+	}
+	if got := cachedKlines[len(cachedKlines)-1].OpenTime; got != klines[len(klines)-1].OpenTime {
+		t.Fatalf("cached window last open time = %d, want %d", got, klines[len(klines)-1].OpenTime)
+	}
+}
+
+func TestRunnerCachedIndicatorSnapshotsReturnsAlignedSuffixWithCurrentSnapshot(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	key := windowKey("binance", "um", "ETHUSDT", "1m")
+	current := testIndicatorSnapshot(klines[len(klines)-1], "current")
+	runner := NewRunner(&fakeStore{}, RunnerOptions{})
+	runner.indicatorSnapshots[key] = []model.IndicatorSnapshot{
+		testIndicatorSnapshot(klines[18], "stale-prefix"),
+		testIndicatorSnapshot(klines[21], "cached-21"),
+		testIndicatorSnapshot(klines[22], "cached-22"),
+		testIndicatorSnapshot(klines[23], "cached-23"),
+	}
+
+	snapshots := runner.cachedIndicatorSnapshots(key, window, current)
+
+	if len(snapshots) != 4 {
+		t.Fatalf("snapshots = %d, want 4", len(snapshots))
+	}
+	for offset, wantIndex := range []int{21, 22, 23, 24} {
+		if got := snapshots[offset].OpenTime; got != klines[wantIndex].OpenTime {
+			t.Fatalf("snapshot[%d] open time = %d, want %d", offset, got, klines[wantIndex].OpenTime)
+		}
+	}
+	if got := snapshots[len(snapshots)-1].Values["source"]; got != "current" {
+		t.Fatalf("current snapshot source = %q, want current", got)
+	}
+}
+
+func TestRunnerIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	cached := []model.IndicatorSnapshot{
+		testIndicatorSnapshot(klines[23], "cached-23"),
+		testIndicatorSnapshot(klines[24], "cached-24"),
+	}
+	runner := NewRunner(&fakeStore{}, RunnerOptions{})
+
+	snapshots, err := runner.indicatorSnapshotsForWindow(window, cached)
+	if err != nil {
+		t.Fatalf("indicatorSnapshotsForWindow: %v", err)
+	}
+
+	if len(snapshots) != 20 {
+		t.Fatalf("snapshots = %d, want 20", len(snapshots))
+	}
+	if got := snapshots[0].OpenTime; got != klines[5].OpenTime {
+		t.Fatalf("first snapshot open time = %d, want %d", got, klines[5].OpenTime)
+	}
+	if got := snapshots[18].Values["source"]; got != "cached-23" {
+		t.Fatalf("snapshot[18] source = %q, want cached-23", got)
+	}
+	if got := snapshots[19].Values["source"]; got != "cached-24" {
+		t.Fatalf("snapshot[19] source = %q, want cached-24", got)
+	}
+	if snapshots[17].Values["source"] != "" {
+		t.Fatalf("snapshot[17] unexpectedly reused cached source: %#v", snapshots[17].Values)
+	}
 }
 
 func TestRunnerReloadsWindowWhenCacheHasGap(t *testing.T) {
@@ -570,6 +641,21 @@ func TestRunnerCalculatesWithConcurrentWorkers(t *testing.T) {
 	}
 	if len(store.snapshots) != 16 {
 		t.Fatalf("snapshots = %d, want 16", len(store.snapshots))
+	}
+}
+
+func testIndicatorSnapshot(kline model.Kline, source string) model.IndicatorSnapshot {
+	return model.IndicatorSnapshot{
+		Exchange:  kline.Exchange,
+		Market:    kline.Market,
+		Symbol:    kline.Symbol,
+		Interval:  kline.Interval,
+		OpenTime:  kline.OpenTime,
+		CloseTime: kline.CloseTime,
+		Values: map[string]string{
+			"source": source,
+		},
+		Signals: map[string]string{},
 	}
 }
 

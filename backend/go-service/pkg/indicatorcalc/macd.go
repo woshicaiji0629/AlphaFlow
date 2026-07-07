@@ -23,7 +23,23 @@ func addMACDFeaturesWithPrefix(
 	if !ok {
 		return
 	}
+	addMACDSeriesFeatures(values, signals, closes, series, prefix)
+}
+
+func addMACDSeriesFeatures(
+	values map[string]string,
+	signals map[string]string,
+	closes []float64,
+	series []macdPoint,
+	prefix string,
+) {
+	if len(series) == 0 {
+		return
+	}
 	last := series[len(series)-1]
+	setValue(values, prefix, last.value, true)
+	setValue(values, prefix+"_signal", last.signal, true)
+	setValue(values, prefix+"_hist", last.hist, true)
 	setValue(values, prefix+"_hist_delta", macdHistDelta(series), len(series) >= 2)
 	setValue(values, prefix+"_zero_distance", last.value, true)
 	signals[prefix+"_cross"] = macdCross(series)

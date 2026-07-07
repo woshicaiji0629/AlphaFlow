@@ -11,6 +11,8 @@ type CalculationWindow struct {
 	closes   []float64
 	volumes  []float64
 	parseErr error
+	basic    *basicIndicatorState
+	stream   bool
 }
 
 func NewCalculationWindow(limit int) *CalculationWindow {
@@ -36,7 +38,17 @@ func (w *CalculationWindow) Clone() *CalculationWindow {
 		closes:   append([]float64(nil), w.closes...),
 		volumes:  append([]float64(nil), w.volumes...),
 		parseErr: w.parseErr,
+		basic:    w.basic.clone(),
+		stream:   w.stream,
 	}
+}
+
+func (w *CalculationWindow) EnableBasicState() {
+	if w == nil {
+		return
+	}
+	w.stream = true
+	w.rebuildBasicState()
 }
 
 func (w *CalculationWindow) Reset(klines []model.Kline) {
@@ -49,9 +61,14 @@ func (w *CalculationWindow) Reset(klines []model.Kline) {
 	}
 	w.trim()
 	w.rebuildSeries()
+	w.basic = nil
 }
 
 func (w *CalculationWindow) Append(klines []model.Kline) {
+	w.append(klines, w.stream)
+}
+
+func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool) {
 	for _, kline := range klines {
 		if !kline.IsClosed {
 			continue
@@ -59,11 +76,25 @@ func (w *CalculationWindow) Append(klines []model.Kline) {
 		w.klines = append(w.klines, kline)
 		if w.parseErr == nil {
 			w.appendSeries(kline)
+			if maintainBasicState && w.parseErr == nil && w.basic != nil {
+				w.basic.append(w.highs, w.lows, w.closes, w.volumes)
+			}
 		}
 	}
-	w.trim()
+	trimmed := w.trim()
 	if w.parseErr != nil {
 		w.rebuildSeries()
+	}
+	if !maintainBasicState {
+		w.basic = nil
+		return
+	}
+	if w.parseErr != nil {
+		w.rebuildBasicState()
+		return
+	}
+	if trimmed || w.basic == nil {
+		w.rebuildBasicState()
 	}
 }
 
@@ -85,9 +116,9 @@ func (w *CalculationWindow) Series() ([]float64, []float64, []float64, []float64
 	return w.opens, w.highs, w.lows, w.closes, w.volumes, nil
 }
 
-func (w *CalculationWindow) trim() {
+func (w *CalculationWindow) trim() bool {
 	if w.limit <= 0 || len(w.klines) <= w.limit {
-		return
+		return false
 	}
 	drop := len(w.klines) - w.limit
 	w.klines = w.klines[len(w.klines)-w.limit:]
@@ -96,6 +127,7 @@ func (w *CalculationWindow) trim() {
 	w.lows = trimFloatSeries(w.lows, drop)
 	w.closes = trimFloatSeries(w.closes, drop)
 	w.volumes = trimFloatSeries(w.volumes, drop)
+	return true
 }
 
 func trimFloatSeries(values []float64, drop int) []float64 {
@@ -148,6 +180,14 @@ func (w *CalculationWindow) rebuildSeries() {
 		w.closes = append(w.closes, closeValue)
 		w.volumes = append(w.volumes, volume)
 	}
+}
+
+func (w *CalculationWindow) rebuildBasicState() {
+	if w.parseErr != nil {
+		w.basic = nil
+		return
+	}
+	w.basic = buildBasicIndicatorState(w.highs, w.lows, w.closes, w.volumes)
 }
 
 func (w *CalculationWindow) appendSeries(kline model.Kline) {

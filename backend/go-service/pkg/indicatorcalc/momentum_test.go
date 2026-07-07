@@ -14,6 +14,24 @@ func TestRSIUsesWilderSmoothing(t *testing.T) {
 	}
 }
 
+func TestRSISeriesMatchesRSI(t *testing.T) {
+	values := []float64{100, 101, 99, 102, 103, 101, 105, 104, 106, 108, 107, 109, 111, 110, 112, 114, 113, 115, 116, 114, 117, 119}
+	series, ok := rsiSeries(values, 14)
+	if !ok {
+		t.Fatal("rsiSeries returned false")
+	}
+	for index, got := range series {
+		end := 14 + 1 + index
+		want, ok := rsi(values[:end], 14)
+		if !ok {
+			t.Fatalf("rsi(%d) returned false", end)
+		}
+		if got != want {
+			t.Fatalf("series[%d] = %v, want %v", index, got, want)
+		}
+	}
+}
+
 func TestRSIFeatures(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}

@@ -10,18 +10,32 @@ const (
 )
 
 func addRSIFeatures(values map[string]string, signals map[string]string, closes []float64, period int) {
-	value, ok := rsi(closes, period)
-	setValue(values, "rsi14", value, ok)
+	series, ok := rsiSeries(closes, period)
 	if !ok {
 		return
 	}
-	previous, okPrevious := rsi(closes[:len(closes)-3], period)
-	setValue(values, "rsi_slope3", value-previous, okPrevious)
+	addRSIFeaturesFromSeries(values, signals, closes, series)
+}
+
+func addRSIFeaturesFromSeries(values map[string]string, signals map[string]string, closes []float64, series []float64) {
+	if len(series) == 0 {
+		return
+	}
+	value := series[len(series)-1]
+	setValue(values, "rsi14", value, true)
+	if previousIndex := len(series) - 4; previousIndex >= 0 {
+		setValue(values, "rsi_slope3", value-series[previousIndex], true)
+	}
 	signals["rsi_state"] = rsiState(value)
-	signals["rsi_divergence"] = rsiDivergence(closes, period)
+	signals["rsi_divergence"] = rsiDivergenceFromSeries(closes, series)
 }
 
 func addOscillatorFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	rsi14Series, _ := rsiSeries(closes, 14)
+	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series)
+}
+
+func addOscillatorFeaturesWithRSI(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, rsi14Series []float64) {
 	k, d, j, ok := kdj(highs, lows, closes, 9)
 	if ok {
 		setValue(values, "kdj_k", k, true)
@@ -33,7 +47,7 @@ func addOscillatorFeatures(values map[string]string, signals map[string]string, 
 		setValue(values, "stoch_k", stochK, true)
 		setValue(values, "stoch_d", stochD, true)
 	}
-	stochRSIK, stochRSID, ok := stochRSI(closes, 14, 14, 3)
+	stochRSIK, stochRSID, ok := stochRSIFromSeries(rsi14Series, 14, 3)
 	if ok {
 		setValue(values, "stoch_rsi_k", stochRSIK, true)
 		setValue(values, "stoch_rsi_d", stochRSID, true)
@@ -201,14 +215,41 @@ func rsiSeries(values []float64, period int) ([]float64, bool) {
 		return nil, false
 	}
 	series := make([]float64, 0, len(values)-period)
-	for end := period + 1; end <= len(values); end++ {
-		value, ok := rsi(values[:end], period)
-		if !ok {
-			continue
+	var avgGain float64
+	var avgLoss float64
+	for index := 1; index <= period; index++ {
+		delta := values[index] - values[index-1]
+		if delta >= 0 {
+			avgGain += delta
+		} else {
+			avgLoss -= delta
 		}
-		series = append(series, value)
+	}
+	avgGain /= float64(period)
+	avgLoss /= float64(period)
+	series = append(series, rsiFromAverages(avgGain, avgLoss))
+	for index := period + 1; index < len(values); index++ {
+		delta := values[index] - values[index-1]
+		gain := 0.0
+		loss := 0.0
+		if delta >= 0 {
+			gain = delta
+		} else {
+			loss = -delta
+		}
+		avgGain = (avgGain*float64(period-1) + gain) / float64(period)
+		avgLoss = (avgLoss*float64(period-1) + loss) / float64(period)
+		series = append(series, rsiFromAverages(avgGain, avgLoss))
 	}
 	return series, len(series) > 0
+}
+
+func rsiFromAverages(avgGain float64, avgLoss float64) float64 {
+	if avgLoss == 0 {
+		return 100
+	}
+	rs := avgGain / avgLoss
+	return 100 - 100/(1+rs)
 }
 
 func rsiDivergence(closes []float64, period int) string {
@@ -296,14 +337,14 @@ func stochRSI(closes []float64, rsiPeriod int, stochPeriod int, smooth int) (flo
 	if len(closes) <= rsiPeriod+stochPeriod+smooth {
 		return 0, 0, false
 	}
-	values := make([]float64, 0, stochPeriod+smooth)
-	for end := rsiPeriod + 1; end <= len(closes); end++ {
-		value, ok := rsi(closes[:end], rsiPeriod)
-		if !ok {
-			continue
-		}
-		values = append(values, value)
+	values, ok := rsiSeries(closes, rsiPeriod)
+	if !ok {
+		return 0, 0, false
 	}
+	return stochRSIFromSeries(values, stochPeriod, smooth)
+}
+
+func stochRSIFromSeries(values []float64, stochPeriod int, smooth int) (float64, float64, bool) {
 	if len(values) < stochPeriod+smooth {
 		return 0, 0, false
 	}

@@ -79,13 +79,20 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	if err != nil {
 		return Result{}, err
 	}
+	basic := window.basic
 
 	for _, period := range options.SMAPeriods {
-		value, ok := sma(closes, period)
+		value, ok := basic.sma(period)
+		if !ok {
+			value, ok = sma(closes, period)
+		}
 		setValue(values, fmt.Sprintf("sma%d", period), value, ok)
 	}
 	for _, period := range options.EMAPeriods {
-		value, ok := ema(closes, period)
+		value, ok := basic.emaValue(period)
+		if !ok {
+			value, ok = ema(closes, period)
+		}
 		setValue(values, fmt.Sprintf("ema%d", period), value, ok)
 	}
 	for _, period := range options.WMAPeriods {
@@ -94,38 +101,55 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	}
 	addMovingAverageFeatures(values, signals, closes, volumes)
 
-	addRSIFeatures(values, signals, closes, 14)
-	macdValue, macdSignal, macdHist, ok := macd(closes, 12, 26, 9)
-	if ok {
-		setValue(values, "macd", macdValue, true)
-		setValue(values, "macd_signal", macdSignal, true)
-		setValue(values, "macd_hist", macdHist, true)
+	rsi14Series, ok := basic.rsiSeries14()
+	if !ok {
+		rsi14Series, _ = rsiSeries(closes, 14)
 	}
-	addMACDFeatures(values, signals, closes, 12, 26, 9)
-	macdFastValue, macdFastSignal, macdFastHist, ok := macd(closes, 7, 19, 9)
-	if ok {
-		setValue(values, "macd_fast", macdFastValue, true)
-		setValue(values, "macd_fast_signal", macdFastSignal, true)
-		setValue(values, "macd_fast_hist", macdFastHist, true)
+	addRSIFeaturesFromSeries(values, signals, closes, rsi14Series)
+	if series, ok := basic.macdSeries(macdConfig{fast: 12, slow: 26, signal: 9}); ok {
+		addMACDSeriesFeatures(values, signals, closes, series, "macd")
+	} else if series, ok := macdSeries(closes, 12, 26, 9); ok {
+		addMACDSeriesFeatures(values, signals, closes, series, "macd")
 	}
-	addMACDFeaturesWithPrefix(values, signals, closes, 7, 19, 9, "macd_fast")
-	addOscillatorFeatures(values, signals, highs, lows, closes)
-	addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
+	if series, ok := basic.macdSeries(macdConfig{fast: 7, slow: 19, signal: 9}); ok {
+		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
+	} else if series, ok := macdSeries(closes, 7, 19, 9); ok {
+		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
+	}
+	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series)
+	if atr14Series, ok := basic.atrSeries14(); ok {
+		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series)
+	} else if atr14Series, ok := atrSeries(highs, lows, closes, 14); ok {
+		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series)
+	} else {
+		addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
+	}
 	upper, middle, lower, ok := bollinger(closes, 20, 2)
 	if ok {
 		setValue(values, "bb_upper", upper, true)
 		setValue(values, "bb_middle", middle, true)
 		setValue(values, "bb_lower", lower, true)
 	}
-	volumeMA, ok := sma(volumes, 20)
+	volumeMA, ok := basic.volumeSMAValue(20)
+	if !ok {
+		volumeMA, ok = sma(volumes, 20)
+	}
 	setValue(values, "volume_ma20", volumeMA, ok)
-	setValue(values, "obv", obv(closes, volumes), true)
+	if obvValue, ok := basic.obvValue(); ok {
+		setValue(values, "obv", obvValue, true)
+	} else {
+		setValue(values, "obv", obv(closes, volumes), true)
+	}
 	donchianHigh, donchianLow, ok := donchian(highs, lows, 20)
 	if ok {
 		setValue(values, "donchian_high20", donchianHigh, true)
 		setValue(values, "donchian_low20", donchianLow, true)
 	}
-	setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
+	if vwapValue, ok := basic.vwapValue(closes[len(closes)-1]); ok {
+		setValue(values, "vwap", vwapValue, true)
+	} else {
+		setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
+	}
 	addDerived(values, opens, highs, lows, closes, volumes)
 	addEnhanced(values, signals, opens, highs, lows, closes, volumes)
 
