@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"alphaflow/go-service/market-data/internal/model"
 	"alphaflow/go-service/pkg/indicatorcalc"
 	"alphaflow/go-service/pkg/indicatorwindow"
 	"alphaflow/go-service/pkg/marketbus"
 )
+
+const indicatorWindowLookback = 20
+
+type calculatedIndicators struct {
+	current model.IndicatorSnapshot
+	recent  []model.IndicatorSnapshot
+}
 
 func (r *Runner) publishClosedSnapshot(
 	ctx context.Context,
@@ -64,16 +72,9 @@ func (r *Runner) indicatorWindowSnapshot(
 	rule Rule,
 	symbol string,
 	interval string,
-	window *indicatorcalc.CalculationWindow,
-	snapshot model.IndicatorSnapshot,
+	snapshots []model.IndicatorSnapshot,
+	updatedAt int64,
 ) (model.IndicatorWindowSnapshot, error) {
-	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
-	cached := r.cachedIndicatorSnapshots(key, window, snapshot)
-	snapshots, err := r.indicatorSnapshotsForWindow(window, cached)
-	if err != nil {
-		return model.IndicatorWindowSnapshot{}, err
-	}
-	snapshots = r.rememberIndicatorSnapshots(key, snapshots)
 	result, err := indicatorwindow.Analyze(snapshots)
 	if err != nil {
 		return model.IndicatorWindowSnapshot{}, err
@@ -88,11 +89,89 @@ func (r *Runner) indicatorWindowSnapshot(
 		Version:   result.Version,
 		Values:    result.Values,
 		Signals:   result.Signals,
-		UpdatedAt: snapshot.UpdatedAt,
+		UpdatedAt: updatedAt,
 	}, nil
 }
 
-func (r *Runner) indicatorSnapshotsForWindow(
+func (r *Runner) analyzeIndicatorWindow(
+	rule Rule,
+	symbol string,
+	interval string,
+	snapshots []model.IndicatorSnapshot,
+	updatedAt int64,
+	intervalMillis int64,
+) (model.IndicatorWindowSnapshot, error) {
+	if err := validateIndicatorSnapshotContinuity(snapshots, intervalMillis); err != nil {
+		return model.IndicatorWindowSnapshot{}, err
+	}
+	return r.indicatorWindowSnapshot(rule, symbol, interval, snapshots, updatedAt)
+}
+
+func (r *Runner) calculateClosedIndicators(
+	ctx context.Context,
+	key string,
+	rule Rule,
+	symbol string,
+	interval string,
+	window *indicatorcalc.CalculationWindow,
+) (calculatedIndicators, error) {
+	cached := r.cachedIndicatorSnapshotsForWindow(key, window)
+	if len(cached) == 0 {
+		recent, err := r.store.RecentIndicators(ctx, rule.Exchange, rule.Market, symbol, interval, r.options.SnapshotCacheLimit)
+		if err != nil {
+			return calculatedIndicators{}, err
+		}
+		cached = alignedIndicatorSnapshotsInWindow(window.Klines(), recent, r.options.SnapshotCacheLimit)
+	}
+	snapshots, err := r.calculatedIndicatorSnapshotsForWindow(window, cached)
+	if err != nil {
+		return calculatedIndicators{}, err
+	}
+	snapshots = r.rememberIndicatorSnapshots(key, snapshots)
+	if len(snapshots) == 0 {
+		return calculatedIndicators{}, fmt.Errorf("no calculated indicator snapshots")
+	}
+	return calculatedIndicators{
+		current: snapshots[len(snapshots)-1],
+		recent:  snapshots,
+	}, nil
+}
+
+func (r *Runner) calculateRealtimeIndicators(
+	key string,
+	window *indicatorcalc.CalculationWindow,
+	kline model.Kline,
+) (calculatedIndicators, error) {
+	result, err := indicatorcalc.CalculateWindow(window, r.options.CalculateOptions)
+	if err != nil {
+		return calculatedIndicators{}, err
+	}
+	snapshot := indicatorSnapshotFromResult(kline, result, r.now().UnixMilli())
+	snapshots := r.cachedIndicatorSnapshotsWithCurrent(key, snapshot)
+	if len(snapshots) == 0 {
+		snapshots = []model.IndicatorSnapshot{snapshot}
+	}
+	return calculatedIndicators{
+		current: snapshot,
+		recent:  snapshots,
+	}, nil
+}
+
+func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result, updatedAt int64) model.IndicatorSnapshot {
+	return model.IndicatorSnapshot{
+		Exchange:  kline.Exchange,
+		Market:    kline.Market,
+		Symbol:    kline.Symbol,
+		Interval:  kline.Interval,
+		OpenTime:  result.OpenTime,
+		CloseTime: result.CloseTime,
+		Values:    result.Values,
+		Signals:   result.Signals,
+		UpdatedAt: updatedAt,
+	}
+}
+
+func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 	window *indicatorcalc.CalculationWindow,
 	cached []model.IndicatorSnapshot,
 ) ([]model.IndicatorSnapshot, error) {
@@ -103,7 +182,7 @@ func (r *Runner) indicatorSnapshotsForWindow(
 	if len(closed) == 0 {
 		return nil, fmt.Errorf("no closed klines")
 	}
-	lookback := 20
+	lookback := r.options.WindowLookback
 	if lookback > len(closed) {
 		lookback = len(closed)
 	}
@@ -138,6 +217,115 @@ func (r *Runner) indicatorSnapshotsForWindow(
 		})
 	}
 	return snapshots, nil
+}
+
+func (r *Runner) cachedIndicatorSnapshotsWithCurrent(
+	key string,
+	snapshot model.IndicatorSnapshot,
+) []model.IndicatorSnapshot {
+	cached := r.cachedIndicatorSnapshotsForKey(key)
+
+	return appendIndicatorSnapshot(cached, snapshot, r.options.SnapshotCacheLimit)
+}
+
+func (r *Runner) cachedIndicatorSnapshotsForKey(key string) []model.IndicatorSnapshot {
+	r.mu.Lock()
+	cached := append([]model.IndicatorSnapshot(nil), r.indicatorSnapshots[key]...)
+	r.mu.Unlock()
+	return cached
+}
+
+func appendIndicatorSnapshot(
+	cached []model.IndicatorSnapshot,
+	snapshot model.IndicatorSnapshot,
+	limit int,
+) []model.IndicatorSnapshot {
+	candidates := make([]model.IndicatorSnapshot, 0, len(cached)+1)
+	for _, cachedSnapshot := range cached {
+		if cachedSnapshot.OpenTime >= snapshot.OpenTime {
+			continue
+		}
+		candidates = append(candidates, cachedSnapshot)
+	}
+	candidates = append(candidates, snapshot)
+	return trimIndicatorSnapshots(candidates, limit)
+}
+
+func (r *Runner) cachedIndicatorSnapshotsForWindow(
+	key string,
+	window *indicatorcalc.CalculationWindow,
+) []model.IndicatorSnapshot {
+	if window == nil {
+		return nil
+	}
+	closed := window.Klines()
+	if len(closed) == 0 {
+		return nil
+	}
+
+	r.mu.Lock()
+	cached := append([]model.IndicatorSnapshot(nil), r.indicatorSnapshots[key]...)
+	r.mu.Unlock()
+	return alignedIndicatorSnapshotsInWindow(closed, cached, r.options.SnapshotCacheLimit)
+}
+
+func alignedIndicatorSnapshotsInWindow(
+	closed []model.Kline,
+	candidates []model.IndicatorSnapshot,
+	limit int,
+) []model.IndicatorSnapshot {
+	if len(closed) == 0 || len(candidates) == 0 {
+		return nil
+	}
+	windowIndexes := make(map[int64]int, len(closed))
+	for index, kline := range closed {
+		windowIndexes[kline.OpenTime] = index
+	}
+	for candidateEnd := len(candidates) - 1; candidateEnd >= 0; candidateEnd-- {
+		windowIndex, ok := windowIndexes[candidates[candidateEnd].OpenTime]
+		if !ok {
+			continue
+		}
+		candidateIndex := candidateEnd
+		for candidateIndex >= 0 && windowIndex >= 0 {
+			if candidates[candidateIndex].OpenTime != closed[windowIndex].OpenTime {
+				break
+			}
+			candidateIndex--
+			windowIndex--
+		}
+		if candidateIndex < candidateEnd {
+			return trimIndicatorSnapshots(candidates[candidateIndex+1:candidateEnd+1], limit)
+		}
+	}
+	return nil
+}
+
+func validateIndicatorSnapshotContinuity(snapshots []model.IndicatorSnapshot, intervalMillis int64) error {
+	if len(snapshots) <= 1 {
+		return nil
+	}
+	ordered := append([]model.IndicatorSnapshot(nil), snapshots...)
+	sort.SliceStable(ordered, func(i int, j int) bool {
+		return ordered[i].OpenTime < ordered[j].OpenTime
+	})
+	for index := 1; index < len(ordered); index++ {
+		previous := ordered[index-1]
+		current := ordered[index]
+		expectedOpenTime := previous.OpenTime + intervalMillis
+		if previous.CloseTime > 0 {
+			expectedOpenTime = previous.CloseTime + 1
+		}
+		if current.OpenTime != expectedOpenTime {
+			return fmt.Errorf(
+				"indicator snapshot gap: previous_open_time=%d current_open_time=%d expected_open_time=%d",
+				previous.OpenTime,
+				current.OpenTime,
+				expectedOpenTime,
+			)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) cachedIndicatorSnapshots(
@@ -186,23 +374,26 @@ func alignedIndicatorSnapshotSuffix(
 	if candidateIndex == len(candidates)-1 {
 		return nil
 	}
-	return trimIndicatorSnapshots(candidates[candidateIndex+1:])
+	return trimIndicatorSnapshots(candidates[candidateIndex+1:], indicatorWindowLookback)
 }
 
 func (r *Runner) rememberIndicatorSnapshots(
 	key string,
 	snapshots []model.IndicatorSnapshot,
 ) []model.IndicatorSnapshot {
-	trimmed := trimIndicatorSnapshots(snapshots)
+	trimmed := trimIndicatorSnapshots(snapshots, r.options.SnapshotCacheLimit)
 	r.mu.Lock()
 	r.indicatorSnapshots[key] = append([]model.IndicatorSnapshot(nil), trimmed...)
 	r.mu.Unlock()
 	return trimmed
 }
 
-func trimIndicatorSnapshots(snapshots []model.IndicatorSnapshot) []model.IndicatorSnapshot {
-	if len(snapshots) <= 20 {
+func trimIndicatorSnapshots(snapshots []model.IndicatorSnapshot, limit int) []model.IndicatorSnapshot {
+	if limit <= 0 {
+		limit = indicatorWindowLookback
+	}
+	if len(snapshots) <= limit {
 		return append([]model.IndicatorSnapshot(nil), snapshots...)
 	}
-	return append([]model.IndicatorSnapshot(nil), snapshots[len(snapshots)-20:]...)
+	return append([]model.IndicatorSnapshot(nil), snapshots[len(snapshots)-limit:]...)
 }

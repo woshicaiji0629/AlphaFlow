@@ -6,7 +6,7 @@ import (
 )
 
 func KlineLimit() int64 {
-	return 300
+	return IndicatorKlineCacheLimit()
 }
 
 func KlineTTL() time.Duration {
@@ -46,7 +46,27 @@ func HealthGapLookback() int64 {
 }
 
 func IndicatorLookbackPeriods() int64 {
-	return KlineLimit()
+	return IndicatorKlineCacheLimit()
+}
+
+func IndicatorWarmupKlines() int64 {
+	return 250
+}
+
+func IndicatorWindowLookback() int64 {
+	return 50
+}
+
+func IndicatorCacheBuffer() int64 {
+	return 10
+}
+
+func IndicatorKlineCacheLimit() int64 {
+	return IndicatorWarmupKlines() + IndicatorWindowLookback() + IndicatorCacheBuffer()
+}
+
+func IndicatorSnapshotCacheLimit() int {
+	return int(IndicatorWindowLookback() + IndicatorCacheBuffer())
 }
 
 func ClickHouseDialTimeout(cfg Config) (time.Duration, error) {

@@ -61,3 +61,14 @@ func (s *MarketStore) LastIndicatorOpenTime(
 ) (int64, bool, error) {
 	return s.redis.LastIndicatorOpenTime(ctx, exchange, market, symbol, interval)
 }
+
+func (s *MarketStore) RecentIndicators(
+	ctx context.Context,
+	exchange string,
+	market string,
+	symbol string,
+	interval string,
+	limit int,
+) ([]model.IndicatorSnapshot, error) {
+	return s.redis.RecentIndicators(ctx, exchange, market, symbol, interval, limit)
+}

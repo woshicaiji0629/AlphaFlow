@@ -76,6 +76,29 @@ func TestKlineTrimStopRank(t *testing.T) {
 	}
 }
 
+func TestIndicatorHistoryKeys(t *testing.T) {
+	snapshot := model.IndicatorSnapshot{
+		Exchange: "binance",
+		Market:   "um",
+		Symbol:   "ETHUSDT",
+		Interval: "1m",
+	}
+	baseKey := model.IndicatorHistoryKey("binance", "um", "ETHUSDT", "1m")
+
+	if got, want := indicatorHistoryIndexKey(snapshot), baseKey+":idx"; got != want {
+		t.Fatalf("index key = %q, want %q", got, want)
+	}
+	if got, want := indicatorHistoryDataKey(snapshot), baseKey+":data"; got != want {
+		t.Fatalf("data key = %q, want %q", got, want)
+	}
+}
+
+func TestIndicatorHistoryTrimStopRank(t *testing.T) {
+	if got := indicatorHistoryTrimStopRank(60); got != -61 {
+		t.Fatalf("trim stop rank = %d, want -61", got)
+	}
+}
+
 func TestIndicatorWindowHashFieldsIncludeBarFreshness(t *testing.T) {
 	fields, err := indicatorWindowHashFields(model.IndicatorWindowSnapshot{
 		Exchange:  "binance",

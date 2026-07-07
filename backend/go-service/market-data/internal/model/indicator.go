@@ -17,6 +17,10 @@ func IndicatorLastKey(exchange string, market string, symbol string, interval st
 	return marketkeys.IndicatorLastKey(exchange, market, symbol, interval)
 }
 
+func IndicatorHistoryKey(exchange string, market string, symbol string, interval string) string {
+	return marketkeys.IndicatorHistoryKey(exchange, market, symbol, interval)
+}
+
 func IndicatorWindowKey(exchange string, market string, symbol string, interval string) string {
 	return marketkeys.IndicatorWindowKey(exchange, market, symbol, interval)
 }

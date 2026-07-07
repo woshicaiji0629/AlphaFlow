@@ -46,6 +46,10 @@ func (s *loadStore) LastIndicatorOpenTime(_ context.Context, exchange string, ma
 	return openTime, ok, nil
 }
 
+func (s *loadStore) RecentIndicators(context.Context, string, string, string, string, int) ([]model.IndicatorSnapshot, error) {
+	return nil, nil
+}
+
 func (s *loadStore) SetClosedIndicator(
 	_ context.Context,
 	snapshot model.IndicatorSnapshot,

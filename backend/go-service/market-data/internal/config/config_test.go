@@ -184,8 +184,23 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	if MarkPriceInterval() != "1s" {
 		t.Fatalf("MarkPriceInterval = %q, want 1s", MarkPriceInterval())
 	}
-	if KlineLimit() != 300 {
-		t.Fatalf("KlineLimit = %d, want 300", KlineLimit())
+	if IndicatorWarmupKlines() != 250 {
+		t.Fatalf("IndicatorWarmupKlines = %d, want 250", IndicatorWarmupKlines())
+	}
+	if IndicatorWindowLookback() != 50 {
+		t.Fatalf("IndicatorWindowLookback = %d, want 50", IndicatorWindowLookback())
+	}
+	if IndicatorCacheBuffer() != 10 {
+		t.Fatalf("IndicatorCacheBuffer = %d, want 10", IndicatorCacheBuffer())
+	}
+	if IndicatorKlineCacheLimit() != 310 {
+		t.Fatalf("IndicatorKlineCacheLimit = %d, want 310", IndicatorKlineCacheLimit())
+	}
+	if IndicatorSnapshotCacheLimit() != 60 {
+		t.Fatalf("IndicatorSnapshotCacheLimit = %d, want 60", IndicatorSnapshotCacheLimit())
+	}
+	if KlineLimit() != IndicatorKlineCacheLimit() {
+		t.Fatalf("KlineLimit = %d, want %d", KlineLimit(), IndicatorKlineCacheLimit())
 	}
 	if KlineTTL() != 7*24*time.Hour {
 		t.Fatalf("KlineTTL = %s, want 168h", KlineTTL())

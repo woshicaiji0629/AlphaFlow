@@ -24,6 +24,11 @@ func TestKeysUseExistingRedisProtocol(t *testing.T) {
 			want: "bn:um:ind:last:ETHUSDT:3m",
 		},
 		{
+			name: "indicator history",
+			got:  IndicatorHistoryKey("binance", "um", "ETHUSDT", "3m"),
+			want: "bn:um:ind:hist:ETHUSDT:3m",
+		},
+		{
 			name: "indicator window",
 			got:  IndicatorWindowKey("binance", "um", "ETHUSDT", "3m"),
 			want: "bn:um:indwin:ETHUSDT:3m",

@@ -26,8 +26,9 @@ func buildRuntime(
 	closePublisher := func() {}
 
 	redisStore := store.NewRedisStore(redisManager.Get(constants.RedisDefaultInstance), store.Retention{
-		KlineLimit:     config.KlineLimit(),
+		KlineLimit:     config.IndicatorKlineCacheLimit(),
 		KlineTTL:       config.KlineTTL(),
+		IndicatorLimit: int64(config.IndicatorSnapshotCacheLimit()),
 		LiquidationTTL: config.LiquidationTTL(),
 		LatestTTL:      config.LatestTTL(),
 		PollingTTL:     config.PollingTTL(),
@@ -54,10 +55,12 @@ func buildRuntime(
 		LookbackPeriods: config.KlineLimit(),
 	})
 	indicatorRunnerOptions := indicator.RunnerOptions{
-		Rules:           indicatorRules(cfg),
-		ScanInterval:    config.IndicatorScanInterval(),
-		LookbackPeriods: config.IndicatorLookbackPeriods(),
-		Publisher:       publisher,
+		Rules:              indicatorRules(cfg),
+		ScanInterval:       config.IndicatorScanInterval(),
+		LookbackPeriods:    config.IndicatorLookbackPeriods(),
+		WindowLookback:     int(config.IndicatorWindowLookback()),
+		SnapshotCacheLimit: config.IndicatorSnapshotCacheLimit(),
+		Publisher:          publisher,
 	}
 	if publisher != nil {
 		publishTTL, err := config.MarketBusDefaultTTL(cfg)

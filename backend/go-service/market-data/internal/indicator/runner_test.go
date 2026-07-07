@@ -81,6 +81,10 @@ func (s *fakeStore) LastIndicatorOpenTime(context.Context, string, string, strin
 	return s.lastIndicatorOpenTime, s.hasLastIndicator, s.lastIndicatorOpenTimeErr
 }
 
+func (s *fakeStore) RecentIndicators(context.Context, string, string, string, string, int) ([]model.IndicatorSnapshot, error) {
+	return nil, nil
+}
+
 func (s *fakeStore) SetClosedIndicator(
 	_ context.Context,
 	snapshot model.IndicatorSnapshot,
@@ -550,7 +554,31 @@ func TestRunnerCachedIndicatorSnapshotsReturnsAlignedSuffixWithCurrentSnapshot(t
 	}
 }
 
-func TestRunnerIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t *testing.T) {
+func TestRunnerCachedIndicatorSnapshotsForWindowAlignsBeforeLatest(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	key := windowKey("binance", "um", "ETHUSDT", "1m")
+	runner := NewRunner(&fakeStore{}, RunnerOptions{})
+	runner.indicatorSnapshots[key] = []model.IndicatorSnapshot{
+		testIndicatorSnapshot(klines[20], "cached-20"),
+		testIndicatorSnapshot(klines[21], "cached-21"),
+		testIndicatorSnapshot(klines[22], "cached-22"),
+		testIndicatorSnapshot(klines[23], "cached-23"),
+	}
+
+	snapshots := runner.cachedIndicatorSnapshotsForWindow(key, window)
+
+	if len(snapshots) != 4 {
+		t.Fatalf("snapshots = %d, want 4", len(snapshots))
+	}
+	for offset, wantIndex := range []int{20, 21, 22, 23} {
+		if got := snapshots[offset].OpenTime; got != klines[wantIndex].OpenTime {
+			t.Fatalf("snapshot[%d] open time = %d, want %d", offset, got, klines[wantIndex].OpenTime)
+		}
+	}
+}
+
+func TestRunnerCalculatedIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t *testing.T) {
 	klines := minuteKlines(25)
 	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
 	cached := []model.IndicatorSnapshot{
@@ -559,9 +587,9 @@ func TestRunnerIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t *testing.T
 	}
 	runner := NewRunner(&fakeStore{}, RunnerOptions{})
 
-	snapshots, err := runner.indicatorSnapshotsForWindow(window, cached)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
 	if err != nil {
-		t.Fatalf("indicatorSnapshotsForWindow: %v", err)
+		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}
 
 	if len(snapshots) != 20 {
@@ -581,7 +609,20 @@ func TestRunnerIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t *testing.T
 	}
 }
 
-func TestRunnerReloadsWindowWhenCacheHasGap(t *testing.T) {
+func TestRunnerValidateIndicatorSnapshotContinuityDetectsGap(t *testing.T) {
+	klines := minuteKlines(3)
+	snapshots := []model.IndicatorSnapshot{
+		testIndicatorSnapshot(klines[0], "first"),
+		testIndicatorSnapshot(klines[2], "gap"),
+	}
+
+	err := validateIndicatorSnapshotContinuity(snapshots, int64(time.Minute/time.Millisecond))
+	if err == nil {
+		t.Fatal("expected indicator snapshot gap")
+	}
+}
+
+func TestRunnerReturnsErrorWhenIndicatorSnapshotsHaveGap(t *testing.T) {
 	klines := minuteKlines(10)
 	store := &fakeStore{
 		available:    true,
@@ -605,12 +646,8 @@ func TestRunnerReloadsWindowWhenCacheHasGap(t *testing.T) {
 	gapped := minuteKline(int64(len(klines)+1), 112)
 	store.klines = append(store.klines, gapped)
 	store.lastOpenTime = gapped.OpenTime
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce second: %v", err)
-	}
-
-	if store.rangeCalls != 3 {
-		t.Fatalf("range calls = %d, want 3", store.rangeCalls)
+	if err := runner.RunOnce(context.Background()); err == nil {
+		t.Fatal("expected indicator snapshot gap")
 	}
 }
 

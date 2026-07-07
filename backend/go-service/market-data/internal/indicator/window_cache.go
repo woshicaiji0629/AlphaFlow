@@ -2,6 +2,7 @@ package indicator
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 
@@ -56,10 +57,10 @@ func (r *Runner) windowForKline(
 	}
 	r.mu.Unlock()
 
-	return r.updateWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
+	return r.prepareKlineWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
 }
 
-func (r *Runner) updateWindow(
+func (r *Runner) prepareKlineWindow(
 	ctx context.Context,
 	rule Rule,
 	symbol string,
@@ -79,7 +80,7 @@ func (r *Runner) updateWindow(
 		if lastOpenTime <= cachedLastOpenTime {
 			window := cached.Clone()
 			r.mu.Unlock()
-			return window, nil
+			return preparedKlineWindow(window, intervalMillis)
 		}
 	}
 	r.mu.Unlock()
@@ -104,14 +105,14 @@ func (r *Runner) updateWindow(
 			if currentHasLast && lastOpenTime <= currentLastOpenTime {
 				window := cached.Clone()
 				r.mu.Unlock()
-				return window, nil
+				return preparedKlineWindow(window, intervalMillis)
 			}
 			klines = normalizeIncrementalKlines(klines, currentLastOpenTime)
 		}
 		if len(klines) == 0 && cached != nil {
 			window := cached.Clone()
 			r.mu.Unlock()
-			return window, nil
+			return preparedKlineWindow(window, intervalMillis)
 		}
 		if len(klines) > 0 &&
 			cached != nil &&
@@ -120,7 +121,7 @@ func (r *Runner) updateWindow(
 			cached.Append(klines)
 			window := cached.Clone()
 			r.mu.Unlock()
-			return window, nil
+			return preparedKlineWindow(window, intervalMillis)
 		}
 		r.mu.Unlock()
 		slog.Warn(
@@ -140,7 +141,31 @@ func (r *Runner) updateWindow(
 		return nil, err
 	}
 	window := newCalculationWindowFromKlines(klines, int(r.options.LookbackPeriods))
-	return r.rememberWindow(key, window), nil
+	return preparedKlineWindow(r.rememberWindow(key, window), intervalMillis)
+}
+
+func preparedKlineWindow(window *indicatorcalc.CalculationWindow, intervalMillis int64) (*indicatorcalc.CalculationWindow, error) {
+	if err := validateKlineWindowContinuity(window, intervalMillis); err != nil {
+		return nil, err
+	}
+	return window, nil
+}
+
+func validateKlineWindowContinuity(window *indicatorcalc.CalculationWindow, intervalMillis int64) error {
+	if window == nil {
+		return nil
+	}
+	klines := window.Klines()
+	for index := 1; index < len(klines); index++ {
+		if !isContiguous(klines[index-1], klines[index], intervalMillis) {
+			return fmt.Errorf(
+				"kline window gap: previous_open_time=%d current_open_time=%d",
+				klines[index-1].OpenTime,
+				klines[index].OpenTime,
+			)
+		}
+	}
+	return nil
 }
 
 func normalizeIncrementalKlines(klines []model.Kline, afterOpenTime int64) []model.Kline {

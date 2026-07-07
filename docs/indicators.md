@@ -49,6 +49,8 @@
 
 `market-data/internal/indicator` 的 runner 会缓存每个交易所、市场、交易对和周期的 `CalculationWindow`。窗口缓存只包含已闭合 K 线；当前未收盘 K 线进入 realtime 路径时，会基于缓存窗口 clone 一个临时窗口，再把 open kline 临时标记为 closed 后追加计算。临时窗口不会写回 runner 缓存，因此不会污染后续 closed K 线窗口。
 
+在线指标路径按三层拆分：K 线预热层默认准备 `310` 根连续 K 线，指标计算层最多预热最近 `50` 个底层指标 snapshot，窗口分析层只读取这些已算好的指标 snapshot。内存和 Redis 中的指标 recent cache 默认保留 `60` 个 snapshot，用于窗口分析、buffer 和服务重启恢复。
+
 `pkg/indicatorcalc.CalculationWindow` 支持基础指标流式状态。runner 在长期缓存窗口和窗口快照递推窗口上启用该状态，连续追加 K 线时复用以下中间结果：
 
 - SMA 和 volume SMA。
@@ -151,7 +153,7 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 
 当前指标库已经覆盖趋势、动量、波动率、成交量、结构、TradingView 派生脚本和 AI/自适应类指标。后续新增策略时，不建议把所有字段平铺成同等权重，而应按用途分层消费。
 
-在线 market-data 默认保留并计算最近 300 根已闭合 K 线。新增在线指标应优先控制在 300 根以内；超过 300 根的指标先作为回测或离线研究候选。当前 VFI 默认参数约需要 265 根 K 线，300 根窗口下可以稳定输出。
+在线 market-data 默认保留最近 `310` 根已闭合 K 线，其中 `250` 根作为指标预热上下文，`50` 根用于生成窗口分析所需的底层指标点，`10` 根作为 buffer。新增在线指标应优先控制在 `250` 根预热上下文以内；超过该范围的指标先作为回测或离线研究候选。当前 VFI 默认参数约需要 265 根 K 线，超过默认在线预热上下文，接入实时策略前需要单独评估参数或扩大预热配置。
 
 | 层级 | 定位 | 典型字段 |
 | --- | --- | --- |

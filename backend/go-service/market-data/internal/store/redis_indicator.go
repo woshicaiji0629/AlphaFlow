@@ -11,6 +11,20 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const trimIndicatorHistoryScript = `
+local old = redis.call("ZRANGE", KEYS[1], 0, ARGV[1])
+if #old > 0 then
+	redis.call("HDEL", KEYS[2], unpack(old))
+end
+redis.call("ZREMRANGEBYRANK", KEYS[1], 0, ARGV[1])
+local ttl = tonumber(ARGV[2])
+if ttl > 0 then
+	redis.call("PEXPIRE", KEYS[1], ttl)
+	redis.call("PEXPIRE", KEYS[2], ttl)
+end
+return #old
+`
+
 func (s *RedisStore) SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error {
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -42,11 +56,19 @@ func (s *RedisStore) SetIndicatorWithOpenTime(ctx context.Context, snapshot mode
 	}
 	indicatorKey := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 	lastKey := model.IndicatorLastKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	historyIndexKey := indicatorHistoryIndexKey(snapshot)
+	historyDataKey := indicatorHistoryDataKey(snapshot)
+	historyField := strconv.FormatInt(snapshot.OpenTime, 10)
 	pipe := s.client.Pipeline()
 	pipe.Set(ctx, indicatorKey, payload, s.retention.LatestTTL)
 	pipe.Set(ctx, lastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
-	s.maintainIndicatorKeys([]string{indicatorKey, lastKey}, func(key string) {
+	pipe.HSet(ctx, historyDataKey, historyField, payload)
+	pipe.ZAdd(ctx, historyIndexKey, redis.Z{Score: float64(snapshot.OpenTime), Member: historyField})
+	s.maintainIndicatorKeys([]string{indicatorKey, lastKey, historyIndexKey, historyDataKey}, func(key string) {
 		pipe.Expire(ctx, key, s.retention.LatestTTL)
+	})
+	s.maintainIndicatorKey(historyIndexKey+":trim", func() {
+		pipe.Eval(ctx, trimIndicatorHistoryScript, []string{historyIndexKey, historyDataKey}, indicatorHistoryTrimStopRank(s.retention.IndicatorLimit), s.retention.LatestTTL.Milliseconds())
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("set indicator: %w", err)
@@ -104,16 +126,24 @@ func (s *RedisStore) SetClosedIndicator(
 
 	indicatorKey := model.IndicatorKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
 	indicatorLastKey := model.IndicatorLastKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval)
+	historyIndexKey := indicatorHistoryIndexKey(snapshot)
+	historyDataKey := indicatorHistoryDataKey(snapshot)
+	historyField := strconv.FormatInt(snapshot.OpenTime, 10)
 	windowKey := model.IndicatorWindowKey(windowSnapshot.Exchange, windowSnapshot.Market, windowSnapshot.Symbol, windowSnapshot.Interval)
 	windowLastKey := model.IndicatorWindowLastKey(windowSnapshot.Exchange, windowSnapshot.Market, windowSnapshot.Symbol, windowSnapshot.Interval)
 
 	pipe := s.client.Pipeline()
 	pipe.Set(ctx, indicatorKey, payload, s.retention.LatestTTL)
 	pipe.Set(ctx, indicatorLastKey, strconv.FormatInt(snapshot.OpenTime, 10), s.retention.LatestTTL)
+	pipe.HSet(ctx, historyDataKey, historyField, payload)
+	pipe.ZAdd(ctx, historyIndexKey, redis.Z{Score: float64(snapshot.OpenTime), Member: historyField})
 	pipe.HSet(ctx, windowKey, fields...)
 	pipe.Set(ctx, windowLastKey, strconv.FormatInt(windowSnapshot.OpenTime, 10), s.retention.LatestTTL)
-	s.maintainIndicatorKeys([]string{indicatorKey, indicatorLastKey, windowKey, windowLastKey}, func(key string) {
+	s.maintainIndicatorKeys([]string{indicatorKey, indicatorLastKey, historyIndexKey, historyDataKey, windowKey, windowLastKey}, func(key string) {
 		pipe.Expire(ctx, key, s.retention.LatestTTL)
+	})
+	s.maintainIndicatorKey(historyIndexKey+":trim", func() {
+		pipe.Eval(ctx, trimIndicatorHistoryScript, []string{historyIndexKey, historyDataKey}, indicatorHistoryTrimStopRank(s.retention.IndicatorLimit), s.retention.LatestTTL.Milliseconds())
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("set closed indicator: %w", err)
@@ -274,6 +304,61 @@ func (s *RedisStore) LastIndicatorOpenTime(
 	return openTime, true, nil
 }
 
+func (s *RedisStore) RecentIndicators(
+	ctx context.Context,
+	exchange string,
+	market string,
+	symbol string,
+	interval string,
+	limit int,
+) ([]model.IndicatorSnapshot, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	baseKey := model.IndicatorHistoryKey(exchange, market, symbol, interval)
+	indexKey := indicatorHistoryIndexKeyFromBase(baseKey)
+	dataKey := indicatorHistoryDataKeyFromBase(baseKey)
+	fields, err := s.client.ZRevRange(ctx, indexKey, 0, int64(limit-1)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read indicator history index: %w", err)
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	reverseStrings(fields)
+	values, err := s.client.HMGet(ctx, dataKey, fields...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read indicator history data: %w", err)
+	}
+	snapshots := make([]model.IndicatorSnapshot, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		var payload []byte
+		switch typed := value.(type) {
+		case string:
+			payload = []byte(typed)
+		case []byte:
+			payload = typed
+		default:
+			return nil, fmt.Errorf("decode indicator history: unexpected payload type %T", value)
+		}
+		var snapshot model.IndicatorSnapshot
+		if err := json.Unmarshal(payload, &snapshot); err != nil {
+			return nil, fmt.Errorf("decode indicator history: %w", err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
 func (s *RedisStore) MarkIndicatorOpenTime(ctx context.Context, snapshot model.IndicatorSnapshot) error {
 	release, err := s.acquire(ctx)
 	if err != nil {
@@ -303,5 +388,31 @@ func (s *RedisStore) maintainIndicatorKeys(keys []string, fn func(string)) {
 		s.maintainIndicatorKey(key, func() {
 			fn(key)
 		})
+	}
+}
+
+func indicatorHistoryIndexKey(snapshot model.IndicatorSnapshot) string {
+	return indicatorHistoryIndexKeyFromBase(model.IndicatorHistoryKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval))
+}
+
+func indicatorHistoryDataKey(snapshot model.IndicatorSnapshot) string {
+	return indicatorHistoryDataKeyFromBase(model.IndicatorHistoryKey(snapshot.Exchange, snapshot.Market, snapshot.Symbol, snapshot.Interval))
+}
+
+func indicatorHistoryIndexKeyFromBase(baseKey string) string {
+	return baseKey + ":idx"
+}
+
+func indicatorHistoryDataKeyFromBase(baseKey string) string {
+	return baseKey + ":data"
+}
+
+func indicatorHistoryTrimStopRank(limit int64) int64 {
+	return -(limit + 1)
+}
+
+func reverseStrings(values []string) {
+	for left, right := 0, len(values)-1; left < right; left, right = left+1, right-1 {
+		values[left], values[right] = values[right], values[left]
 	}
 }

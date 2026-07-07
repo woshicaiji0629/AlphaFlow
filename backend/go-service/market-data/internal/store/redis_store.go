@@ -35,6 +35,7 @@ const (
 type Retention struct {
 	KlineLimit     int64
 	KlineTTL       time.Duration
+	IndicatorLimit int64
 	LiquidationTTL time.Duration
 	LatestTTL      time.Duration
 	PollingTTL     time.Duration

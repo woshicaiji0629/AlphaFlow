@@ -14,6 +14,10 @@ func IndicatorLastKey(exchange string, market string, symbol string, interval st
 	return fmt.Sprintf("%s:%s:ind:last:%s:%s", ExchangeCode(exchange), market, symbol, interval)
 }
 
+func IndicatorHistoryKey(exchange string, market string, symbol string, interval string) string {
+	return fmt.Sprintf("%s:%s:ind:hist:%s:%s", ExchangeCode(exchange), market, symbol, interval)
+}
+
 func IndicatorWindowKey(exchange string, market string, symbol string, interval string) string {
 	return fmt.Sprintf("%s:%s:indwin:%s:%s", ExchangeCode(exchange), market, symbol, interval)
 }
