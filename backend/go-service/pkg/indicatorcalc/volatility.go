@@ -220,6 +220,51 @@ func squeezeMomentum(highs []float64, lows []float64, closes []float64, period i
 }
 
 func squeezeMomentumAt(highs []float64, lows []float64, closes []float64, period int, end int) (float64, bool) {
+	value, ok := squeezeMomentumAtCompact(highs, lows, closes, period, end)
+	if ok {
+		return value, true
+	}
+	return squeezeMomentumAtBatch(highs, lows, closes, period, end)
+}
+
+func squeezeMomentumAtCompact(highs []float64, lows []float64, closes []float64, period int, end int) (float64, bool) {
+	if end < period*2 || end > len(closes) || len(highs) < end || len(lows) < end {
+		return 0, false
+	}
+	highWindow := newFloatMonotonicWindow(true)
+	lowWindow := newFloatMonotonicWindow(false)
+	if !highWindow.canHold(period) || !lowWindow.canHold(period) {
+		return 0, false
+	}
+	start := end - period
+	warmupStart := start - period + 1
+	source := make([]float64, 0, period)
+	closeSum := 0.0
+	for index := warmupStart; index < end; index++ {
+		highWindow.push(index, highs[index])
+		lowWindow.push(index, lows[index])
+		closeSum += closes[index]
+		if index >= warmupStart+period {
+			closeSum -= closes[index-period]
+		}
+		if index < start {
+			continue
+		}
+		highWindow.expireBefore(index - period + 1)
+		lowWindow.expireBefore(index - period + 1)
+		highest, okHigh := highWindow.value()
+		lowest, okLow := lowWindow.value()
+		if !okHigh || !okLow {
+			return 0, false
+		}
+		closeMA := closeSum / float64(period)
+		baseline := ((highest+lowest)/2 + closeMA) / 2
+		source = append(source, closes[index]-baseline)
+	}
+	return linearRegression(source, period, 0)
+}
+
+func squeezeMomentumAtBatch(highs []float64, lows []float64, closes []float64, period int, end int) (float64, bool) {
 	if end < period*2 || end > len(closes) || len(highs) < end || len(lows) < end {
 		return 0, false
 	}

@@ -99,6 +99,53 @@ func TestOscillatorFeatures(t *testing.T) {
 	}
 }
 
+func TestStochasticCompactMatchesBatch(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(90, 100, 0.3)
+
+	gotK, gotD, ok := stochasticCompact(highs, lows, closes, 14, 3)
+	if !ok {
+		t.Fatal("stochasticCompact returned false")
+	}
+	wantK, wantD, ok := stochasticBatch(highs, lows, closes, 14, 3)
+	if !ok {
+		t.Fatal("stochasticBatch returned false")
+	}
+	assertFloatClose(t, "stochastic k", gotK, wantK)
+	assertFloatClose(t, "stochastic d", gotD, wantD)
+}
+
+func TestStochRSICompactMatchesBatch(t *testing.T) {
+	values := []float64{48, 51, 47, 55, 58, 53, 60, 62, 59, 65, 63, 61, 67, 70, 66, 68, 72, 69, 73, 71}
+
+	gotK, gotD, ok := stochRSIFromSeriesCompact(values, 14, 3)
+	if !ok {
+		t.Fatal("stochRSIFromSeriesCompact returned false")
+	}
+	wantK, wantD, ok := stochRSIFromSeriesBatch(values, 14, 3)
+	if !ok {
+		t.Fatal("stochRSIFromSeriesBatch returned false")
+	}
+	assertFloatClose(t, "stoch rsi k", gotK, wantK)
+	assertFloatClose(t, "stoch rsi d", gotD, wantD)
+}
+
+func TestSKDJCompactMatchesBatch(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(90, 100, 0.3)
+
+	gotK, gotD, gotPreviousK, gotPreviousD, ok := skdjCompact(highs, lows, closes, 9, 3)
+	if !ok {
+		t.Fatal("skdjCompact returned false")
+	}
+	wantK, wantD, wantPreviousK, wantPreviousD, ok := skdjBatch(highs, lows, closes, 9, 3)
+	if !ok {
+		t.Fatal("skdjBatch returned false")
+	}
+	assertFloatClose(t, "skdj k", gotK, wantK)
+	assertFloatClose(t, "skdj d", gotD, wantD)
+	assertFloatClose(t, "skdj previous k", gotPreviousK, wantPreviousK)
+	assertFloatClose(t, "skdj previous d", gotPreviousD, wantPreviousD)
+}
+
 func TestWaveTrendOutputsSeries(t *testing.T) {
 	highs, lows, closes, _ := trendingSeries(90, 100, 0.3)
 

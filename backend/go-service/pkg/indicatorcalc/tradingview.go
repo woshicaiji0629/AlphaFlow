@@ -351,7 +351,10 @@ func sslChannel(highs []float64, lows []float64, closes []float64, period int) (
 }
 
 func addRangeFilterFeatures(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
-	filter, upper, lower, direction, ok := rangeFilter(closes, period, multiplier)
+	filter, upper, lower, direction, ok := rangeFilterCompact(closes, period, multiplier)
+	if !ok {
+		filter, upper, lower, direction, ok = rangeFilter(closes, period, multiplier)
+	}
 	if !ok {
 		return
 	}
@@ -360,6 +363,37 @@ func addRangeFilterFeatures(values map[string]string, signals map[string]string,
 	setValue(values, "range_filter_lower", lower, true)
 	setValue(values, "range_filter_distance_pct", percentDistance(closes[len(closes)-1], filter), filter != 0)
 	signals["range_filter_direction"] = direction
+}
+
+func rangeFilterCompact(closes []float64, period int, multiplier float64) (float64, float64, float64, string, bool) {
+	if period <= 0 || multiplier <= 0 || len(closes) < period+2 {
+		return 0, 0, 0, "", false
+	}
+	rangeEMA := newStreamEMAState(period)
+	filter := closes[period]
+	direction := "flat"
+	for index := 1; index < len(closes); index++ {
+		rangeEMA.append(math.Abs(closes[index] - closes[index-1]))
+		if index <= period || !rangeEMA.ready {
+			continue
+		}
+		smoothRange := rangeEMA.value * multiplier
+		previous := filter
+		switch {
+		case closes[index] > previous:
+			filter = math.Max(previous, closes[index]-smoothRange)
+		case closes[index] < previous:
+			filter = math.Min(previous, closes[index]+smoothRange)
+		}
+		switch {
+		case filter > previous:
+			direction = "up"
+		case filter < previous:
+			direction = "down"
+		}
+	}
+	smoothRange := rangeEMA.value * multiplier
+	return filter, filter + smoothRange, filter - smoothRange, direction, true
 }
 
 func rangeFilter(closes []float64, period int, multiplier float64) (float64, float64, float64, string, bool) {
@@ -401,9 +435,87 @@ func rangeFilter(closes []float64, period int, multiplier float64) (float64, flo
 }
 
 func addWilliamsVixFixFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) {
+	result, ok := williamsVixFixCompact(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
+	if !ok {
+		result, ok = williamsVixFix(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
+	}
+	if !ok {
+		return
+	}
+	setValue(values, "wvf", result.value, true)
+	setValue(values, "wvf_mid_line", result.mid, true)
+	setValue(values, "wvf_upper_band", result.upperBand, true)
+	setValue(values, "wvf_lower_band", result.lowerBand, true)
+	setValue(values, "wvf_range_high", result.rangeHigh, true)
+	setValue(values, "wvf_range_low", result.rangeLow, true)
+	signals["wvf_state"] = williamsVixFixState(result.value, result.upperBand, result.rangeHigh)
+	signals["wvf_zone"] = williamsVixFixZone(result.value, result.upperBand, result.lowerBand, result.rangeHigh, result.rangeLow)
+}
+
+type williamsVixFixResult struct {
+	value     float64
+	mid       float64
+	upperBand float64
+	lowerBand float64
+	rangeHigh float64
+	rangeLow  float64
+}
+
+func williamsVixFixCompact(lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) (williamsVixFixResult, bool) {
+	if period <= 0 || bbLength <= 0 || lookback <= 0 || len(closes) < period || len(lows) != len(closes) {
+		return williamsVixFixResult{}, false
+	}
+	seriesCount := 0
+	keep := lookback
+	if bbLength > keep {
+		keep = bbLength
+	}
+	recent := make([]float64, keep)
+	closeHighs := newFloatMonotonicWindow(true)
+	if !closeHighs.canHold(period) {
+		return williamsVixFixResult{}, false
+	}
+	for index, closeValue := range closes {
+		closeHighs.push(index, closeValue)
+		closeHighs.expireBefore(index - period + 1)
+		if index+1 < period {
+			continue
+		}
+		highestClose, ok := closeHighs.value()
+		if !ok {
+			return williamsVixFixResult{}, false
+		}
+		value := 0.0
+		if highestClose != 0 {
+			value = (highestClose - lows[index]) / highestClose * 100
+		}
+		slot := seriesCount % keep
+		recent[slot] = value
+		seriesCount++
+	}
+	if seriesCount < bbLength || seriesCount < lookback {
+		return williamsVixFixResult{}, false
+	}
+	last := recent[(seriesCount-1)%keep]
+	mid := ringTailSum(recent, seriesCount, bbLength) / float64(bbLength)
+	deviation := ringTailStandardDeviation(recent, seriesCount, bbLength, mid)
+	rangeHigh, rangeLow := ringTailHighLow(recent, seriesCount, lookback)
+	rangeHigh *= percentileHigh
+	rangeLow *= 1.01
+	return williamsVixFixResult{
+		value:     last,
+		mid:       mid,
+		upperBand: mid + bbMultiplier*deviation,
+		lowerBand: mid - bbMultiplier*deviation,
+		rangeHigh: rangeHigh,
+		rangeLow:  rangeLow,
+	}, true
+}
+
+func williamsVixFix(lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) (williamsVixFixResult, bool) {
 	series, ok := williamsVixFixSeries(lows, closes, period)
 	if !ok || len(series) < bbLength || len(series) < lookback {
-		return
+		return williamsVixFixResult{}, false
 	}
 	last := series[len(series)-1]
 	mid, _ := sma(series, bbLength)
@@ -412,14 +524,14 @@ func addWilliamsVixFixFeatures(values map[string]string, signals map[string]stri
 	lowerBand := mid - bbMultiplier*deviation
 	rangeHigh := highestValue(series[len(series)-lookback:]) * percentileHigh
 	rangeLow := lowestValue(series[len(series)-lookback:]) * 1.01
-	setValue(values, "wvf", last, true)
-	setValue(values, "wvf_mid_line", mid, true)
-	setValue(values, "wvf_upper_band", upperBand, true)
-	setValue(values, "wvf_lower_band", lowerBand, true)
-	setValue(values, "wvf_range_high", rangeHigh, true)
-	setValue(values, "wvf_range_low", rangeLow, true)
-	signals["wvf_state"] = williamsVixFixState(last, upperBand, rangeHigh)
-	signals["wvf_zone"] = williamsVixFixZone(last, upperBand, lowerBand, rangeHigh, rangeLow)
+	return williamsVixFixResult{
+		value:     last,
+		mid:       mid,
+		upperBand: upperBand,
+		lowerBand: lowerBand,
+		rangeHigh: rangeHigh,
+		rangeLow:  rangeLow,
+	}, true
 }
 
 func williamsVixFixSeries(lows []float64, closes []float64, period int) ([]float64, bool) {
@@ -619,4 +731,43 @@ func lowestValue(values []float64) float64 {
 		}
 	}
 	return result
+}
+
+func ringTailSum(values []float64, count int, length int) float64 {
+	sum := 0.0
+	start := count - length
+	for index := start; index < count; index++ {
+		sum += values[index%len(values)]
+	}
+	return sum
+}
+
+func ringTailStandardDeviation(values []float64, count int, length int, mean float64) float64 {
+	if length <= 0 {
+		return 0
+	}
+	var variance float64
+	start := count - length
+	for index := start; index < count; index++ {
+		value := values[index%len(values)]
+		diff := value - mean
+		variance += diff * diff
+	}
+	return math.Sqrt(variance / float64(length))
+}
+
+func ringTailHighLow(values []float64, count int, length int) (float64, float64) {
+	start := count - length
+	high := values[start%len(values)]
+	low := high
+	for index := start + 1; index < count; index++ {
+		value := values[index%len(values)]
+		if value > high {
+			high = value
+		}
+		if value < low {
+			low = value
+		}
+	}
+	return high, low
 }

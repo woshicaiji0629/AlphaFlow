@@ -111,6 +111,25 @@ func TestTDSequentialSetupCounts(t *testing.T) {
 	}
 }
 
+func TestRangeFilterCompactMatchesBatch(t *testing.T) {
+	closes := oscillatingCloses(180)
+
+	gotFilter, gotUpper, gotLower, gotDirection, ok := rangeFilterCompact(closes, 100, 3)
+	if !ok {
+		t.Fatal("rangeFilterCompact returned false")
+	}
+	wantFilter, wantUpper, wantLower, wantDirection, ok := rangeFilter(closes, 100, 3)
+	if !ok {
+		t.Fatal("rangeFilter returned false")
+	}
+	assertFloatClose(t, "range filter", gotFilter, wantFilter)
+	assertFloatClose(t, "range filter upper", gotUpper, wantUpper)
+	assertFloatClose(t, "range filter lower", gotLower, wantLower)
+	if gotDirection != wantDirection {
+		t.Fatalf("range filter direction = %q, want %q", gotDirection, wantDirection)
+	}
+}
+
 func oscillatingCloses(length int) []float64 {
 	values := make([]float64, 0, length)
 	price := 100.0
@@ -153,4 +172,23 @@ func TestTradingViewSignalHelpers(t *testing.T) {
 	if got := thresholdTrend(55, 50, 50); got != "bull" {
 		t.Fatalf("thresholdTrend bull = %q", got)
 	}
+}
+
+func TestWilliamsVixFixCompactMatchesBatch(t *testing.T) {
+	_, lows, closes, _ := trendingSeries(160, 100, 0.35)
+
+	got, ok := williamsVixFixCompact(lows, closes, 22, 20, 2, 50, 0.85)
+	if !ok {
+		t.Fatal("williamsVixFixCompact returned false")
+	}
+	want, ok := williamsVixFix(lows, closes, 22, 20, 2, 50, 0.85)
+	if !ok {
+		t.Fatal("williamsVixFix returned false")
+	}
+	assertFloatClose(t, "wvf", got.value, want.value)
+	assertFloatClose(t, "wvf mid", got.mid, want.mid)
+	assertFloatClose(t, "wvf upper", got.upperBand, want.upperBand)
+	assertFloatClose(t, "wvf lower", got.lowerBand, want.lowerBand)
+	assertFloatClose(t, "wvf range high", got.rangeHigh, want.rangeHigh)
+	assertFloatClose(t, "wvf range low", got.rangeLow, want.rangeLow)
 }

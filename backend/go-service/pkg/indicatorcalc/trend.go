@@ -860,6 +860,106 @@ func alphaTrend(highs []float64, lows []float64, closes []float64, volumes []flo
 }
 
 func alphaTrendSeries(highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) ([]trendPoint, float64, bool) {
+	points, lastMFI, ok := alphaTrendSeriesCompact(highs, lows, closes, volumes, period, multiplier)
+	if ok {
+		return points, lastMFI, true
+	}
+	return alphaTrendSeriesBatch(highs, lows, closes, volumes, period, multiplier)
+}
+
+func alphaTrendSeriesCompact(highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) ([]trendPoint, float64, bool) {
+	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
+		return nil, 0, false
+	}
+	trs := trueRanges(highs, lows, closes)
+	if len(trs) < period {
+		return nil, 0, false
+	}
+	trend := make([]float64, len(closes))
+	directions := make([]string, len(closes))
+	atrSum := 0.0
+	positiveFlow := 0.0
+	negativeFlow := 0.0
+	for index := 1; index <= period; index++ {
+		atrSum += trs[index-1]
+		current := (highs[index] + lows[index] + closes[index]) / 3
+		previous := (highs[index-1] + lows[index-1] + closes[index-1]) / 3
+		flow := current * volumes[index]
+		if current >= previous {
+			positiveFlow += flow
+		} else {
+			negativeFlow += flow
+		}
+	}
+	lastMFI := 50.0
+	for index := period; index < len(closes); index++ {
+		mfi := moneyFlowIndexFromSums(positiveFlow, negativeFlow)
+		lastMFI = mfi
+		atrValue := atrSum / float64(period)
+		up := lows[index] - multiplier*atrValue
+		down := highs[index] + multiplier*atrValue
+		if index == period {
+			if mfi >= 50 {
+				trend[index] = up
+				directions[index] = "up"
+			} else {
+				trend[index] = down
+				directions[index] = "down"
+			}
+		} else if mfi >= 50 {
+			if up < trend[index-1] {
+				trend[index] = trend[index-1]
+			} else {
+				trend[index] = up
+			}
+			directions[index] = "up"
+		} else {
+			if down > trend[index-1] {
+				trend[index] = trend[index-1]
+			} else {
+				trend[index] = down
+			}
+			directions[index] = "down"
+		}
+		if index+1 < len(closes) {
+			atrSum += trs[index] - trs[index-period]
+			addCurrent := (highs[index+1] + lows[index+1] + closes[index+1]) / 3
+			addPrevious := (highs[index] + lows[index] + closes[index]) / 3
+			addFlow := addCurrent * volumes[index+1]
+			if addCurrent >= addPrevious {
+				positiveFlow += addFlow
+			} else {
+				negativeFlow += addFlow
+			}
+			dropCurrent := (highs[index-period+1] + lows[index-period+1] + closes[index-period+1]) / 3
+			dropPrevious := (highs[index-period] + lows[index-period] + closes[index-period]) / 3
+			dropFlow := dropCurrent * volumes[index-period+1]
+			if dropCurrent >= dropPrevious {
+				positiveFlow -= dropFlow
+			} else {
+				negativeFlow -= dropFlow
+			}
+		}
+	}
+	points := make([]trendPoint, 0, len(closes)-period)
+	for index := period; index < len(closes); index++ {
+		points = append(points, trendPoint{value: trend[index], direction: directions[index]})
+	}
+	if len(points) < 2 {
+		return nil, 0, false
+	}
+	return points, lastMFI, true
+}
+
+func moneyFlowIndexFromSums(positive float64, negative float64) float64 {
+	if negative == 0 {
+		return 100
+	}
+	ratio := positive / negative
+	return 100 - 100/(1+ratio)
+}
+
+func alphaTrendSeriesBatch(highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) ([]trendPoint, float64, bool) {
 	if period <= 0 || len(closes) <= period || len(volumes) != len(closes) {
 		return nil, 0, false
 	}

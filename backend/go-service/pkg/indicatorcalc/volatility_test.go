@@ -194,6 +194,29 @@ func TestAlphaTrendSignalsAllowAlternatingBuy(t *testing.T) {
 	}
 }
 
+func TestAlphaTrendSeriesCompactMatchesBatch(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.35)
+
+	gotPoints, gotMFI, ok := alphaTrendSeriesCompact(highs, lows, closes, volumes, 14, 1)
+	if !ok {
+		t.Fatal("alphaTrendSeriesCompact returned false")
+	}
+	wantPoints, wantMFI, ok := alphaTrendSeriesBatch(highs, lows, closes, volumes, 14, 1)
+	if !ok {
+		t.Fatal("alphaTrendSeriesBatch returned false")
+	}
+	if len(gotPoints) != len(wantPoints) {
+		t.Fatalf("alpha trend points = %d, want %d", len(gotPoints), len(wantPoints))
+	}
+	for index := range gotPoints {
+		assertFloatClose(t, "alpha trend point", gotPoints[index].value, wantPoints[index].value)
+		if gotPoints[index].direction != wantPoints[index].direction {
+			t.Fatalf("alpha trend direction[%d] = %q, want %q", index, gotPoints[index].direction, wantPoints[index].direction)
+		}
+	}
+	assertFloatClose(t, "alpha trend mfi", gotMFI, wantMFI)
+}
+
 func TestLivermoreFeaturesOutputForLongSeries(t *testing.T) {
 	highs, lows, closes, _ := trendingSeries(430, 100, 0.3)
 	opens := make([]float64, 0, len(closes))
@@ -386,6 +409,30 @@ func TestSqueezeMomentumAtUsesRangeBaseline(t *testing.T) {
 	if value != 2 {
 		t.Fatalf("momentum = %v, want 2", value)
 	}
+}
+
+func TestSqueezeMomentumAtCompactMatchesBatch(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(120, 100, 0.35)
+
+	got, ok := squeezeMomentumAtCompact(highs, lows, closes, 20, len(closes))
+	if !ok {
+		t.Fatal("squeezeMomentumAtCompact returned false")
+	}
+	want, ok := squeezeMomentumAtBatch(highs, lows, closes, 20, len(closes))
+	if !ok {
+		t.Fatal("squeezeMomentumAtBatch returned false")
+	}
+	assertFloatClose(t, "squeeze momentum current", got, want)
+
+	gotPrevious, ok := squeezeMomentumAtCompact(highs, lows, closes, 20, len(closes)-1)
+	if !ok {
+		t.Fatal("previous squeezeMomentumAtCompact returned false")
+	}
+	wantPrevious, ok := squeezeMomentumAtBatch(highs, lows, closes, 20, len(closes)-1)
+	if !ok {
+		t.Fatal("previous squeezeMomentumAtBatch returned false")
+	}
+	assertFloatClose(t, "squeeze momentum previous", gotPrevious, wantPrevious)
 }
 
 func trendingSeries(length int, start float64, step float64) ([]float64, []float64, []float64, []float64) {
