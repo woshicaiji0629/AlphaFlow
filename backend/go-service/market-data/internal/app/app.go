@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -91,15 +92,39 @@ func runMarketData(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 8)
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errCh <- marketStore.RunClickHouseRetry(ctx)
+	}()
 	for _, c := range collectors {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runCollectorLoop(ctx, c, restartDelay)
+			runCollectorRealtimeLoop(ctx, c, restartDelay)
 		}()
 	}
+
+	if err := runStartupBackfill(ctx, collectors); err != nil {
+		cancel()
+		wg.Wait()
+		return err
+	}
+	if err := klineAggregator.RunOnce(ctx); err != nil {
+		cancel()
+		wg.Wait()
+		return fmt.Errorf("startup aggregate klines: %w", err)
+	}
+	if err := indicatorRunner.RunOnce(ctx); err != nil {
+		cancel()
+		wg.Wait()
+		return fmt.Errorf("startup calculate indicators: %w", err)
+	}
+	marketStore.AddKlineHandler(indicatorRunner.HandleKline)
+	slog.Info("market-data kline warmup and indicator startup completed")
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -114,11 +139,6 @@ func runMarketData(
 	go func() {
 		defer wg.Done()
 		errCh <- healthRunner.Run(ctx)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errCh <- marketStore.RunClickHouseRetry(ctx)
 	}()
 	if cfg.Backfill.WorkerEnabled {
 		backfillMaxWait, err := config.BackfillWorkerMaxWait(cfg)
@@ -144,9 +164,31 @@ func runMarketData(
 	return nil
 }
 
-func runCollectorLoop(ctx context.Context, c *collector.Collector, restartDelay time.Duration) {
+func runStartupBackfill(ctx context.Context, collectors []*collector.Collector) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(collectors))
+	for _, c := range collectors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- c.Backfill(ctx)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func runCollectorRealtimeLoop(ctx context.Context, c *collector.Collector, restartDelay time.Duration) {
 	for {
-		err := c.Run(ctx)
+		err := c.RunRealtime(ctx)
 		if ctx.Err() != nil {
 			return
 		}

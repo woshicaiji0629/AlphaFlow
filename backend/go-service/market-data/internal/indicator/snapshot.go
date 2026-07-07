@@ -192,7 +192,15 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 		cachedByOpenTime[snapshot.OpenTime] = snapshot
 	}
 	snapshots := make([]model.IndicatorSnapshot, 0, lookback)
-	calcWindow := newCalculationWindowFromKlines(closed[:start], len(closed))
+	warmup := int(r.options.WarmupPeriods)
+	if warmup <= 0 || warmup > len(closed) {
+		warmup = len(closed)
+	}
+	seedStart := start - (warmup - 1)
+	if seedStart < 0 {
+		seedStart = 0
+	}
+	calcWindow := newCalculationWindowFromKlines(closed[seedStart:start], warmup)
 	for index := start; index < len(closed); index++ {
 		calcWindow.Append([]model.Kline{closed[index]})
 		kline := closed[index]

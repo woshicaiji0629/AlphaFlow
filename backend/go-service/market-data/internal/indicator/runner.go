@@ -71,6 +71,7 @@ type RunnerOptions struct {
 	Rules              []Rule
 	ScanInterval       time.Duration
 	LookbackPeriods    int64
+	WarmupPeriods      int64
 	WindowLookback     int
 	SnapshotCacheLimit int
 	CalculateOptions   indicatorcalc.Options
@@ -109,6 +110,9 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 	}
 	if options.LookbackPeriods <= 0 {
 		options.LookbackPeriods = 200
+	}
+	if options.WarmupPeriods <= 0 {
+		options.WarmupPeriods = options.LookbackPeriods
 	}
 	if options.WindowLookback <= 0 {
 		options.WindowLookback = indicatorWindowLookback

@@ -5,10 +5,10 @@ func addVolatilityCoreFeatures(values map[string]string, signals map[string]stri
 	if !ok {
 		return
 	}
-	addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, period, series)
+	addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, period, series, nil)
 }
 
-func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64) {
+func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64, basic *basicIndicatorState) {
 	if len(series) == 0 {
 		return
 	}
@@ -19,7 +19,10 @@ func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[stri
 	setValue(values, "natr14", atrValue/last*100, last != 0)
 	signals["volatility_state"] = volatilityStateFromATR(series)
 
-	adxValue, plusDI, minusDI, ok := adx(highs, lows, closes, period)
+	adxValue, plusDI, minusDI, ok := basic.adx14Value()
+	if !ok {
+		adxValue, plusDI, minusDI, ok = adx(highs, lows, closes, period)
+	}
 	if ok {
 		setValue(values, "adx14", adxValue, true)
 		setValue(values, "di_plus14", plusDI, true)

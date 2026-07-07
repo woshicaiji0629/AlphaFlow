@@ -99,7 +99,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		value, ok := wma(closes, period)
 		setValue(values, fmt.Sprintf("wma%d", period), value, ok)
 	}
-	addMovingAverageFeatures(values, signals, closes, volumes)
+	addMovingAverageFeatures(values, signals, closes, volumes, basic)
 
 	rsi14Series, ok := basic.rsiSeries14()
 	if !ok {
@@ -118,9 +118,9 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	}
 	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series)
 	if atr14Series, ok := basic.atrSeries14(); ok {
-		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series)
+		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
 	} else if atr14Series, ok := atrSeries(highs, lows, closes, 14); ok {
-		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series)
+		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
 	} else {
 		addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
 	}

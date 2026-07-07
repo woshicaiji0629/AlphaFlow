@@ -76,6 +76,19 @@ func TestAISourceFisherWeightsSeparateOutcomes(t *testing.T) {
 	}
 }
 
+func TestAISourceEMAStateMatchesEMALast(t *testing.T) {
+	values := linearValues(80, 100, 0.7)
+	state := newAISourceEMAState(50)
+	seen := make([]float64, 0, len(values))
+
+	for _, value := range values {
+		seen = append(seen, value)
+		got := state.append(value)
+		want := emaLast(seen, 50)
+		assertFloatClose(t, "ai source ema", got, want)
+	}
+}
+
 func signalIsAISourceName(value string) bool {
 	return value == "open" || value == "high" || value == "low" || value == "close"
 }

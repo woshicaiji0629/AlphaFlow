@@ -98,8 +98,9 @@ func (s *MarketStore) UpsertKlines(ctx context.Context, klines []model.Kline) er
 	if err := s.redis.UpsertKlines(ctx, closed); err != nil {
 		return err
 	}
+	notifyClosed := latestClosedKlinesAfter(closed, s.currentLastOpenTimes(closed))
 	s.rememberLastOpenTimes(closed)
-	for _, kline := range latestClosedKlines(closed) {
+	for _, kline := range notifyClosed {
 		s.notifyKlineHandlers(ctx, kline)
 	}
 	if s.clickhouse == nil {
@@ -136,7 +137,28 @@ func (s *MarketStore) notifyKlineHandlers(ctx context.Context, kline model.Kline
 	}
 }
 
+func (s *MarketStore) currentLastOpenTimes(klines []model.Kline) map[string]int64 {
+	s.latestMu.Lock()
+	defer s.latestMu.Unlock()
+
+	lastOpenTimes := make(map[string]int64, len(klines))
+	for _, kline := range klines {
+		if !kline.IsClosed {
+			continue
+		}
+		key := klineLatestKey(kline)
+		if lastOpenTime, ok := s.lastOpenTimes[key]; ok {
+			lastOpenTimes[key] = lastOpenTime
+		}
+	}
+	return lastOpenTimes
+}
+
 func latestClosedKlines(klines []model.Kline) []model.Kline {
+	return latestClosedKlinesAfter(klines, nil)
+}
+
+func latestClosedKlinesAfter(klines []model.Kline, lastOpenTimes map[string]int64) []model.Kline {
 	if len(klines) == 0 {
 		return nil
 	}
@@ -146,6 +168,9 @@ func latestClosedKlines(klines []model.Kline) []model.Kline {
 			continue
 		}
 		key := klineLatestKey(kline)
+		if lastOpenTime, ok := lastOpenTimes[key]; ok && kline.OpenTime <= lastOpenTime {
+			continue
+		}
 		latest, ok := latestByKey[key]
 		if !ok || kline.OpenTime > latest.OpenTime {
 			latestByKey[key] = kline

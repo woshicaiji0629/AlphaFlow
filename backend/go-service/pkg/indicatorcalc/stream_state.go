@@ -15,11 +15,13 @@ type streamMACDState struct {
 }
 
 type streamEMAState struct {
-	period int
-	sum    float64
-	count  int
-	value  float64
-	ready  bool
+	period      int
+	sum         float64
+	count       int
+	value       float64
+	previous    float64
+	hasPrevious bool
+	ready       bool
 }
 
 type streamRSIState struct {
@@ -40,6 +42,19 @@ type streamATRState struct {
 	series []float64
 }
 
+type streamADXState struct {
+	period          int
+	smoothedTR      float64
+	smoothedPlusDM  float64
+	smoothedMinusDM float64
+	dxValues        []float64
+	dxSum           float64
+	value           float64
+	plusDI          float64
+	minusDI         float64
+	ready           bool
+}
+
 type basicIndicatorState struct {
 	smaPeriods    []int
 	smaValues     map[int]float64
@@ -47,6 +62,7 @@ type basicIndicatorState struct {
 	volumeSMA     map[int]float64
 	rsi14         streamRSIState
 	atr14         streamATRState
+	adx14         streamADXState
 	macd          map[macdConfig]*streamMACDState
 	obv           float64
 	vwapWeighted  float64
@@ -54,7 +70,7 @@ type basicIndicatorState struct {
 }
 
 func newBasicIndicatorState() *basicIndicatorState {
-	emaPeriods := []int{7, 12, 19, 25, 26, 99}
+	emaPeriods := []int{5, 7, 8, 9, 10, 12, 13, 19, 25, 26, 34, 55, 89, 99, 144, 200}
 	emas := make(map[int]*streamEMAState, len(emaPeriods))
 	for _, period := range emaPeriods {
 		emas[period] = newStreamEMAState(period)
@@ -74,6 +90,7 @@ func newBasicIndicatorState() *basicIndicatorState {
 		volumeSMA:  map[int]float64{},
 		rsi14:      newStreamRSIState(14),
 		atr14:      newStreamATRState(14),
+		adx14:      newStreamADXState(14),
 		macd:       macdStates,
 	}
 }
@@ -97,6 +114,7 @@ func (s *basicIndicatorState) clone() *basicIndicatorState {
 		volumeSMA:     make(map[int]float64, len(s.volumeSMA)),
 		rsi14:         s.rsi14.clone(),
 		atr14:         s.atr14.clone(),
+		adx14:         s.adx14.clone(),
 		macd:          make(map[macdConfig]*streamMACDState, len(s.macd)),
 		obv:           s.obv,
 		vwapWeighted:  s.vwapWeighted,
@@ -147,6 +165,7 @@ func (s *basicIndicatorState) append(highs []float64, lows []float64, closes []f
 		}
 		s.rsi14.append(closes[last-1], closeValue)
 		s.atr14.append(highs[last], lows[last], closes[last-1])
+		s.adx14.append(highs[last], lows[last], highs[last-1], lows[last-1], closes[last-1])
 	}
 	typical := (highs[last] + lows[last] + closeValue) / 3
 	s.vwapWeighted += typical * volume
@@ -180,6 +199,17 @@ func (s *basicIndicatorState) emaValue(period int) (float64, bool) {
 	return state.value, true
 }
 
+func (s *basicIndicatorState) previousEMAValue(period int) (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	state, ok := s.ema[period]
+	if !ok || !state.hasPrevious {
+		return 0, false
+	}
+	return state.previous, true
+}
+
 func (s *basicIndicatorState) rsiSeries14() ([]float64, bool) {
 	if s == nil || len(s.rsi14.series) == 0 {
 		return nil, false
@@ -192,6 +222,13 @@ func (s *basicIndicatorState) atrSeries14() ([]float64, bool) {
 		return nil, false
 	}
 	return s.atr14.series, true
+}
+
+func (s *basicIndicatorState) adx14Value() (float64, float64, float64, bool) {
+	if s == nil || !s.adx14.ready {
+		return 0, 0, 0, false
+	}
+	return s.adx14.value, s.adx14.plusDI, s.adx14.minusDI, true
 }
 
 func (s *basicIndicatorState) macdSeries(config macdConfig) ([]macdPoint, bool) {
@@ -231,11 +268,13 @@ func (s *streamEMAState) clone() *streamEMAState {
 		return nil
 	}
 	return &streamEMAState{
-		period: s.period,
-		sum:    s.sum,
-		count:  s.count,
-		value:  s.value,
-		ready:  s.ready,
+		period:      s.period,
+		sum:         s.sum,
+		count:       s.count,
+		value:       s.value,
+		previous:    s.previous,
+		hasPrevious: s.hasPrevious,
+		ready:       s.ready,
 	}
 }
 
@@ -253,6 +292,8 @@ func (s *streamEMAState) append(value float64) {
 		return
 	}
 	multiplier := 2 / float64(s.period+1)
+	s.previous = s.value
+	s.hasPrevious = true
 	s.value = (value-s.value)*multiplier + s.value
 }
 
@@ -320,6 +361,48 @@ func (s *streamATRState) append(high float64, low float64, previousClose float64
 	}
 	s.value = (s.value*float64(s.period-1) + trueRange) / float64(s.period)
 	s.series = append(s.series, s.value)
+}
+
+func newStreamADXState(period int) streamADXState {
+	return streamADXState{period: period}
+}
+
+func (s streamADXState) clone() streamADXState {
+	s.dxValues = append([]float64(nil), s.dxValues...)
+	return s
+}
+
+func (s *streamADXState) append(
+	currentHigh float64,
+	currentLow float64,
+	previousHigh float64,
+	previousLow float64,
+	previousClose float64,
+) {
+	if s == nil || s.period <= 0 {
+		return
+	}
+	trueRange := maxFloat(
+		currentHigh-currentLow,
+		absFloat(currentHigh-previousClose),
+		absFloat(currentLow-previousClose),
+	)
+	upMove := directionalMovementPlus(currentHigh, previousHigh, currentLow, previousLow)
+	downMove := directionalMovementMinus(currentHigh, previousHigh, currentLow, previousLow)
+	s.smoothedTR = s.smoothedTR - s.smoothedTR/float64(s.period) + trueRange
+	s.smoothedPlusDM = s.smoothedPlusDM - s.smoothedPlusDM/float64(s.period) + upMove
+	s.smoothedMinusDM = s.smoothedMinusDM - s.smoothedMinusDM/float64(s.period) + downMove
+	var dx float64
+	s.plusDI, s.minusDI, dx = directionalIndex(s.smoothedTR, s.smoothedPlusDM, s.smoothedMinusDM)
+	s.dxValues = append(s.dxValues, dx)
+	s.dxSum += dx
+	if len(s.dxValues) > s.period {
+		s.dxSum -= s.dxValues[len(s.dxValues)-s.period-1]
+	}
+	if len(s.dxValues) >= s.period {
+		s.value = s.dxSum / float64(s.period)
+		s.ready = true
+	}
 }
 
 func newStreamMACDState(config macdConfig) *streamMACDState {

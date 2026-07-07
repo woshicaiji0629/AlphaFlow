@@ -58,6 +58,7 @@ func buildRuntime(
 		Rules:              indicatorRules(cfg),
 		ScanInterval:       config.IndicatorScanInterval(),
 		LookbackPeriods:    config.IndicatorLookbackPeriods(),
+		WarmupPeriods:      config.IndicatorWarmupKlines(),
 		WindowLookback:     int(config.IndicatorWindowLookback()),
 		SnapshotCacheLimit: config.IndicatorSnapshotCacheLimit(),
 		Publisher:          publisher,
@@ -105,6 +106,7 @@ func buildRuntime(
 		Rules:             indicatorRunnerOptions.Rules,
 		ScanInterval:      indicatorRunnerOptions.ScanInterval,
 		LookbackPeriods:   indicatorRunnerOptions.LookbackPeriods,
+		WarmupPeriods:     indicatorRunnerOptions.WarmupPeriods,
 		CalculateOptions:  indicatorRunnerOptions.CalculateOptions,
 		Publisher:         indicatorRunnerOptions.Publisher,
 		PublishTTL:        indicatorRunnerOptions.PublishTTL,
@@ -119,7 +121,6 @@ func buildRuntime(
 		ScanInterval: config.HealthScanInterval(),
 		GapLookback:  config.HealthGapLookback(),
 	})
-	marketStore.AddKlineHandler(indicatorRunner.HandleKline)
 	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, closePublisher, reconnectDelay, nil
 }
 

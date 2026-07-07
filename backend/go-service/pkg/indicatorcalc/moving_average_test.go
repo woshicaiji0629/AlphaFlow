@@ -8,7 +8,7 @@ func TestMovingAverageFeatures(t *testing.T) {
 	values := map[string]string{}
 	signals := map[string]string{}
 
-	addMovingAverageFeatures(values, signals, closes, volumes)
+	addMovingAverageFeatures(values, signals, closes, volumes, nil)
 
 	for _, key := range []string{
 		"hma21",
@@ -80,6 +80,44 @@ func TestTilsonT3ReturnsValue(t *testing.T) {
 	}
 }
 
+func TestHMAOptimizedMatchesFullDifferenceWindow(t *testing.T) {
+	values := linearValues(240, 100, 0.5)
+
+	got, ok := hma(values, 21)
+	if !ok {
+		t.Fatal("hma returned false")
+	}
+	want, ok := hmaFullDifferenceWindow(values, 21)
+	if !ok {
+		t.Fatal("hmaFullDifferenceWindow returned false")
+	}
+	assertFloatClose(t, "hma", got, want)
+}
+
+func TestDEMATEMAStreamedFinalValueMatchesSeries(t *testing.T) {
+	values := linearValues(240, 100, 0.5)
+
+	gotDEMA, ok := dema(values, 21)
+	if !ok {
+		t.Fatal("dema returned false")
+	}
+	wantDEMA, ok := demaFromSeries(values, 21)
+	if !ok {
+		t.Fatal("demaFromSeries returned false")
+	}
+	assertFloatClose(t, "dema", gotDEMA, wantDEMA)
+
+	gotTEMA, ok := tema(values, 21)
+	if !ok {
+		t.Fatal("tema returned false")
+	}
+	wantTEMA, ok := temaFromSeries(values, 21)
+	if !ok {
+		t.Fatal("temaFromSeries returned false")
+	}
+	assertFloatClose(t, "tema", gotTEMA, wantTEMA)
+}
+
 func TestMovingAverageByTypeUsesConfiguredAverage(t *testing.T) {
 	values := linearValues(80, 100, 1)
 	volumes := linearValues(80, 10, 1)
@@ -92,6 +130,63 @@ func TestMovingAverageByTypeUsesConfiguredAverage(t *testing.T) {
 	if got != want {
 		t.Fatalf("movingAverageByType sma = %v, want %v", got, want)
 	}
+}
+
+func hmaFullDifferenceWindow(values []float64, period int) (float64, bool) {
+	if period <= 1 || len(values) < period {
+		return 0, false
+	}
+	half := period / 2
+	sqrtPeriod := intSqrt(period)
+	if sqrtPeriod < 1 {
+		return 0, false
+	}
+	differences := make([]float64, 0, len(values)-period+1)
+	for end := period; end <= len(values); end++ {
+		halfWMA, okHalf := wma(values[end-half:end], half)
+		fullWMA, okFull := wma(values[end-period:end], period)
+		if !okHalf || !okFull {
+			return 0, false
+		}
+		differences = append(differences, 2*halfWMA-fullWMA)
+	}
+	return wma(differences, sqrtPeriod)
+}
+
+func demaFromSeries(values []float64, period int) (float64, bool) {
+	ema1, ok := emaSeries(values, period)
+	if !ok {
+		return 0, false
+	}
+	ema2, ok := emaSeries(ema1, period)
+	if !ok {
+		return 0, false
+	}
+	return 2*ema1[len(ema1)-1] - ema2[len(ema2)-1], true
+}
+
+func temaFromSeries(values []float64, period int) (float64, bool) {
+	ema1, ok := emaSeries(values, period)
+	if !ok {
+		return 0, false
+	}
+	ema2, ok := emaSeries(ema1, period)
+	if !ok {
+		return 0, false
+	}
+	ema3, ok := emaSeries(ema2, period)
+	if !ok {
+		return 0, false
+	}
+	return 3*ema1[len(ema1)-1] - 3*ema2[len(ema2)-1] + ema3[len(ema3)-1], true
+}
+
+func intSqrt(value int) int {
+	result := 0
+	for (result+1)*(result+1) <= value {
+		result++
+	}
+	return result
 }
 
 func TestVWMAWeightsVolume(t *testing.T) {

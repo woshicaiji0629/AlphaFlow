@@ -609,6 +609,34 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t 
 	}
 }
 
+func TestRunnerCalculatedIndicatorSnapshotsUsesFixedWarmupWindow(t *testing.T) {
+	klines := minuteKlines(310)
+	window := newCalculationWindowFromKlines(klines, 310)
+	runner := NewRunner(&fakeStore{}, RunnerOptions{
+		LookbackPeriods: 310,
+		WarmupPeriods:   250,
+		WindowLookback:  50,
+	})
+
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, nil)
+	if err != nil {
+		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
+	}
+
+	if len(snapshots) != 50 {
+		t.Fatalf("snapshots = %d, want 50", len(snapshots))
+	}
+	if got := snapshots[0].OpenTime; got != klines[260].OpenTime {
+		t.Fatalf("first snapshot open time = %d, want %d", got, klines[260].OpenTime)
+	}
+	if got := snapshots[0].Values["sample_count"]; got != "250" {
+		t.Fatalf("first snapshot sample_count = %q, want 250", got)
+	}
+	if got := snapshots[len(snapshots)-1].Values["sample_count"]; got != "250" {
+		t.Fatalf("last snapshot sample_count = %q, want 250", got)
+	}
+}
+
 func TestRunnerValidateIndicatorSnapshotContinuityDetectsGap(t *testing.T) {
 	klines := minuteKlines(3)
 	snapshots := []model.IndicatorSnapshot{

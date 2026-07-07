@@ -239,6 +239,56 @@ func TestMarketStoreBuffersClickHouseWrites(t *testing.T) {
 	}
 }
 
+func TestLatestClosedKlinesAfterSkipsStaleKlines(t *testing.T) {
+	klines := []model.Kline{
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 3000,
+			IsClosed: true,
+		},
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "ETHUSDT",
+			Interval: "1m",
+			OpenTime: 2000,
+			IsClosed: true,
+		},
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "BTCUSDT",
+			Interval: "1m",
+			OpenTime: 1000,
+			IsClosed: true,
+		},
+		{
+			Exchange: "binance",
+			Market:   "um",
+			Symbol:   "BTCUSDT",
+			Interval: "1m",
+			OpenTime: 2000,
+			IsClosed: true,
+		},
+	}
+	lastOpenTimes := map[string]int64{
+		model.RedisKey("binance", "um", "ETHUSDT", "1m"): 3000,
+		model.RedisKey("binance", "um", "BTCUSDT", "1m"): 500,
+	}
+
+	latest := latestClosedKlinesAfter(klines, lastOpenTimes)
+
+	if len(latest) != 1 {
+		t.Fatalf("latest closed klines = %d, want 1", len(latest))
+	}
+	if latest[0].Symbol != "BTCUSDT" || latest[0].OpenTime != 2000 {
+		t.Fatalf("latest[0] = %#v, want BTCUSDT open_time 2000", latest[0])
+	}
+}
+
 func TestMarketStoreFlushesClickHouseBatch(t *testing.T) {
 	writer := &fakeClickHouseWriter{}
 	s := NewMarketStore(&RedisStore{}, nil, MarketStoreOptions{})

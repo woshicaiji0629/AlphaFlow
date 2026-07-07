@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-func addMovingAverageFeatures(values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
+func addMovingAverageFeatures(values map[string]string, signals map[string]string, closes []float64, volumes []float64, basic *basicIndicatorState) {
 	hma21, ok := hma(closes, 21)
 	setValue(values, "hma21", hma21, ok)
 	vwma20, ok := vwma(closes, volumes, 20)
@@ -26,9 +26,9 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 		}
 	}
 
-	ema7, ok7 := ema(closes, 7)
-	ema25, ok25 := ema(closes, 25)
-	ema99, ok99 := ema(closes, 99)
+	ema7, ok7 := emaFromStateOrSeries(basic, closes, 7)
+	ema25, ok25 := emaFromStateOrSeries(basic, closes, 25)
+	ema99, ok99 := emaFromStateOrSeries(basic, closes, 99)
 	last := closes[len(closes)-1]
 	if ok7 && ok25 && ok99 {
 		spread := (ema7 - ema99) / last * 100
@@ -36,11 +36,11 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 		signals["ma_state"] = movingAverageState(ema7, ema25, ema99, last)
 		signals["ma_arrangement"] = movingAverageArrangement(ema7, ema25, ema99)
 		setValue(values, "ma_trend_strength", math.Abs(spread), true)
-		addMovingAverageStructureFeatures(values, signals, closes, ema7, ema25, ema99)
+		addMovingAverageStructureFeatures(values, signals, closes, basic, ema7, ema25, ema99)
 	}
-	addEZEMASuiteFeatures(values, signals, closes)
+	addEZEMASuiteFeatures(values, signals, closes, basic)
 	addScriptDualMovingAverage(values, signals, closes, volumes)
-	addScriptMovingAverageSignal(values, signals, closes)
+	addScriptMovingAverageSignal(values, signals, closes, basic)
 	addEMDFeatures(values, signals, closes, 25, 1)
 }
 
@@ -68,8 +68,13 @@ func hma(values []float64, period int) (float64, bool) {
 	if sqrtPeriod < 1 {
 		return 0, false
 	}
-	differences := make([]float64, 0, len(values)-period+1)
-	for end := period; end <= len(values); end++ {
+	differenceCount := len(values) - period + 1
+	if differenceCount < sqrtPeriod {
+		return 0, false
+	}
+	startEnd := len(values) - sqrtPeriod + 1
+	differences := make([]float64, 0, sqrtPeriod)
+	for end := startEnd; end <= len(values); end++ {
 		halfWMA, okHalf := wma(values[end-half:end], half)
 		fullWMA, okFull := wma(values[end-period:end], period)
 		if !okHalf || !okFull {
@@ -98,31 +103,37 @@ func vwma(values []float64, volumes []float64, period int) (float64, bool) {
 }
 
 func dema(values []float64, period int) (float64, bool) {
-	ema1, ok := emaSeries(values, period)
-	if !ok {
+	ema1 := newStreamEMAState(period)
+	ema2 := newStreamEMAState(period)
+	for _, value := range values {
+		ema1.append(value)
+		if ema1.ready {
+			ema2.append(ema1.value)
+		}
+	}
+	if !ema1.ready || !ema2.ready {
 		return 0, false
 	}
-	ema2, ok := emaSeries(ema1, period)
-	if !ok {
-		return 0, false
-	}
-	return 2*ema1[len(ema1)-1] - ema2[len(ema2)-1], true
+	return 2*ema1.value - ema2.value, true
 }
 
 func tema(values []float64, period int) (float64, bool) {
-	ema1, ok := emaSeries(values, period)
-	if !ok {
+	ema1 := newStreamEMAState(period)
+	ema2 := newStreamEMAState(period)
+	ema3 := newStreamEMAState(period)
+	for _, value := range values {
+		ema1.append(value)
+		if ema1.ready {
+			ema2.append(ema1.value)
+		}
+		if ema2.ready {
+			ema3.append(ema2.value)
+		}
+	}
+	if !ema1.ready || !ema2.ready || !ema3.ready {
 		return 0, false
 	}
-	ema2, ok := emaSeries(ema1, period)
-	if !ok {
-		return 0, false
-	}
-	ema3, ok := emaSeries(ema2, period)
-	if !ok {
-		return 0, false
-	}
-	return 3*ema1[len(ema1)-1] - 3*ema2[len(ema2)-1] + ema3[len(ema3)-1], true
+	return 3*ema1.value - 3*ema2.value + ema3.value, true
 }
 
 func tilsonT3(values []float64, period int, factor float64) (float64, bool) {
@@ -237,6 +248,25 @@ func movingAverageByType(values []float64, volumes []float64, period int, maType
 	}
 }
 
+func emaFromStateOrSeries(basic *basicIndicatorState, closes []float64, period int) (float64, bool) {
+	if value, ok := basic.emaValue(period); ok {
+		return value, true
+	}
+	return ema(closes, period)
+}
+
+func previousEMAFromStateOrSeries(basic *basicIndicatorState, closes []float64, period int, offset int) (float64, bool) {
+	if offset == 1 {
+		if value, ok := basic.previousEMAValue(period); ok {
+			return value, true
+		}
+	}
+	if len(closes) <= offset {
+		return 0, false
+	}
+	return ema(closes[:len(closes)-offset], period)
+}
+
 func addScriptDualMovingAverage(values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
 	const (
 		period1  = 20
@@ -292,15 +322,15 @@ func priceCrossMA(closes []float64, average float64) string {
 	}
 }
 
-func addScriptMovingAverageSignal(values map[string]string, signals map[string]string, closes []float64) {
+func addScriptMovingAverageSignal(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
 	if len(closes) < 28 {
 		return
 	}
-	ema10, ok10 := ema(closes, 10)
-	breakthrough, okBreakthrough := ema(closes[:len(closes)-1], 13)
-	ema12, ok12 := ema(closes, 12)
-	ema26, ok26 := ema(closes, 26)
-	prevEMA10, okPrev10 := ema(closes[:len(closes)-1], 10)
+	ema10, ok10 := emaFromStateOrSeries(basic, closes, 10)
+	breakthrough, okBreakthrough := previousEMAFromStateOrSeries(basic, closes, 13, 1)
+	ema12, ok12 := emaFromStateOrSeries(basic, closes, 12)
+	ema26, ok26 := emaFromStateOrSeries(basic, closes, 26)
+	prevEMA10, okPrev10 := previousEMAFromStateOrSeries(basic, closes, 10, 1)
 	prevBreakthrough, okPrevBreakthrough := ema(closes[:len(closes)-2], 13)
 	if !ok10 || !okBreakthrough || !ok12 || !ok26 || !okPrev10 || !okPrevBreakthrough || breakthrough == 0 || prevBreakthrough == 0 {
 		return
@@ -391,13 +421,13 @@ func alligatorState(spreadPct float64) string {
 	}
 }
 
-func addMovingAverageStructureFeatures(values map[string]string, signals map[string]string, closes []float64, ema7 float64, ema25 float64, ema99 float64) {
+func addMovingAverageStructureFeatures(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState, ema7 float64, ema25 float64, ema99 float64) {
 	if len(closes) < 110 {
 		return
 	}
-	prevEMA7, ok7 := ema(closes[:len(closes)-1], 7)
-	prevEMA25, ok25 := ema(closes[:len(closes)-1], 25)
-	prevEMA99, ok99 := ema(closes[:len(closes)-5], 99)
+	prevEMA7, ok7 := previousEMAFromStateOrSeries(basic, closes, 7, 1)
+	prevEMA25, ok25 := previousEMAFromStateOrSeries(basic, closes, 25, 1)
+	prevEMA99, ok99 := previousEMAFromStateOrSeries(basic, closes, 99, 5)
 	if ok7 && ok25 {
 		signals["ma_cross"] = crossSignal(prevEMA7, prevEMA25, ema7, ema25)
 	}
@@ -408,7 +438,7 @@ func addMovingAverageStructureFeatures(values map[string]string, signals map[str
 		signals["ma_spread_state"] = spreadState(currentSpread, previousSpread)
 		signals["ma_compression"] = compressionState(currentSpread, closes[len(closes)-1])
 	}
-	prevEMA25, okPrevSlope := ema(closes[:len(closes)-5], 25)
+	prevEMA25, okPrevSlope := previousEMAFromStateOrSeries(basic, closes, 25, 5)
 	if okPrevSlope && prevEMA25 != 0 {
 		slopePct := percentDistance(ema25, prevEMA25)
 		signals["ma_slope_state"] = slopeState(slopePct)
@@ -487,7 +517,7 @@ func movingAverageState(ema7 float64, ema25 float64, ema99 float64, last float64
 	}
 }
 
-func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, closes []float64) {
+func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
 	periods := []int{5, 8, 9, 34, 55, 89, 144, 200}
 	if len(closes) < periods[len(periods)-1]+1 {
 		return
@@ -496,11 +526,11 @@ func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, 
 	current := make(map[int]float64, len(periods))
 	previous := make(map[int]float64, len(periods))
 	for _, period := range periods {
-		value, ok := ema(closes, period)
+		value, ok := emaFromStateOrSeries(basic, closes, period)
 		if !ok {
 			return
 		}
-		prev, ok := ema(closes[:len(closes)-1], period)
+		prev, ok := previousEMAFromStateOrSeries(basic, closes, period, 1)
 		if !ok {
 			return
 		}

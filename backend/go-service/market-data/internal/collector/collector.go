@@ -156,6 +156,14 @@ func estimatedStreamCount(options Options) int {
 }
 
 func (c *Collector) Run(ctx context.Context) error {
+	return c.run(ctx, true)
+}
+
+func (c *Collector) RunRealtime(ctx context.Context) error {
+	return c.run(ctx, false)
+}
+
+func (c *Collector) run(ctx context.Context, backfill bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -173,9 +181,11 @@ func (c *Collector) Run(ctx context.Context) error {
 		errCh <- c.runPollingLoop(ctx)
 	}()
 
-	go func() {
-		errCh <- c.runBackfillLoop(ctx)
-	}()
+	if backfill {
+		go func() {
+			errCh <- c.runBackfillLoop(ctx)
+		}()
+	}
 
 	err := <-errCh
 	if err != nil && ctx.Err() == nil {

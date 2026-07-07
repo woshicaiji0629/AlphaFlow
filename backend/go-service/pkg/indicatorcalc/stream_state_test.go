@@ -6,7 +6,7 @@ import (
 )
 
 func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
-	klines := benchmarkKlines(140)
+	klines := benchmarkKlines(240)
 	window := NewCalculationWindowFromKlines(klines[:100], 200)
 	window.EnableBasicState()
 	window.Append(klines[100:])
@@ -30,7 +30,7 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		}
 		assertFloatClose(t, "sma", got, want)
 	}
-	for _, period := range []int{7, 12, 19, 25, 26, 99} {
+	for _, period := range []int{5, 7, 8, 9, 10, 12, 13, 19, 25, 26, 34, 55, 89, 99, 144, 200} {
 		got, ok := state.emaValue(period)
 		if !ok {
 			t.Fatalf("missing stream ema%d", period)
@@ -40,6 +40,17 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 			t.Fatalf("missing batch ema%d", period)
 		}
 		assertFloatClose(t, "ema", got, want)
+		if len(closes) > period {
+			gotPrevious, ok := state.previousEMAValue(period)
+			if !ok {
+				t.Fatalf("missing stream previous ema%d", period)
+			}
+			wantPrevious, ok := ema(closes[:len(closes)-1], period)
+			if !ok {
+				t.Fatalf("missing batch previous ema%d", period)
+			}
+			assertFloatClose(t, "previous ema", gotPrevious, wantPrevious)
+		}
 	}
 
 	gotRSI, ok := state.rsiSeries14()
@@ -61,6 +72,18 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		t.Fatal("missing batch atr14 series")
 	}
 	assertFloatSeriesClose(t, "atr14", gotATR, wantATR)
+
+	gotADX, gotPlusDI, gotMinusDI, ok := state.adx14Value()
+	if !ok {
+		t.Fatal("missing stream adx14")
+	}
+	wantADX, wantPlusDI, wantMinusDI, ok := adx(highs, lows, closes, 14)
+	if !ok {
+		t.Fatal("missing batch adx14")
+	}
+	assertFloatClose(t, "adx14", gotADX, wantADX)
+	assertFloatClose(t, "di plus14", gotPlusDI, wantPlusDI)
+	assertFloatClose(t, "di minus14", gotMinusDI, wantMinusDI)
 
 	for _, config := range []macdConfig{{fast: 12, slow: 26, signal: 9}, {fast: 7, slow: 19, signal: 9}} {
 		gotMACD, ok := state.macdSeries(config)

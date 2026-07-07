@@ -127,7 +127,6 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 	allBank := []aiSourceRow{}
 	weights := [6]float64{1, 1, 1, 1, 1, 1}
 	neural := aiSourceNeuralState{weights: [6]float64{0.01, 0.01, 0.01, 0.01, 0.01, 0.01}}
-	rawSource := make([]float64, 0, len(closes))
 	smoothedSource := make([]float64, 0, len(closes))
 	maValues := make([]float64, 0, len(closes))
 	stLines := make([]float64, 0, len(closes))
@@ -138,6 +137,8 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 	adaptHistory := make([]float64, 0, len(closes))
 	var stLong, stShort float64
 	stDirection := "bull"
+	sourceEMA := newAISourceEMAState(cfg.sourceSmoothLen)
+	maEMA := newAISourceEMAState(cfg.maLength)
 	for index := range closes {
 		features := [4][6]float64{}
 		validFeatures := [4]bool{}
@@ -181,10 +182,9 @@ func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes 
 		}
 		selected := aiSourceBestID(ranks)
 		hardSource := sources[selected][index]
-		rawSource = append(rawSource, hardSource)
-		sourceValue := emaLast(rawSource, cfg.sourceSmoothLen)
+		sourceValue := sourceEMA.append(hardSource)
 		smoothedSource = append(smoothedSource, sourceValue)
-		maValue := emaLast(smoothedSource, cfg.maLength)
+		maValue := maEMA.append(sourceValue)
 		maValues = append(maValues, maValue)
 		avgAnalog := (scores[0].analog + scores[1].analog + scores[2].analog + scores[3].analog) / 4
 		avgAgree := (scores[0].agree + scores[1].agree + scores[2].agree + scores[3].agree) / 4
@@ -558,6 +558,36 @@ func emaLast(values []float64, period int) float64 {
 		return values[len(values)-1]
 	}
 	return value
+}
+
+type aiSourceEMAState struct {
+	period int
+	sum    float64
+	count  int
+	value  float64
+	ready  bool
+}
+
+func newAISourceEMAState(period int) *aiSourceEMAState {
+	return &aiSourceEMAState{period: period}
+}
+
+func (s *aiSourceEMAState) append(value float64) float64 {
+	if s == nil || s.period <= 1 {
+		return value
+	}
+	if !s.ready {
+		s.sum += value
+		s.count++
+		s.value = s.sum / float64(s.count)
+		if s.count >= s.period {
+			s.ready = true
+		}
+		return s.value
+	}
+	multiplier := 2 / float64(s.period+1)
+	s.value = (value-s.value)*multiplier + s.value
+	return s.value
 }
 
 func scaleValue01(value float64, low float64, high float64) float64 {
