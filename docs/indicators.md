@@ -66,6 +66,8 @@
 
 这些状态只用于减少重复计算；指标输出仍由 `CalculateWindow` 统一生成。窗口出现缺口或需要替换最后一根 K 线时，runner 会回退到重新构建窗口，优先保持语义正确。
 
+`pkg/indicatorcalc.CalculateWindows` 可在固定 warmup 后连续计算结果后缀。market-data runner 用它在 cold start 或缓存缺口时补齐 recent 指标 snapshot；缓存对齐后，窗口分析阶段只读取 recent 指标，不再回放 K 线补算历史指标。
+
 部分指标还做了局部紧凑化，减少每次窗口分析时的临时数组和重复扫描：
 
 - AI Source 的 source smoothing 和 MA smoothing 使用增量 EMA。
@@ -73,11 +75,14 @@
 - DEMA/TEMA 使用流式 EMA 状态取最终值。
 - Moving Average、EZ EMA 和脚本均线优先读取 `CalculationWindow` 的 EMA 状态。
 - VFI 使用 compact 路径，以滚动 VCP 和流式 signal EMA 替代旧实现中的嵌套窗口求和与 signal 序列数组；旧批量实现保留为 fallback。
+- `CalculateWindow` 正常路径复用 `CalculationWindow` 已解析 series 做数据质量检查，解析失败时回退旧质量检查逻辑以保留错误原因。
+- Nadaraya-Watson envelope 复用栈上权重缓存，避免每个点重复构造权重；MoneyFlow 的区间最高/最低扫描已抽成公共 helper。
 
 当前可用 benchmark：
 
 ```text
 go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTemporaryKlineRealtime -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench 'BenchmarkCalculate(250|300)Bars' -benchmem
 ```
 
 它覆盖 realtime open kline 的临时窗口构造和 `CalculateWindow` 完整特征计算。一次本地基线结果为：
@@ -86,7 +91,7 @@ go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTem
 BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 B/op    4830 allocs/op
 ```
 
-早期基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。最近几轮本地结果通常约 `35-55ms/op`、`6.7MB/op`、`4842 allocs/op`。该 benchmark 覆盖完整 realtime 特征计算，结果会受本机负载影响；后续如果继续降 CPU，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+早期 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
 
 ## 策略常用语义特征
 

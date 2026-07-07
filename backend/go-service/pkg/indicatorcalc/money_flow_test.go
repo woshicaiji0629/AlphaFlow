@@ -257,6 +257,28 @@ func TestSupplyDemandPosition(t *testing.T) {
 	}
 }
 
+func TestRangeHighLow(t *testing.T) {
+	highs := []float64{10, 14, 13, 18, 16}
+	lows := []float64{8, 7, 9, 11, 6}
+
+	high, low, ok := rangeHighLow(highs, lows, 1, 4)
+	if !ok {
+		t.Fatal("rangeHighLow returned false")
+	}
+	if high != 18 || low != 7 {
+		t.Fatalf("rangeHighLow = %v/%v, want 18/7", high, low)
+	}
+	if _, _, ok := rangeHighLow(highs, lows, -1, 4); ok {
+		t.Fatal("rangeHighLow accepted negative start")
+	}
+	if _, _, ok := rangeHighLow(highs, lows, 2, 2); ok {
+		t.Fatal("rangeHighLow accepted empty range")
+	}
+	if _, _, ok := rangeHighLow(highs, lows, 0, 6); ok {
+		t.Fatal("rangeHighLow accepted out of bounds end")
+	}
+}
+
 func TestChaikinMoneyFlowAndADLine(t *testing.T) {
 	highs := []float64{10, 11, 12, 13, 14}
 	lows := []float64{8, 9, 10, 11, 12}

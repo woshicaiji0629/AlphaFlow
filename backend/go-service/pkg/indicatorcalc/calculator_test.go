@@ -353,6 +353,60 @@ func TestCalculateWindowMatchesCalculate(t *testing.T) {
 	}
 }
 
+func TestCalculateWindowsMatchesSequentialCalculateWindow(t *testing.T) {
+	klines := make([]model.Kline, 0, 310)
+	for index := 0; index < 310; index++ {
+		klines = append(klines, testKline(int64(index), 100+float64(index%50), true))
+	}
+	const start = 260
+	const warmup = 250
+	seedStart := start - (warmup - 1)
+	sequentialWindow := NewCalculationWindowFromKlines(klines[seedStart:start], warmup)
+	sequentialWindow.EnableBasicState()
+	want := make([]Result, 0, len(klines)-start)
+	for index := start; index < len(klines); index++ {
+		sequentialWindow.Append([]model.Kline{klines[index]})
+		result, err := CalculateWindow(sequentialWindow, DefaultOptions())
+		if err != nil {
+			t.Fatalf("CalculateWindow: %v", err)
+		}
+		want = append(want, result)
+	}
+
+	got, err := CalculateWindows(klines, start, warmup, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CalculateWindows: %v", err)
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("results = %d, want %d", len(got), len(want))
+	}
+	for index := range got {
+		assertResultEqual(t, index, got[index], want[index])
+	}
+}
+
+func assertResultEqual(t *testing.T, index int, got Result, want Result) {
+	t.Helper()
+	if got.OpenTime != want.OpenTime || got.CloseTime != want.CloseTime {
+		t.Fatalf("result[%d] time = %d/%d, want %d/%d", index, got.OpenTime, got.CloseTime, want.OpenTime, want.CloseTime)
+	}
+	assertStringMapEqual(t, index, "values", got.Values, want.Values)
+	assertStringMapEqual(t, index, "signals", got.Signals, want.Signals)
+}
+
+func assertStringMapEqual(t *testing.T, index int, name string, got map[string]string, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("result[%d] %s len = %d, want %d", index, name, len(got), len(want))
+	}
+	for key, wantValue := range want {
+		if gotValue := got[key]; gotValue != wantValue {
+			t.Fatalf("result[%d] %s[%s] = %q, want %q", index, name, key, gotValue, wantValue)
+		}
+	}
+}
+
 func testKline(index int64, price float64, closed bool) model.Kline {
 	return model.Kline{
 		Exchange:    "binance",

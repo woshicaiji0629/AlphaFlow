@@ -43,6 +43,34 @@ func Calculate(klines []model.Kline, options Options) (Result, error) {
 	return CalculateWindow(window, options)
 }
 
+func CalculateWindows(klines []model.Kline, start int, warmup int, options Options) ([]Result, error) {
+	if start < 0 || start > len(klines) {
+		return nil, fmt.Errorf("invalid calculation start: %d", start)
+	}
+	if start == len(klines) {
+		return nil, nil
+	}
+	if warmup <= 0 || warmup > len(klines) {
+		warmup = len(klines)
+	}
+	seedStart := start - (warmup - 1)
+	if seedStart < 0 {
+		seedStart = 0
+	}
+	window := NewCalculationWindowFromKlines(klines[seedStart:start], warmup)
+	window.EnableBasicState()
+	results := make([]Result, 0, len(klines)-start)
+	for index := start; index < len(klines); index++ {
+		window.Append([]model.Kline{klines[index]})
+		result, err := CalculateWindow(window, options)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
 func CalculateWindow(window *CalculationWindow, options Options) (Result, error) {
 	if window == nil {
 		return Result{}, fmt.Errorf("nil calculation window")
@@ -60,7 +88,25 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	requiredSamples := requiredSampleCount(options)
 	values["sample_count"] = strconv.Itoa(len(closed))
 	values["required_count"] = strconv.Itoa(requiredSamples)
-	quality, reason := assessDataQuality(closed, requiredSamples)
+	opens, highs, lows, closes, volumes, err := window.Series()
+	if err != nil {
+		quality, reason := assessDataQuality(closed, requiredSamples)
+		signals["data_quality"] = quality
+		if reason != "" {
+			signals["data_quality_reason"] = reason
+		}
+		if quality == dataQualityInvalidOHLC {
+			last := closed[len(closed)-1]
+			return Result{
+				OpenTime:  last.OpenTime,
+				CloseTime: last.CloseTime,
+				Values:    values,
+				Signals:   signals,
+			}, nil
+		}
+		return Result{}, err
+	}
+	quality, reason := assessDataQualityFromSeries(closed, requiredSamples, opens, highs, lows, closes, volumes)
 	signals["data_quality"] = quality
 	if reason != "" {
 		signals["data_quality_reason"] = reason
@@ -73,11 +119,6 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 			Values:    values,
 			Signals:   signals,
 		}, nil
-	}
-
-	opens, highs, lows, closes, volumes, err := window.Series()
-	if err != nil {
-		return Result{}, err
 	}
 	basic := window.basic
 
@@ -212,6 +253,50 @@ func assessDataQuality(klines []model.Kline, requiredSamples int) (string, strin
 			return dataQualityInvalidOHLC, "invalid_time_range"
 		}
 		if volume == 0 {
+			hasZeroVolume = true
+		}
+		if index > 0 {
+			previous := klines[index-1]
+			if previous.CloseTime > 0 && kline.OpenTime != previous.CloseTime+1 {
+				hasGap = true
+			}
+		}
+	}
+	switch {
+	case hasGap:
+		return dataQualityGap, "non_contiguous_klines"
+	case hasZeroVolume:
+		return dataQualityZeroVolume, "zero_volume"
+	case len(klines) < requiredSamples:
+		return dataQualityInsufficient, "insufficient_samples"
+	default:
+		return dataQualityOK, ""
+	}
+}
+
+func assessDataQualityFromSeries(
+	klines []model.Kline,
+	requiredSamples int,
+	opens []float64,
+	highs []float64,
+	lows []float64,
+	closes []float64,
+	volumes []float64,
+) (string, string) {
+	hasGap := false
+	hasZeroVolume := false
+	for index, kline := range klines {
+		if highs[index] < lows[index] ||
+			opens[index] > highs[index] ||
+			opens[index] < lows[index] ||
+			closes[index] > highs[index] ||
+			closes[index] < lows[index] {
+			return dataQualityInvalidOHLC, "price_out_of_range"
+		}
+		if kline.CloseTime > 0 && kline.CloseTime < kline.OpenTime {
+			return dataQualityInvalidOHLC, "invalid_time_range"
+		}
+		if volumes[index] == 0 {
 			hasZeroVolume = true
 		}
 		if index > 0 {

@@ -50,6 +50,8 @@ type Store interface {
 		interval string,
 		limit int,
 	) ([]model.IndicatorSnapshot, error)
+	SetIndicator(ctx context.Context, snapshot model.IndicatorSnapshot) error
+	SetIndicatorWindow(ctx context.Context, snapshot model.IndicatorWindowSnapshot) error
 	SetClosedIndicator(
 		ctx context.Context,
 		snapshot model.IndicatorSnapshot,
@@ -82,6 +84,7 @@ type RunnerOptions struct {
 	TaskMaxWait        time.Duration
 	TaskMaxDeliveries  int
 	TaskWorkers        int
+	OnCalculateWindow  func()
 }
 
 type SnapshotPublisher interface {
@@ -428,6 +431,9 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		return err
 	}
 	snapshot := calculated.current
+	if err := r.storeMissingClosedIndicators(ctx, calculated.recent, lastIndicatorOpenTime, hasLastIndicator); err != nil {
+		return err
+	}
 	windowSnapshot, err := r.analyzeIndicatorWindow(
 		rule,
 		symbol,
@@ -439,7 +445,7 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err != nil {
 		return err
 	}
-	if err := r.store.SetClosedIndicator(ctx, snapshot, windowSnapshot); err != nil {
+	if err := r.store.SetIndicatorWindow(ctx, windowSnapshot); err != nil {
 		return err
 	}
 	if err := r.publishClosedSnapshot(ctx, snapshot, windowSnapshot); err != nil {
@@ -455,6 +461,23 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 		"open_time", snapshot.OpenTime,
 		"values", len(snapshot.Values),
 	)
+	return nil
+}
+
+func (r *Runner) storeMissingClosedIndicators(
+	ctx context.Context,
+	snapshots []model.IndicatorSnapshot,
+	lastIndicatorOpenTime int64,
+	hasLastIndicator bool,
+) error {
+	for _, snapshot := range snapshots {
+		if hasLastIndicator && snapshot.OpenTime <= lastIndicatorOpenTime {
+			continue
+		}
+		if err := r.store.SetIndicator(ctx, snapshot); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

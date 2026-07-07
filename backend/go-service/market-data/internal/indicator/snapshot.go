@@ -142,7 +142,7 @@ func (r *Runner) calculateRealtimeIndicators(
 	window *indicatorcalc.CalculationWindow,
 	kline model.Kline,
 ) (calculatedIndicators, error) {
-	result, err := indicatorcalc.CalculateWindow(window, r.options.CalculateOptions)
+	result, err := r.calculateWindow(window)
 	if err != nil {
 		return calculatedIndicators{}, err
 	}
@@ -187,30 +187,41 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 		lookback = len(closed)
 	}
 	start := len(closed) - lookback
+	if snapshotsCoverKlines(cached, closed[start:]) {
+		return trimIndicatorSnapshots(cached, lookback), nil
+	}
 	cachedByOpenTime := map[int64]model.IndicatorSnapshot{}
 	for _, snapshot := range cached {
 		cachedByOpenTime[snapshot.OpenTime] = snapshot
 	}
 	snapshots := make([]model.IndicatorSnapshot, 0, lookback)
-	warmup := int(r.options.WarmupPeriods)
-	if warmup <= 0 || warmup > len(closed) {
-		warmup = len(closed)
-	}
-	seedStart := start - (warmup - 1)
-	if seedStart < 0 {
-		seedStart = 0
-	}
-	calcWindow := newCalculationWindowFromKlines(closed[seedStart:start], warmup)
+	firstMissing := len(closed)
 	for index := start; index < len(closed); index++ {
-		calcWindow.Append([]model.Kline{closed[index]})
 		kline := closed[index]
 		if cachedSnapshot, ok := cachedByOpenTime[kline.OpenTime]; ok {
 			snapshots = append(snapshots, cachedSnapshot)
 			continue
 		}
-		result, err := indicatorcalc.CalculateWindow(calcWindow, r.options.CalculateOptions)
-		if err != nil {
-			return nil, err
+		firstMissing = index
+		break
+	}
+	if firstMissing == len(closed) {
+		return snapshots, nil
+	}
+	warmup := int(r.options.WarmupPeriods)
+	if warmup <= 0 || warmup > len(closed) {
+		warmup = len(closed)
+	}
+	results, err := r.calculateWindows(closed, firstMissing, warmup)
+	if err != nil {
+		return nil, err
+	}
+	for offset, result := range results {
+		index := firstMissing + offset
+		kline := closed[index]
+		if cachedSnapshot, ok := cachedByOpenTime[kline.OpenTime]; ok {
+			snapshots = append(snapshots, cachedSnapshot)
+			continue
 		}
 		snapshots = append(snapshots, model.IndicatorSnapshot{
 			Exchange:  kline.Exchange,
@@ -225,6 +236,27 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 		})
 	}
 	return snapshots, nil
+}
+
+func (r *Runner) calculateWindows(
+	klines []model.Kline,
+	start int,
+	warmup int,
+) ([]indicatorcalc.Result, error) {
+	results, err := indicatorcalc.CalculateWindows(klines, start, warmup, r.options.CalculateOptions)
+	if r.options.OnCalculateWindow != nil {
+		for range results {
+			r.options.OnCalculateWindow()
+		}
+	}
+	return results, err
+}
+
+func (r *Runner) calculateWindow(window *indicatorcalc.CalculationWindow) (indicatorcalc.Result, error) {
+	if r.options.OnCalculateWindow != nil {
+		r.options.OnCalculateWindow()
+	}
+	return indicatorcalc.CalculateWindow(window, r.options.CalculateOptions)
 }
 
 func (r *Runner) cachedIndicatorSnapshotsWithCurrent(
@@ -307,6 +339,19 @@ func alignedIndicatorSnapshotsInWindow(
 		}
 	}
 	return nil
+}
+
+func snapshotsCoverKlines(snapshots []model.IndicatorSnapshot, klines []model.Kline) bool {
+	if len(klines) == 0 || len(snapshots) < len(klines) {
+		return false
+	}
+	offset := len(snapshots) - len(klines)
+	for index, kline := range klines {
+		if snapshots[offset+index].OpenTime != kline.OpenTime {
+			return false
+		}
+	}
+	return true
 }
 
 func validateIndicatorSnapshotContinuity(snapshots []model.IndicatorSnapshot, intervalMillis int64) error {

@@ -1,6 +1,9 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestTradingViewFeaturesOutput(t *testing.T) {
 	highs, lows, closes, _ := trendingSeries(160, 100, 0.35)
@@ -109,6 +112,66 @@ func TestTDSequentialSetupCounts(t *testing.T) {
 	if buyCount != 9 || exhaustion != "buy" {
 		t.Fatalf("td buy setup = %d/%q, want 9/buy", buyCount, exhaustion)
 	}
+}
+
+func TestNadarayaWatsonEnvelopeMatchesBatch(t *testing.T) {
+	closes := oscillatingCloses(180)
+
+	gotMiddle, gotMAE, gotPrevious, ok := nadarayaWatsonEnvelope(closes, 50, 8)
+	if !ok {
+		t.Fatal("nadarayaWatsonEnvelope returned false")
+	}
+	wantMiddle, wantMAE, wantPrevious, ok := referenceNadarayaWatsonEnvelope(closes, 50, 8)
+	if !ok {
+		t.Fatal("referenceNadarayaWatsonEnvelope returned false")
+	}
+
+	assertFloatClose(t, "nw middle", gotMiddle, wantMiddle)
+	assertFloatClose(t, "nw mae", gotMAE, wantMAE)
+	assertFloatClose(t, "nw previous", gotPrevious, wantPrevious)
+}
+
+func referenceNadarayaWatsonEnvelope(closes []float64, length int, bandwidth float64) (float64, float64, float64, bool) {
+	if length <= 1 || bandwidth <= 0 || len(closes) < length+1 {
+		return 0, 0, 0, false
+	}
+	middle, ok := nadarayaWatsonAtBatch(closes, length, bandwidth, len(closes))
+	if !ok {
+		return 0, 0, 0, false
+	}
+	previousMiddle, ok := nadarayaWatsonAtBatch(closes, length, bandwidth, len(closes)-1)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	var errorSum float64
+	start := len(closes) - length
+	for index := start; index < len(closes); index++ {
+		fit, fitOK := nadarayaWatsonAtBatch(closes[:index+1], minInt(length, index+1), bandwidth, index+1)
+		if !fitOK {
+			continue
+		}
+		errorSum += math.Abs(closes[index] - fit)
+	}
+	return middle, errorSum / float64(length), previousMiddle, true
+}
+
+func nadarayaWatsonAtBatch(values []float64, length int, bandwidth float64, end int) (float64, bool) {
+	if length <= 0 || end < length || end > len(values) {
+		return 0, false
+	}
+	start := end - length
+	var weighted float64
+	var weightSum float64
+	for index := start; index < end; index++ {
+		distance := float64(end - 1 - index)
+		weight := math.Exp(-(distance * distance) / (2 * bandwidth * bandwidth))
+		weighted += values[index] * weight
+		weightSum += weight
+	}
+	if weightSum == 0 {
+		return 0, false
+	}
+	return weighted / weightSum, true
 }
 
 func TestRangeFilterCompactMatchesBatch(t *testing.T) {

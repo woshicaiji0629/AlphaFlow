@@ -578,11 +578,9 @@ func volumeProfile(
 		return volumeProfileResult{}, false
 	}
 	start := len(closes) - lookback
-	rangeHigh := highs[start]
-	rangeLow := lows[start]
-	for index := start + 1; index < len(closes); index++ {
-		rangeHigh = math.Max(rangeHigh, highs[index])
-		rangeLow = math.Min(rangeLow, lows[index])
+	rangeHigh, rangeLow, ok := rangeHighLow(highs, lows, start, len(closes))
+	if !ok {
+		return volumeProfileResult{}, false
 	}
 	if rangeHigh <= rangeLow {
 		return volumeProfileResult{}, false
@@ -645,11 +643,9 @@ func supplyDemandRange(
 		return supplyDemandRangeResult{}, false
 	}
 	start := len(closes) - lookback
-	rangeHigh := highs[start]
-	rangeLow := lows[start]
-	for index := start + 1; index < len(closes); index++ {
-		rangeHigh = math.Max(rangeHigh, highs[index])
-		rangeLow = math.Min(rangeLow, lows[index])
+	rangeHigh, rangeLow, ok := rangeHighLow(highs, lows, start, len(closes))
+	if !ok {
+		return supplyDemandRangeResult{}, false
 	}
 	if rangeHigh <= rangeLow {
 		return supplyDemandRangeResult{}, false
@@ -694,6 +690,19 @@ func supplyDemandRange(
 	result.equilibrium = (rangeHigh + rangeLow) / 2
 	result.weightedEquilibrium = (result.supplyWAvg + result.demandWAvg) / 2
 	return result, true
+}
+
+func rangeHighLow(highs []float64, lows []float64, start int, end int) (float64, float64, bool) {
+	if start < 0 || end > len(highs) || end > len(lows) || start >= end {
+		return 0, 0, false
+	}
+	rangeHigh := highs[start]
+	rangeLow := lows[start]
+	for index := start + 1; index < end; index++ {
+		rangeHigh = math.Max(rangeHigh, highs[index])
+		rangeLow = math.Min(rangeLow, lows[index])
+	}
+	return rangeHigh, rangeLow, true
 }
 
 func supplyDemandBoundary(bucketVolumes []float64, rangeLow float64, bucketSize float64, targetVolume float64, fromHigh bool) (int, float64, bool) {

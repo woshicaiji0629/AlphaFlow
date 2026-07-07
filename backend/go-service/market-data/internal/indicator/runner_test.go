@@ -30,6 +30,7 @@ type fakeStore struct {
 	windowSnapshots          []model.IndicatorWindowSnapshot
 	latestWindowSnapshots    []model.IndicatorWindowSnapshot
 	realtimeSnapshots        []model.IndicatorRealtimeSnapshot
+	writeOrder               []string
 	rangeDelay               time.Duration
 	activeRangeCalls         atomic.Int64
 	maxActiveRangeCalls      atomic.Int64
@@ -85,6 +86,25 @@ func (s *fakeStore) RecentIndicators(context.Context, string, string, string, st
 	return nil, nil
 }
 
+func (s *fakeStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshots = append(s.snapshots, snapshot)
+	s.writeOrder = append(s.writeOrder, "indicator")
+	return nil
+}
+
+func (s *fakeStore) SetIndicatorWindow(
+	_ context.Context,
+	snapshot model.IndicatorWindowSnapshot,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.windowSnapshots = append(s.windowSnapshots, snapshot)
+	s.writeOrder = append(s.writeOrder, "window")
+	return nil
+}
+
 func (s *fakeStore) SetClosedIndicator(
 	_ context.Context,
 	snapshot model.IndicatorSnapshot,
@@ -94,6 +114,7 @@ func (s *fakeStore) SetClosedIndicator(
 	defer s.mu.Unlock()
 	s.snapshots = append(s.snapshots, snapshot)
 	s.windowSnapshots = append(s.windowSnapshots, windowSnapshot)
+	s.writeOrder = append(s.writeOrder, "closed")
 	return nil
 }
 
@@ -150,10 +171,10 @@ func TestRunnerWritesIndicatorSnapshot(t *testing.T) {
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if len(store.snapshots) != 1 {
-		t.Fatalf("snapshots = %d, want 1", len(store.snapshots))
+	if len(store.snapshots) != 20 {
+		t.Fatalf("snapshots = %d, want 20", len(store.snapshots))
 	}
-	got := store.snapshots[0]
+	got := store.snapshots[len(store.snapshots)-1]
 	if got.Exchange != "binance" || got.Market != "um" || got.Symbol != "ETHUSDT" || got.Interval != "1m" {
 		t.Fatalf("unexpected identity: %#v", got)
 	}
@@ -175,6 +196,17 @@ func TestRunnerWritesIndicatorSnapshot(t *testing.T) {
 	}
 	if window.Signals["ema_alignment_win_latest"] == "" {
 		t.Fatalf("missing ema alignment window latest: %#v", window.Signals)
+	}
+	if len(store.writeOrder) != 21 {
+		t.Fatalf("write order length = %d, want 21", len(store.writeOrder))
+	}
+	for index := 0; index < 20; index++ {
+		if store.writeOrder[index] != "indicator" {
+			t.Fatalf("write order[%d] = %q, want indicator", index, store.writeOrder[index])
+		}
+	}
+	if got := store.writeOrder[20]; got != "window" {
+		t.Fatalf("write order[20] = %q, want window", got)
 	}
 }
 
@@ -609,6 +641,66 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t 
 	}
 }
 
+func TestRunnerCalculatedIndicatorSnapshotsForWindowUsesCompleteCache(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	cached := make([]model.IndicatorSnapshot, 0, 20)
+	for _, kline := range klines[5:] {
+		cached = append(cached, testIndicatorSnapshot(kline, "cached"))
+	}
+	var calculateCalls atomic.Uint64
+	runner := NewRunner(&fakeStore{}, RunnerOptions{
+		OnCalculateWindow: func() {
+			calculateCalls.Add(1)
+		},
+	})
+
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	if err != nil {
+		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
+	}
+
+	if got := calculateCalls.Load(); got != 0 {
+		t.Fatalf("calculate calls = %d, want 0", got)
+	}
+	if len(snapshots) != 20 {
+		t.Fatalf("snapshots = %d, want 20", len(snapshots))
+	}
+	if got := snapshots[0].OpenTime; got != klines[5].OpenTime {
+		t.Fatalf("first snapshot open time = %d, want %d", got, klines[5].OpenTime)
+	}
+}
+
+func TestRunnerCalculatedIndicatorSnapshotsForWindowCalculatesOnlyMissingLatest(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	cached := make([]model.IndicatorSnapshot, 0, 19)
+	for _, kline := range klines[5:24] {
+		cached = append(cached, testIndicatorSnapshot(kline, "cached"))
+	}
+	var calculateCalls atomic.Uint64
+	runner := NewRunner(&fakeStore{}, RunnerOptions{
+		OnCalculateWindow: func() {
+			calculateCalls.Add(1)
+		},
+	})
+
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	if err != nil {
+		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
+	}
+
+	if got := calculateCalls.Load(); got != 1 {
+		t.Fatalf("calculate calls = %d, want 1", got)
+	}
+	if len(snapshots) != 20 {
+		t.Fatalf("snapshots = %d, want 20", len(snapshots))
+	}
+	if got := snapshots[19].OpenTime; got != klines[24].OpenTime {
+		t.Fatalf("last snapshot open time = %d, want %d", got, klines[24].OpenTime)
+	}
+}
+
 func TestRunnerCalculatedIndicatorSnapshotsUsesFixedWarmupWindow(t *testing.T) {
 	klines := minuteKlines(310)
 	window := newCalculationWindowFromKlines(klines, 310)
@@ -704,8 +796,11 @@ func TestRunnerCalculatesWithConcurrentWorkers(t *testing.T) {
 	if got := store.maxActiveRangeCalls.Load(); got < 2 {
 		t.Fatalf("max active range calls = %d, want concurrent calls", got)
 	}
-	if len(store.snapshots) != 16 {
-		t.Fatalf("snapshots = %d, want 16", len(store.snapshots))
+	if len(store.snapshots) != 16*indicatorWindowLookback {
+		t.Fatalf("snapshots = %d, want %d", len(store.snapshots), 16*indicatorWindowLookback)
+	}
+	if len(store.windowSnapshots) != 16 {
+		t.Fatalf("window snapshots = %d, want 16", len(store.windowSnapshots))
 	}
 }
 

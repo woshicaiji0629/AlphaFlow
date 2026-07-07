@@ -27,9 +27,10 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - `market-data` 已通过 NATS JetStream 发布已收盘和未收盘 market snapshot，供 `strategy-engine` 运行期更新内存态。
 - ClickHouse 保存已闭合 K 线历史。
 - 指标计算和窗口分析已下沉到公共包，供实时服务、回测和未来重算复用。
-- 指标 runner 已完成性能优化：启动顺序按 K 线预热、指标计算、窗口分析三层拆分，闭合指标 Redis 写入合并为单次 pipeline，连续 K 线窗口 snapshot 增量缓存，扫描型冷启动任务进入 NATS JetStream 内部队列并由 `market-data` 进程内 worker 消费。
-- 指标计算已开始流式化热点路径：`CalculationWindow` 复用 SMA、EMA、RSI、ATR、ADX/DI、MACD、OBV、VWAP、WaveTrend 和部分 MoneyFlow 状态；VFI 已新增 compact 路径减少嵌套扫描。
-- 最近一次本地指标压测中，`symbols=10`、`tasks=280`、`lookback=100`、模拟 Redis 写延迟 `1ms` 时，单轮从约 `41s` 降到约 `4.9s`。
+- 指标 runner 已按 K 线预热、指标计算、窗口分析三层拆分：启动先准备连续 K 线，再补齐底层指标 snapshot，最后窗口分析只读取 recent 指标缓存；闭合指标和窗口特征 Redis 写入合并为 pipeline，扫描型冷启动任务进入 NATS JetStream 内部队列并由 `market-data` 进程内 worker 消费。
+- 指标计算已开始流式化热点路径：`CalculationWindow` 复用 SMA、EMA、RSI、ATR、ADX/DI、MACD、OBV、VWAP、WaveTrend 和部分 MoneyFlow 状态；`CalculateWindows` 支持固定 warmup 后连续计算结果后缀，缓存对齐后稳态新收盘一根 K 线只补一根底层指标。
+- 指标计算局部热点已继续削减重复工作：`CalculateWindow` 正常路径避免重复解析，Nadaraya-Watson envelope 复用栈上权重缓存，MoneyFlow 区间最高/最低扫描抽成公共 helper。
+- 最近一次小样本本地指标负载验证使用 `symbols=2`、四个模拟交易所、服务当前周期集合、`lookback=300`、`warmup=250`、`window-lookback=50`、`runs=2` 和 `advance-each-run`，结果中 `tasks=56`、`calculate_window_calls=2856`，等于冷启动 `56 * 50` 加第二轮稳态 `56 * 1`；该结果只验证计算次数收敛，不是生产 SLA。
 
 ### 策略框架
 
@@ -105,13 +106,14 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 管理 API 和前端尚未实现。
 - ClickHouse 表当前通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
 - top500 场景下的 Redis ops、NATS market snapshot 积压、NATS strategy decision 积压、ClickHouse 写入和实时采集延迟仍需要长时间全链路压测确认；不能把最近一次小样本压测结果当作生产 SLA。
+- 冷启动会为最近窗口写入底层指标 snapshot 和窗口快照，Redis 写入次数会随 `tasks * window-lookback` 增长；top500 长跑后再判断是否需要异步刷 Redis、批量压缩或降低写入频率。
 - Redis 指标写入当前仍保留同步路径；已收盘异步刷 Redis、未收盘定期刷 Redis 还未实现。
 - `market-health` 当前主要观测 Redis health/cursor 和队列状态，还没有完整覆盖 `strategy-engine` 内存市场态和 market snapshot 消费延迟。
 
 ## 建议下一步
 
 1. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
-2. 根据压测结果继续优化指标 worker 数、batch、增量预热、指标流式状态或更细粒度缓存。
+2. 根据压测结果继续优化指标 worker 数、batch、Redis 写入路径、增量预热、指标流式状态或更细粒度缓存。
 3. 补回测图表报告和结果查询入口。
 4. 补回测参数化运行和策略配置加载。
 5. 实现 position-engine 的 notify handler。
@@ -129,4 +131,4 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 GOCACHE=/private/tmp/alphaflow-go-cache GO111MODULE=on go test ./...
 ```
 
-最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证、指标 runner 性能优化、指标扫描任务队列化、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态，以及 `queue-status` / `market-health` 观测命令。
+最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证、指标 runner 三层拆分、指标 recent cache、指标扫描任务队列化、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态，以及 `queue-status` / `market-health` 观测命令。
