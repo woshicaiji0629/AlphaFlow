@@ -1,5 +1,7 @@
 package indicatorcalc
 
+import "math"
+
 func addTrendFeatures(values map[string]string, signals map[string]string, closes []float64) {
 	addTrendFeaturesWithContext(values, signals, closes, nil)
 }
@@ -787,12 +789,18 @@ func supertrendSeries(highs []float64, lows []float64, closes []float64, period 
 	if period <= 0 || len(closes) <= period {
 		return nil, false
 	}
-	trs := trueRanges(highs, lows, closes)
-	if len(trs) < period {
+	if len(highs) != len(closes) || len(lows) != len(closes) {
 		return nil, false
 	}
 	points := make([]trendPoint, 0, len(closes)-period)
-	atrValue, _ := sma(trs[:period], period)
+	atrSum := 0.0
+	for index := 1; index <= period; index++ {
+		atrSum += math.Max(
+			highs[index]-lows[index],
+			math.Max(math.Abs(highs[index]-closes[index-1]), math.Abs(lows[index]-closes[index-1])),
+		)
+	}
+	atrValue := atrSum / float64(period)
 	mid := (highs[period] + lows[period]) / 2
 	finalUpper := mid + multiplier*atrValue
 	finalLower := mid - multiplier*atrValue
@@ -802,7 +810,11 @@ func supertrendSeries(highs []float64, lows []float64, closes []float64, period 
 	}
 	points = append(points, supertrendPoint(finalUpper, finalLower, direction))
 	for index := period + 1; index < len(closes); index++ {
-		atrValue = (atrValue*float64(period-1) + trs[index-1]) / float64(period)
+		trueRange := math.Max(
+			highs[index]-lows[index],
+			math.Max(math.Abs(highs[index]-closes[index-1]), math.Abs(lows[index]-closes[index-1])),
+		)
+		atrValue = (atrValue*float64(period-1) + trueRange) / float64(period)
 		mid = (highs[index] + lows[index]) / 2
 		basicUpper := mid + multiplier*atrValue
 		basicLower := mid - multiplier*atrValue
