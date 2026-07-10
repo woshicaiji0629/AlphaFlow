@@ -112,6 +112,23 @@ services:
     command: ["position-engine", "-config", "configs/position-engine.local.toml"]
     restart: unless-stopped
 
+  execution-engine:
+    build:
+      context: ./backend/go-service
+      dockerfile: docker/market-data.Dockerfile
+    container_name: alphaflow-execution-engine
+    profiles: ["live"]
+    depends_on:
+      - redis
+      - nats
+    environment:
+      ALPHAFLOW_REDIS_ADDR: redis:6380
+      ALPHAFLOW_NATS_URL: nats://nats:4222
+    volumes:
+      - ./logs/go-service:/workspace/logs/go-service
+    command: ["execution-engine", "-config", "configs/execution-engine.local.toml"]
+    restart: unless-stopped
+
   kline-admin:
     build:
       context: ./backend/go-service

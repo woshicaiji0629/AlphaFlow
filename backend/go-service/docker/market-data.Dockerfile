@@ -26,6 +26,7 @@ RUN go build -o /out/market-data ./market-data/cmd/market-data
 RUN go build -o /out/market-data-admin ./market-data/cmd/market-data-admin
 RUN go build -o /out/strategy-engine ./strategy-engine/cmd/strategy-engine
 RUN go build -o /out/position-engine ./position-engine/cmd/position-engine
+RUN go build -o /out/execution-engine ./execution-engine/cmd/execution-engine
 
 FROM alpine:3.21
 
@@ -35,6 +36,7 @@ COPY --from=builder /out/market-data /usr/local/bin/market-data
 COPY --from=builder /out/market-data-admin /usr/local/bin/market-data-admin
 COPY --from=builder /out/strategy-engine /usr/local/bin/strategy-engine
 COPY --from=builder /out/position-engine /usr/local/bin/position-engine
+COPY --from=builder /out/execution-engine /usr/local/bin/execution-engine
 COPY configs/ configs/
 
 CMD ["market-data", "-config", "configs/market-data.local.toml"]

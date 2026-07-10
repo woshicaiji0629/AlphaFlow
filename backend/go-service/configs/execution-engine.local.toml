@@ -1,0 +1,20 @@
+[nats]
+url = "nats://localhost:4222"
+stream = "ALPHAFLOW_EXECUTION"
+intent_subject = "execution.intent"
+report_subject = "execution.report"
+durable = "execution-engine"
+block = "1s"
+ack_wait = "30s"
+batch = 10
+
+[redis]
+addr = "localhost:6380"
+password = ""
+db = 0
+pool_size = 20
+min_idle_conns = 5
+
+[execution]
+mode = "paper"
+paper_price = ""
