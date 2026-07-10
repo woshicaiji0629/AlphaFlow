@@ -143,8 +143,33 @@ func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.Exe
 func (a *Adapter) CancelOrder(context.Context, string, string) error {
 	return fmt.Errorf("bitget trading is not enabled")
 }
-func (a *Adapter) OpenOrders(context.Context, string) ([]execution.ExchangeOrder, error) {
-	return nil, fmt.Errorf("bitget open orders are not implemented")
+func (a *Adapter) OpenOrders(ctx context.Context, symbol string) ([]execution.ExchangeOrder, error) {
+	query := map[string]string{"productType": "USDT-FUTURES"}
+	if symbol != "" {
+		query["symbol"] = symbol
+	}
+	body, err := a.get(ctx, "/api/v2/mix/order/orders-pending", query)
+	if err != nil {
+		return nil, err
+	}
+	var result response[struct {
+		EntrustedList []struct{ Symbol, Size, OrderID, ClientOid, BaseVolume, PriceAvg, Status, Side, PosSide, OrderType, ReduceOnly, CTime, UTime string } `json:"entrustedList"`
+	}]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode bitget open orders: %w", err)
+	}
+	if result.Code != "00000" {
+		return nil, fmt.Errorf("bitget open orders code %s: %s", result.Code, result.Msg)
+	}
+	orders := make([]execution.ExchangeOrder, 0, len(result.Data.EntrustedList))
+	for _, row := range result.Data.EntrustedList {
+		quantity, _ := strconv.ParseFloat(row.Size, 64)
+		filled, _ := strconv.ParseFloat(row.BaseVolume, 64)
+		created, _ := strconv.ParseInt(row.CTime, 10, 64)
+		updated, _ := strconv.ParseInt(row.UTime, 10, 64)
+		orders = append(orders, execution.ExchangeOrder{Exchange: "bitget", Account: a.account.ID, Symbol: row.Symbol, OrderID: row.OrderID, ClientOrderID: row.ClientOid, Side: execution.OrderSide(row.Side), PositionSide: row.PosSide, Type: execution.OrderType(row.OrderType), Status: mapStatus(row.Status), Quantity: quantity, FilledQuantity: filled, AveragePrice: row.PriceAvg, ReduceOnly: strings.EqualFold(row.ReduceOnly, "YES"), CreatedAt: created, UpdatedAt: updated})
+	}
+	return orders, nil
 }
 func (a *Adapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
 	return execution.SymbolCapability{}, fmt.Errorf("bitget capability is not implemented")

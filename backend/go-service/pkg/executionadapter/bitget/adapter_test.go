@@ -34,6 +34,21 @@ func TestLiveAccountOmitsDemoHeader(t *testing.T) {
 	}
 }
 
+func TestOpenOrdersMapsPendingOrders(t *testing.T) {
+	client := &captureClient{body: []byte(`{"code":"00000","data":{"entrustedList":[{"symbol":"ETHUSDT","size":"2","orderId":"o1","clientOid":"i1","baseVolume":"0.5","priceAvg":"1903","status":"partially_filled","side":"buy","posSide":"long","orderType":"limit","reduceOnly":"YES","cTime":"100","uTime":"200"}]}}`)}
+	a, _ := New(Options{Account: executionaccount.Account{ID: "a", Exchange: "bitget", Environment: executionaccount.EnvironmentTestnet}, Credential: executionaccount.Credential{APIKey: "k", APISecret: "s", Passphrase: "p"}, BaseURL: "https://example.test", HTTPClient: client})
+	orders, err := a.OpenOrders(context.Background(), "ETHUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].ClientOrderID != "i1" || orders[0].FilledQuantity != 0.5 || !orders[0].ReduceOnly {
+		t.Fatalf("orders=%#v", orders)
+	}
+	if client.request.URL.Query().Get("symbol") != "ETHUSDT" || client.request.Header.Get("paptrading") != "1" {
+		t.Fatalf("request=%s headers=%v", client.request.URL, client.request.Header)
+	}
+}
+
 type captureClient struct {
 	request *http.Request
 	body    []byte
