@@ -38,7 +38,14 @@ scope = "paper"
 account = "default"
 
 [strategies]
-enabled = ["supertrend"]
+
+[[strategies.items]]
+name = "supertrend"
+enabled = true
+
+[strategies.items.params]
+entry_threshold = "0.72"
+max_blocking_timeframes = "1"
 
 [sizing]
 margin_quote = 100

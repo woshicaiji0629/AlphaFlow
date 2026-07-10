@@ -2,6 +2,7 @@ package simulator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"alphaflow/go-service/pkg/marketmodel"
@@ -463,19 +464,23 @@ type fixedStrategy struct {
 	name       string
 	signalSide strategy.SignalSide
 	confidence float64
+	err        error
 }
 
 func (s fixedStrategy) Name() string {
 	return s.name
 }
 
-func (s fixedStrategy) RequiredIntervals(target strategy.Target) []string {
-	return []string{target.Interval}
+func (s fixedStrategy) Requirements(target strategy.Target) strategy.Requirements {
+	return strategy.Requirements{EntryInterval: target.Interval, Trigger: strategy.TriggerOnEntryClose}
 }
 
 func (s fixedStrategy) Evaluate(ctx context.Context, snapshot strategy.Snapshot, currentPosition *strategy.Position) (strategy.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return strategy.Result{}, err
+	}
+	if s.err != nil {
+		return strategy.Result{}, s.err
 	}
 	return strategy.Result{
 		StrategyName: s.name,
@@ -490,4 +495,25 @@ func (s fixedStrategy) Evaluate(ctx context.Context, snapshot strategy.Snapshot,
 			OpenTime:   snapshot.Current.OpenTime,
 		},
 	}, nil
+}
+
+func TestExecutorReturnsPartialSummaryForStrategyFailure(t *testing.T) {
+	executor, err := NewExecutor(ExecutorOptions{
+		Engine: strategy.NewEngine([]strategy.Strategy{fixedStrategy{name: "broken", err: errors.New("boom")}}),
+		Store:  position.NewMemoryStore(),
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	summary, err := executor.Execute(context.Background(), []strategy.Context{
+		executorTestContext("ETHUSDT", 1000, "100"),
+		executorTestContext("ETHUSDT", 2000, "101"),
+	})
+	var evaluationErr StrategyEvaluationError
+	if !errors.As(err, &evaluationErr) {
+		t.Fatalf("Execute() error = %v, want StrategyEvaluationError", err)
+	}
+	if summary.Decisions != 1 || len(summary.Failures) != 1 || summary.Failures[0].StrategyName != "broken" {
+		t.Fatalf("summary = %#v, want first-decision failure", summary)
+	}
 }

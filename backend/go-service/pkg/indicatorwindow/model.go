@@ -4,7 +4,7 @@ import model "alphaflow/go-service/pkg/marketmodel"
 
 const (
 	Version         = "v1"
-	defaultLookback = 20
+	DefaultLookback = 20
 )
 
 type Result struct {

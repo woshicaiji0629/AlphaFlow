@@ -68,6 +68,10 @@
 
 `pkg/indicatorcalc.CalculateWindows` 可在固定 warmup 后连续计算结果后缀。market-data runner 用它在 cold start 或缓存缺口时补齐 recent 指标 snapshot；缓存对齐后，窗口分析阶段只读取 recent 指标，不再回放 K 线补算历史指标。
 
+回测引擎复用同一个 `CalculateWindows` 计算口径，但生命周期不同：`SnapshotBuilder` 会为每个 symbol/interval 建立一份 `PreparedSeries`，一次性计算整段指标和窗口特征，后续每个决策时间点只按 `AsOf` 二分读取已经闭合的结果。这样在线路径保持增量低延迟，回测路径保持批量吞吐，两者不复制指标公式，也不会因逐 bar 重算历史前缀产生平方级开销。
+
+`indicatorwindow.DefaultLookback` 是在线和回测共享的默认窗口长度。调整该值会同时影响窗口语义，应通过等价性测试和真实数据回放验证，不能只在某个入口单独硬编码。
+
 部分指标还做了局部紧凑化，减少每次窗口分析时的临时数组和重复扫描：
 
 - AI Source 的 source smoothing 和 MA smoothing 使用增量 EMA。

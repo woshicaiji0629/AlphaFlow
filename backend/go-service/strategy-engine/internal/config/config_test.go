@@ -135,6 +135,38 @@ interval = "3m"
 	}
 }
 
+func TestLoadStrategyItems(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[[strategies.items]]
+name = " SuperTrend "
+enabled = true
+
+[strategies.items.params]
+entry_threshold = "0.80"
+
+[[targets]]
+exchange = "binance"
+market = "um"
+symbol = "ETHUSDT"
+interval = "3m"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	specs := StrategySpecs(cfg)
+	if len(specs) != 1 || specs[0].Name != "supertrend" {
+		t.Fatalf("strategy specs = %#v", specs)
+	}
+	if specs[0].Params["entry_threshold"] != "0.80" {
+		t.Fatalf("strategy params = %#v", specs[0].Params)
+	}
+}
+
 func TestLoadRejectsUnsupportedOutputMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	content := `

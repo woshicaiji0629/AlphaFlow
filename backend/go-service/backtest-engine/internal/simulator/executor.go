@@ -36,6 +36,19 @@ type ExecutionSummary struct {
 	BarEquityCurve []report.BarEquityPoint
 	AccountCurve   []report.AccountEquityPoint
 	RunSummary     strategy.BacktestRunSummary
+	Failures       []strategy.StrategyFailure
+}
+
+type StrategyEvaluationError struct {
+	Failures []strategy.StrategyFailure
+}
+
+func (e StrategyEvaluationError) Error() string {
+	if len(e.Failures) == 0 {
+		return "strategy evaluation failed"
+	}
+	first := e.Failures[0]
+	return fmt.Sprintf("strategy evaluation failed: %s: %s", first.StrategyName, first.Error)
 }
 
 type Executor struct {
@@ -127,10 +140,16 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
+			summary.Decisions++
+			if len(decision.Failures) > 0 {
+				summary.Failures = append(summary.Failures, decision.Failures...)
+				return summary, StrategyEvaluationError{Failures: append([]strategy.StrategyFailure(nil), decision.Failures...)}
+			}
 			decision, err = e.filterDecision(input, decision)
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
+			summary.Results += len(decision.Results)
 			if err := e.dispatcher.Dispatch(ctx, input, decision); err != nil {
 				return ExecutionSummary{}, err
 			}
@@ -148,8 +167,6 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 			if ok {
 				summary.BarEquityCurve = append(summary.BarEquityCurve, point)
 			}
-			summary.Decisions++
-			summary.Results += len(decision.Results)
 		}
 		accountPoint, ok, err := e.accountEquityPoint(ctx, batch[0])
 		if err != nil {

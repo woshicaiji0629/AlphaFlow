@@ -4,6 +4,18 @@ import "alphaflow/go-service/pkg/marketmodel"
 
 type SignalSide string
 
+type TriggerMode string
+
+const (
+	TriggerOnEntryClose TriggerMode = "entry_close"
+)
+
+type Requirements struct {
+	EntryInterval    string
+	ConfirmIntervals []string
+	Trigger          TriggerMode
+}
+
 const (
 	SignalSideBuy  SignalSide = "buy"
 	SignalSideSell SignalSide = "sell"
@@ -82,7 +94,16 @@ type Snapshot struct {
 	Timeframes map[string]TimeframeSnapshot
 	Price      PriceView
 	Health     HealthView
+	Realtime   *RealtimeView
+	AsOf       int64
+	Trigger    TriggerMode
 	UpdatedAt  int64
+}
+
+type RealtimeView struct {
+	Current   marketmodel.Kline
+	Indicator IndicatorView
+	Price     PriceView
 }
 
 type TimeframeSnapshot struct {
@@ -228,6 +249,13 @@ type Context struct {
 }
 
 type Decision struct {
-	Target  Target
-	Results []Result
+	Target   Target
+	Results  []Result
+	Failures []StrategyFailure
+}
+
+type StrategyFailure struct {
+	StrategyName   string
+	Error          string
+	DurationMillis int64
 }

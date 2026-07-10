@@ -24,8 +24,8 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	sort.SliceStable(ordered, func(i int, j int) bool {
 		return ordered[i].OpenTime < ordered[j].OpenTime
 	})
-	if len(ordered) > defaultLookback {
-		ordered = ordered[len(ordered)-defaultLookback:]
+	if len(ordered) > DefaultLookback {
+		ordered = ordered[len(ordered)-DefaultLookback:]
 	}
 
 	points := make([]point, 0, len(ordered))
@@ -36,7 +36,7 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	ctx := &analysisContext{
 		values: map[string]string{
 			"window_sample_count": strconv.Itoa(len(points)),
-			"window_lookback":     strconv.Itoa(defaultLookback),
+			"window_lookback":     strconv.Itoa(DefaultLookback),
 		},
 		signals: map[string]string{
 			"window_version": Version,

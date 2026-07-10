@@ -125,6 +125,43 @@ trade_batch_size = 100
 	}
 }
 
+func TestLoadStrategySpec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[runtime]
+run_id = "run-spec"
+
+[strategy]
+name = " SuperTrend "
+enabled = true
+
+[strategy.params]
+entry_threshold = "0.80"
+
+[data]
+exchange = "binance"
+market = "um"
+symbols = ["ETHUSDT"]
+interval = "3m"
+start_time = "2026-01-01T00:00:00Z"
+end_time = "2026-01-02T00:00:00Z"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	spec := StrategySpec(cfg)
+	if spec.Name != "supertrend" {
+		t.Fatalf("strategy spec = %#v", spec)
+	}
+	if spec.Params["entry_threshold"] != "0.80" {
+		t.Fatalf("strategy params = %#v", spec.Params)
+	}
+}
+
 func TestLoadRejectsNegativeSlippageBps(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	content := `

@@ -156,3 +156,33 @@ func TestStreamValuesUsesPayloadField(t *testing.T) {
 		t.Fatal("payload field is empty")
 	}
 }
+
+func TestDecisionFailuresRoundTripAndOldPayloadCompatibility(t *testing.T) {
+	decision := strategy.Decision{
+		Target: strategy.Target{Symbol: "ETHUSDT"},
+		Failures: []strategy.StrategyFailure{{
+			StrategyName:   "broken",
+			Error:          "boom",
+			DurationMillis: 12,
+		}},
+	}
+	envelope := NewDecisionEnvelope(decision, 2000, time.Minute)
+	payload, err := EncodeDecision(envelope)
+	if err != nil {
+		t.Fatalf("EncodeDecision() error = %v", err)
+	}
+	decoded, err := DecodeDecision(payload)
+	if err != nil {
+		t.Fatalf("DecodeDecision() error = %v", err)
+	}
+	if len(decoded.Failures) != 1 || decoded.Failures[0].StrategyName != "broken" {
+		t.Fatalf("failures = %#v", decoded.Failures)
+	}
+	legacy, err := DecodeDecision(`{"target":{"Symbol":"ETHUSDT"},"results":[],"created_at":1000,"expires_at":2000}`)
+	if err != nil {
+		t.Fatalf("DecodeDecision(legacy) error = %v", err)
+	}
+	if len(legacy.Failures) != 0 {
+		t.Fatalf("legacy failures = %#v, want empty", legacy.Failures)
+	}
+}

@@ -93,6 +93,13 @@ func (r *Runner) Handle(ctx context.Context, input strategy.Context) (strategy.D
 	return r.HandleWithDegradation(ctx, input, false, "")
 }
 
+func (r *Runner) RequiredIntervals(target strategy.Target) ([]string, error) {
+	if r == nil || r.engine == nil {
+		return nil, fmt.Errorf("strategy engine is required")
+	}
+	return r.engine.RequiredIntervals(target)
+}
+
 func (r *Runner) HandleWithDegradation(
 	ctx context.Context,
 	input strategy.Context,

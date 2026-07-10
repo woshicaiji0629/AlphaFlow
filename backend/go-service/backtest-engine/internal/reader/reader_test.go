@@ -216,6 +216,62 @@ func TestReadKlinesRejectsNegativeWarmup(t *testing.T) {
 	}
 }
 
+func TestCheckDatasetReportsGapsDuplicatesAndAvailableWarmup(t *testing.T) {
+	const minute = int64(60_000)
+	item, err := New(&fakeKlineStore{klines: []marketmodel.Kline{
+		{OpenTime: 0}, {OpenTime: 0},
+		{OpenTime: 2 * minute},
+		{OpenTime: 4 * minute},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := item.CheckDataset(context.Background(), DatasetRequest{
+		Exchange: "binance", Market: "um", Symbols: []string{"ETHUSDT"}, Interval: "1m",
+		Start: 2 * minute, End: 5 * minute, WarmupBars: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := report.Series[0]
+	if report.Complete {
+		t.Fatal("complete = true, want gaps and duplicate")
+	}
+	if len(series.DuplicateOpenTimes) != 1 || series.DuplicateOpenTimes[0] != 0 {
+		t.Fatalf("duplicates = %v, want [0]", series.DuplicateOpenTimes)
+	}
+	if len(series.MissingWarmupOpenTimes) != 1 || series.MissingWarmupOpenTimes[0] != minute {
+		t.Fatalf("missing warmup = %v, want [%d]", series.MissingWarmupOpenTimes, minute)
+	}
+	if len(series.MissingTradingOpenTimes) != 1 || series.MissingTradingOpenTimes[0] != 3*minute {
+		t.Fatalf("missing trading = %v, want [%d]", series.MissingTradingOpenTimes, 3*minute)
+	}
+	if series.AvailableWarmupBars != 0 {
+		t.Fatalf("available warmup = %d, want 0", series.AvailableWarmupBars)
+	}
+	if series.LongestRunBars != 1 {
+		t.Fatalf("longest run = %d, want 1", series.LongestRunBars)
+	}
+}
+
+func TestCheckDatasetReportsCompleteSeries(t *testing.T) {
+	const minute = int64(60_000)
+	item, err := New(&fakeKlineStore{klines: datasetTestKlines(0, 5*minute, minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := item.CheckDataset(context.Background(), DatasetRequest{
+		Exchange: "binance", Market: "um", Symbols: []string{"ETHUSDT"}, Interval: "1m",
+		Start: 2 * minute, End: 5 * minute, WarmupBars: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Complete || report.Series[0].AvailableWarmupBars != 2 || report.Series[0].LongestRunBars != 5 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
 func TestReadKlinesWrapsStoreError(t *testing.T) {
 	item, err := New(&fakeKlineStore{err: errors.New("boom")})
 	if err != nil {

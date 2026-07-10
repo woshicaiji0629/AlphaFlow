@@ -11,6 +11,7 @@ import (
 	"alphaflow/go-service/pkg/marketkeys"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
+	"alphaflow/go-service/pkg/strategyframe"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -80,15 +81,8 @@ func (r *Reader) Read(ctx context.Context, target strategy.Target, intervals []s
 		}
 		snapshots[interval] = snapshot
 	}
-	timeframes := timeframesFromSnapshots(snapshots)
-	for interval, snapshot := range snapshots {
-		snapshot.Timeframes = timeframes
-		snapshots[interval] = snapshot
-	}
-	return strategy.Context{
-		Target:    target,
-		Snapshots: snapshots,
-	}, nil
+	asOf := snapshots[target.Interval].Window.CloseTime
+	return strategyframe.BuildContext(target, snapshots, asOf, strategy.TriggerOnEntryClose)
 }
 
 func normalizeIntervals(entryInterval string, intervals []string) []string {
@@ -107,66 +101,6 @@ func normalizeIntervals(entryInterval string, intervals []string) []string {
 		seen[interval] = true
 	}
 	return normalized
-}
-
-func timeframesFromSnapshots(snapshots map[string]strategy.Snapshot) map[string]strategy.TimeframeSnapshot {
-	timeframes := make(map[string]strategy.TimeframeSnapshot, len(snapshots))
-	for interval, snapshot := range snapshots {
-		timeframes[interval] = strategy.TimeframeSnapshot{
-			Interval:  interval,
-			Indicator: snapshot.Indicator,
-			Window:    snapshot.Window,
-			Health:    snapshot.Health,
-			UpdatedAt: snapshot.UpdatedAt,
-		}
-	}
-	return timeframes
-}
-
-func IndicatorViewFromSnapshot(snapshot marketmodel.IndicatorSnapshot) strategy.IndicatorView {
-	return strategy.IndicatorView{
-		OpenTime:  snapshot.OpenTime,
-		CloseTime: snapshot.CloseTime,
-		Values:    snapshot.Values,
-		Signals:   snapshot.Signals,
-		UpdatedAt: snapshot.UpdatedAt,
-	}
-}
-
-func WindowViewFromSnapshot(snapshot marketmodel.IndicatorWindowSnapshot) (strategy.IndicatorWindowView, error) {
-	fields := map[string]string{
-		"meta:open_time":  strconv.FormatInt(snapshot.OpenTime, 10),
-		"meta:close_time": strconv.FormatInt(snapshot.CloseTime, 10),
-		"meta:version":    snapshot.Version,
-		"meta:updated_at": strconv.FormatInt(snapshot.UpdatedAt, 10),
-	}
-	for key, value := range snapshot.Values {
-		fields["value:"+key] = value
-	}
-	for key, value := range snapshot.Signals {
-		fields["signal:"+key] = value
-	}
-	values, sampleCount, err := parseNumericSeries(fields)
-	if err != nil {
-		return strategy.IndicatorWindowView{}, err
-	}
-	signals, err := parseSignalSeries(fields)
-	if err != nil {
-		return strategy.IndicatorWindowView{}, err
-	}
-	return strategy.IndicatorWindowView{
-		OpenTime:    snapshot.OpenTime,
-		CloseTime:   snapshot.CloseTime,
-		Version:     snapshot.Version,
-		SampleCount: sampleCount,
-		Values:      values,
-		Signals:     signals,
-		UpdatedAt:   snapshot.UpdatedAt,
-	}, nil
-}
-
-func PriceFromRealtime(indicator strategy.IndicatorView, current marketmodel.Kline) strategy.PriceView {
-	return priceFromRealtime(indicator, current)
 }
 
 func (r *Reader) readSnapshot(
@@ -191,13 +125,23 @@ func (r *Reader) readSnapshot(
 			return strategy.Snapshot{}, err
 		}
 	}
+	var realtimeView *strategy.RealtimeView
+	if requireRealtime {
+		realtimeView = &strategy.RealtimeView{
+			Current:   current,
+			Indicator: realtime,
+			Price:     strategyframe.PriceView(realtime, current),
+		}
+	}
 	return strategy.Snapshot{
 		Target:    targetWithInterval(target, interval),
 		Current:   current,
-		Indicator: realtime,
 		Window:    window,
-		Price:     priceFromRealtime(realtime, current),
+		Price:     strategyframe.PriceView(realtime, current),
 		Health:    healthWithUpdatedAt(health, maxInt64(health.UpdatedAt, realtime.UpdatedAt, window.UpdatedAt)),
+		Realtime:  realtimeView,
+		AsOf:      window.CloseTime,
+		Trigger:   strategy.TriggerOnEntryClose,
 		UpdatedAt: maxInt64(realtime.UpdatedAt, window.UpdatedAt),
 	}, nil
 }
@@ -216,23 +160,18 @@ func (r *Reader) readWindow(ctx context.Context, target strategy.Target, interva
 	if err := checkFreshness(fields, r.now()); err != nil {
 		return strategy.IndicatorWindowView{}, fmt.Errorf("indicator window %s: %w", key, err)
 	}
-	values, sampleCount, err := parseNumericSeries(fields)
+	window, err := strategyframe.WindowView(marketmodel.IndicatorWindowSnapshot{
+		OpenTime:  intField(fields, "meta:open_time"),
+		CloseTime: intField(fields, "meta:close_time"),
+		Version:   fields["meta:version"],
+		Values:    prefixedFields(fields, "value:"),
+		Signals:   prefixedFields(fields, "signal:"),
+		UpdatedAt: intField(fields, "meta:updated_at"),
+	})
 	if err != nil {
 		return strategy.IndicatorWindowView{}, fmt.Errorf("indicator window %s: %w", key, err)
 	}
-	signals, err := parseSignalSeries(fields)
-	if err != nil {
-		return strategy.IndicatorWindowView{}, fmt.Errorf("indicator window %s: %w", key, err)
-	}
-	return strategy.IndicatorWindowView{
-		OpenTime:    intField(fields, "meta:open_time"),
-		CloseTime:   intField(fields, "meta:close_time"),
-		Version:     fields["meta:version"],
-		SampleCount: sampleCount,
-		Values:      values,
-		Signals:     signals,
-		UpdatedAt:   intField(fields, "meta:updated_at"),
-	}, nil
+	return window, nil
 }
 
 func (r *Reader) readRealtime(
@@ -331,153 +270,6 @@ func checkFreshness(fields map[string]string, now int64) error {
 	return nil
 }
 
-func parseNumericSeries(fields map[string]string) (map[string]strategy.NumericSeries, int, error) {
-	values := map[string]strategy.NumericSeries{}
-	sampleCount := 0
-	for field, value := range fields {
-		key, ok := strings.CutPrefix(field, "value:")
-		if !ok {
-			continue
-		}
-		if key == "sample_count" {
-			parsed, err := parseInt(value)
-			if err != nil {
-				return nil, 0, fmt.Errorf("parse sample_count: %w", err)
-			}
-			sampleCount = int(parsed)
-			continue
-		}
-		base, suffix := splitNumericSuffix(key)
-		series := values[base]
-		if err := applyNumericValue(&series, suffix, value); err != nil {
-			return nil, 0, fmt.Errorf("parse %s: %w", field, err)
-		}
-		values[base] = series
-	}
-	return values, sampleCount, nil
-}
-
-func splitNumericSuffix(key string) (string, string) {
-	suffixes := []string{
-		"_win_range_position_pct",
-		"_win_falling_count",
-		"_win_rising_count",
-		"_win_change_pct",
-		"_win_direction",
-		"_win_previous",
-		"_win_latest",
-		"_win_change",
-		"_win_slope",
-		"_win_min",
-		"_win_max",
-	}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(key, suffix) {
-			return strings.TrimSuffix(key, suffix), suffix
-		}
-	}
-	return key, "_win_latest"
-}
-
-func applyNumericValue(series *strategy.NumericSeries, suffix string, value string) error {
-	if suffix == "_win_direction" {
-		series.Direction = value
-		return nil
-	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return err
-	}
-	switch suffix {
-	case "_win_latest":
-		series.Latest = parsed
-	case "_win_previous":
-		series.Previous = parsed
-	case "_win_change":
-		series.Change = parsed
-	case "_win_change_pct":
-		series.ChangePct = parsed
-	case "_win_slope":
-		series.Slope = parsed
-	case "_win_rising_count":
-		series.RisingCount = int(parsed)
-	case "_win_falling_count":
-		series.FallingCount = int(parsed)
-	case "_win_min":
-		series.Minimum = parsed
-	case "_win_max":
-		series.Maximum = parsed
-	case "_win_range_position_pct":
-		series.RangePositionPct = parsed
-	default:
-		return fmt.Errorf("unsupported numeric suffix %q", suffix)
-	}
-	return nil
-}
-
-func parseSignalSeries(fields map[string]string) (map[string]strategy.SignalSeries, error) {
-	signals := map[string]strategy.SignalSeries{}
-	for field, value := range fields {
-		key, ok := strings.CutPrefix(field, "signal:")
-		if !ok {
-			continue
-		}
-		base, suffix := splitSignalSuffix(key)
-		series := signals[base]
-		if err := applySignalValue(&series, suffix, value); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", field, err)
-		}
-		signals[base] = series
-	}
-	return signals, nil
-}
-
-func splitSignalSuffix(key string) (string, string) {
-	suffixes := []string{
-		"_win_last_changed_ago",
-		"_win_stable_count",
-		"_win_previous",
-		"_win_changed",
-		"_win_latest",
-	}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(key, suffix) {
-			return strings.TrimSuffix(key, suffix), suffix
-		}
-	}
-	return key, "_win_latest"
-}
-
-func applySignalValue(series *strategy.SignalSeries, suffix string, value string) error {
-	switch suffix {
-	case "_win_latest":
-		series.Latest = value
-	case "_win_previous":
-		series.Previous = value
-	case "_win_changed":
-		parsed, err := strconv.ParseBool(value)
-		if err != nil {
-			return err
-		}
-		series.Changed = parsed
-	case "_win_stable_count":
-		parsed, err := parseInt(value)
-		if err != nil {
-			return err
-		}
-		series.StableCount = int(parsed)
-	case "_win_last_changed_ago":
-		parsed, err := parseInt(value)
-		if err != nil {
-			return err
-		}
-		series.LastChangedAgo = int(parsed)
-	default:
-		return fmt.Errorf("unsupported signal suffix %q", suffix)
-	}
-	return nil
-}
-
 func prefixedFields(fields map[string]string, prefix string) map[string]string {
 	values := map[string]string{}
 	for field, value := range fields {
@@ -508,17 +300,6 @@ func klineFromFields(target strategy.Target, interval string, fields map[string]
 		TakerBuyQuoteVolume: fields["kline:taker_buy_quote_volume"],
 		IsClosed:            boolField(fields, "kline:is_closed"),
 	}
-}
-
-func priceFromRealtime(indicator strategy.IndicatorView, current marketmodel.Kline) strategy.PriceView {
-	price := strategy.PriceView{
-		LastPrice: indicator.Values["last_price"],
-		MarkPrice: indicator.Values["mark_price"],
-	}
-	if price.LastPrice == "" {
-		price.LastPrice = current.Close
-	}
-	return price
 }
 
 func requiredIntField(fields map[string]string, key string) (int64, error) {

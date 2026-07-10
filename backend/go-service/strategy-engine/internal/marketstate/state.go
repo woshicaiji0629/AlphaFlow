@@ -9,13 +9,13 @@ import (
 	"alphaflow/go-service/pkg/marketbus"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
-	"alphaflow/go-service/strategy-engine/internal/reader"
+	"alphaflow/go-service/pkg/strategyframe"
 )
 
 type Options struct {
-	Now              func() int64
-	MaxMessageAge    time.Duration
-	RealtimeStaleAge time.Duration
+	Now               func() int64
+	MaxMessageAge     time.Duration
+	RealtimeStaleAge  time.Duration
 	ClosedStaleFactor int64
 }
 
@@ -27,12 +27,13 @@ type Store struct {
 }
 
 type intervalState struct {
-	target    strategy.Target
-	current   marketmodel.Kline
-	indicator strategy.IndicatorView
-	window    strategy.IndicatorWindowView
-	health    strategy.HealthView
-	updatedAt int64
+	target            strategy.Target
+	current           marketmodel.Kline
+	closedIndicator   strategy.IndicatorView
+	realtimeIndicator strategy.IndicatorView
+	window            strategy.IndicatorWindowView
+	health            strategy.HealthView
+	updatedAt         int64
 }
 
 func New(options Options) *Store {
@@ -65,12 +66,13 @@ func (s *Store) Seed(input strategy.Context) {
 			target.Interval = interval
 		}
 		s.items[stateKey(target)] = intervalState{
-			target:    target,
-			current:   snapshot.Current,
-			indicator: snapshot.Indicator,
-			window:    snapshot.Window,
-			health:    snapshot.Health,
-			updatedAt: snapshot.UpdatedAt,
+			target:            target,
+			current:           snapshot.Current,
+			closedIndicator:   snapshot.Indicator,
+			realtimeIndicator: snapshot.Indicator,
+			window:            snapshot.Window,
+			health:            snapshot.Health,
+			updatedAt:         snapshot.UpdatedAt,
 		}
 	}
 }
@@ -114,14 +116,6 @@ func (s *Store) BuildContext(target strategy.Target, intervals []string) (strate
 				itemTarget.Interval,
 			)
 		}
-		if interval == target.Interval && item.indicator.UpdatedAt == 0 {
-			return strategy.Context{}, false, "", fmt.Errorf("realtime indicator missing for %s/%s/%s/%s",
-				itemTarget.Exchange,
-				itemTarget.Market,
-				itemTarget.Symbol,
-				itemTarget.Interval,
-			)
-		}
 		if item.window.UpdatedAt == 0 {
 			return strategy.Context{}, false, "", fmt.Errorf("closed window missing for %s/%s/%s/%s",
 				itemTarget.Exchange,
@@ -137,15 +131,16 @@ func (s *Store) BuildContext(target strategy.Target, intervals []string) (strate
 		item.target = itemTarget
 		snapshots[interval] = snapshotFromState(item, interval == target.Interval)
 	}
-	timeframes := timeframesFromSnapshots(snapshots)
-	for interval, snapshot := range snapshots {
-		snapshot.Timeframes = timeframes
-		snapshots[interval] = snapshot
+	context, err := strategyframe.BuildContext(
+		target,
+		snapshots,
+		snapshots[target.Interval].Window.CloseTime,
+		strategy.TriggerOnEntryClose,
+	)
+	if err != nil {
+		return strategy.Context{}, false, "", err
 	}
-	return strategy.Context{
-		Target:    target,
-		Snapshots: snapshots,
-	}, degraded, strings.Join(reasons, "; "), nil
+	return context, degraded, strings.Join(reasons, "; "), nil
 }
 
 func (s *Store) validateFreshMessage(envelope marketbus.SnapshotEnvelope) error {
@@ -166,7 +161,8 @@ func (s *Store) validateFreshMessage(envelope marketbus.SnapshotEnvelope) error 
 
 func (s *Store) degradedReason(item intervalState, requireRealtime bool) string {
 	now := s.now()
-	if requireRealtime && item.indicator.UpdatedAt+s.options.RealtimeStaleAge.Milliseconds() < now {
+	if requireRealtime && item.realtimeIndicator.UpdatedAt > 0 &&
+		item.realtimeIndicator.UpdatedAt+s.options.RealtimeStaleAge.Milliseconds() < now {
 		return fmt.Sprintf("realtime stale for %s/%s/%s/%s",
 			item.target.Exchange,
 			item.target.Market,
@@ -206,11 +202,16 @@ func stateFromEnvelope(envelope marketbus.SnapshotEnvelope) (intervalState, erro
 		},
 	}
 	if envelope.Indicator != nil {
-		state.indicator = reader.IndicatorViewFromSnapshot(*envelope.Indicator)
-		state.updatedAt = maxInt64(state.updatedAt, state.indicator.UpdatedAt)
+		indicator := strategyframe.IndicatorView(*envelope.Indicator)
+		if envelope.Type == marketbus.SnapshotTypeRealtime {
+			state.realtimeIndicator = indicator
+		} else {
+			state.closedIndicator = indicator
+		}
+		state.updatedAt = maxInt64(state.updatedAt, indicator.UpdatedAt)
 	}
 	if envelope.Window != nil {
-		window, err := reader.WindowViewFromSnapshot(*envelope.Window)
+		window, err := strategyframe.WindowView(*envelope.Window)
 		if err != nil {
 			return intervalState{}, err
 		}
@@ -226,8 +227,8 @@ func stateFromEnvelope(envelope marketbus.SnapshotEnvelope) (intervalState, erro
 
 func staleUpdate(current intervalState, next intervalState, snapshotType string) bool {
 	if snapshotType == marketbus.SnapshotTypeRealtime {
-		return next.indicator.OpenTime < current.indicator.OpenTime ||
-			(next.indicator.OpenTime == current.indicator.OpenTime && next.indicator.UpdatedAt <= current.indicator.UpdatedAt)
+		return next.realtimeIndicator.OpenTime < current.realtimeIndicator.OpenTime ||
+			(next.realtimeIndicator.OpenTime == current.realtimeIndicator.OpenTime && next.realtimeIndicator.UpdatedAt <= current.realtimeIndicator.UpdatedAt)
 	}
 	return next.window.OpenTime < current.window.OpenTime ||
 		(next.window.OpenTime == current.window.OpenTime && next.window.UpdatedAt <= current.window.UpdatedAt)
@@ -241,8 +242,11 @@ func mergeState(current intervalState, next intervalState) intervalState {
 	if next.current.Symbol != "" {
 		current.current = next.current
 	}
-	if next.indicator.UpdatedAt > 0 {
-		current.indicator = next.indicator
+	if next.closedIndicator.UpdatedAt > 0 {
+		current.closedIndicator = next.closedIndicator
+	}
+	if next.realtimeIndicator.UpdatedAt > 0 {
+		current.realtimeIndicator = next.realtimeIndicator
 	}
 	if next.window.UpdatedAt > 0 {
 		current.window = next.window
@@ -256,36 +260,25 @@ func mergeState(current intervalState, next intervalState) intervalState {
 
 func snapshotFromState(item intervalState, includeRealtime bool) strategy.Snapshot {
 	current := marketmodel.Kline{}
-	indicator := strategy.IndicatorView{}
 	price := strategy.PriceView{}
+	var realtime *strategy.RealtimeView
 	if includeRealtime {
 		current = item.current
-		indicator = item.indicator
-		price = reader.PriceFromRealtime(indicator, current)
+		price = strategyframe.PriceView(item.realtimeIndicator, current)
+		realtime = &strategy.RealtimeView{Current: current, Indicator: item.realtimeIndicator, Price: price}
 	}
 	return strategy.Snapshot{
 		Target:    item.target,
 		Current:   current,
-		Indicator: indicator,
+		Indicator: item.closedIndicator,
 		Window:    item.window,
 		Price:     price,
 		Health:    healthWithDefault(item.health),
-		UpdatedAt: maxInt64(indicator.UpdatedAt, item.window.UpdatedAt),
+		Realtime:  realtime,
+		AsOf:      item.window.CloseTime,
+		Trigger:   strategy.TriggerOnEntryClose,
+		UpdatedAt: maxInt64(item.closedIndicator.UpdatedAt, item.window.UpdatedAt),
 	}
-}
-
-func timeframesFromSnapshots(snapshots map[string]strategy.Snapshot) map[string]strategy.TimeframeSnapshot {
-	timeframes := make(map[string]strategy.TimeframeSnapshot, len(snapshots))
-	for interval, snapshot := range snapshots {
-		timeframes[interval] = strategy.TimeframeSnapshot{
-			Interval:  interval,
-			Indicator: snapshot.Indicator,
-			Window:    snapshot.Window,
-			Health:    snapshot.Health,
-			UpdatedAt: snapshot.UpdatedAt,
-		}
-	}
-	return timeframes
 }
 
 func normalizeIntervals(entryInterval string, intervals []string) []string {

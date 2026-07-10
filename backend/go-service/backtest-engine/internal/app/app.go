@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"alphaflow/go-service/backtest-engine/internal/config"
 	"alphaflow/go-service/backtest-engine/internal/reader"
@@ -35,6 +37,7 @@ type resultStore interface {
 
 var buildMarketStore = buildClickHouseMarketStore
 var buildResultStore = buildClickHouseResultStore
+var buildStrategy = strategyregistry.BuildSpec
 
 func Run(ctx context.Context, configPath string) error {
 	cfg, err := config.Load(configPath)
@@ -71,12 +74,20 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
+	strategyItem, err := buildConfiguredStrategy(cfg)
+	if err != nil {
+		return err
+	}
+	confirmIntervals, err := backtestConfirmIntervals(cfg, strategyItem)
+	if err != nil {
+		return err
+	}
 	dataset, err := klineReader.ReadDataset(ctx, reader.DatasetRequest{
 		Exchange:         cfg.Data.Exchange,
 		Market:           cfg.Data.Market,
 		Symbols:          cfg.Data.Symbols,
 		Interval:         cfg.Data.Interval,
-		ConfirmIntervals: cfg.Data.ConfirmIntervals,
+		ConfirmIntervals: confirmIntervals,
 		Start:            startTime.UnixMilli(),
 		End:              endTime.UnixMilli(),
 		WarmupBars:       cfg.Data.WarmupBars,
@@ -87,29 +98,32 @@ func Run(ctx context.Context, configPath string) error {
 	slog.Info(
 		"backtest historical dataset loaded",
 		"run_id", cfg.Runtime.RunID,
-		"strategy_set", cfg.Runtime.StrategySet,
+		"strategy_set", config.StrategySpec(cfg).Name,
 		"exchange", cfg.Data.Exchange,
 		"market", cfg.Data.Market,
 		"symbols", len(cfg.Data.Symbols),
 		"interval", cfg.Data.Interval,
-		"confirm_intervals", len(cfg.Data.ConfirmIntervals),
+		"confirm_intervals", len(confirmIntervals),
 		"series", len(dataset.Series),
 		"klines", dataset.TotalKlines(),
 		"start", startTime.UnixMilli(),
 		"end_exclusive", endTime.UnixMilli(),
 		"warmup_bars", cfg.Data.WarmupBars,
 	)
-	summary, err := runStrategyBacktest(ctx, cfg, dataset)
-	if err != nil {
-		return err
+	summary, executionErr := runStrategyBacktest(ctx, cfg, dataset)
+	if executionErr != nil && summary.RunSummary.RunID == "" {
+		return executionErr
 	}
 	if err := persistBacktestResults(ctx, cfg, summary); err != nil {
+		if executionErr != nil {
+			return fmt.Errorf("persist failed backtest after %v: %w", executionErr, err)
+		}
 		return err
 	}
 	slog.Info(
-		"backtest strategy execution completed",
+		"backtest strategy execution finished",
 		"run_id", cfg.Runtime.RunID,
-		"strategy_set", cfg.Runtime.StrategySet,
+		"strategy_set", config.StrategySpec(cfg).Name,
 		"contexts", summary.Contexts,
 		"decisions", summary.Decisions,
 		"results", summary.Results,
@@ -121,6 +135,8 @@ func Run(ctx context.Context, configPath string) error {
 		"net_pnl", summary.RunSummary.NetPnL,
 		"max_drawdown", summary.RunSummary.MaxDrawdown,
 		"profit_factor", summary.RunSummary.ProfitFactor,
+		"status", summary.RunSummary.Status,
+		"failures", len(summary.Failures),
 	)
 	item, err := report.BuildBacktestReportWithInitialEquity(summary.RunSummary, report.RunStats{
 		Contexts:      summary.Contexts,
@@ -139,6 +155,9 @@ func Run(ctx context.Context, configPath string) error {
 	slog.Info("backtest report", "report", report.FormatBacktestReport(item))
 	if err := writeBacktestReportJSON(cfg.Result.ReportJSONPath, item); err != nil {
 		return err
+	}
+	if executionErr != nil {
+		return executionErr
 	}
 	return nil
 }
@@ -230,11 +249,16 @@ func saveTradesInBatches(ctx context.Context, store resultStore, trades []strate
 }
 
 func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.Dataset) (simulator.ExecutionSummary, error) {
-	item, err := strategyregistry.Build(cfg.Runtime.StrategySet)
+	spec := config.StrategySpec(cfg)
+	item, err := buildConfiguredStrategy(cfg)
 	if err != nil {
 		return simulator.ExecutionSummary{}, err
 	}
 	engine := strategy.NewEngine([]strategy.Strategy{item})
+	confirmIntervals, err := backtestConfirmIntervals(cfg, item)
+	if err != nil {
+		return simulator.ExecutionSummary{}, err
+	}
 	store := position.NewMemoryStore()
 	executor, err := simulator.NewExecutor(simulator.ExecutorOptions{
 		Engine: engine,
@@ -290,7 +314,7 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 			Dataset:          dataset,
 			Target:           target,
 			Interval:         cfg.Data.Interval,
-			ConfirmIntervals: cfg.Data.ConfirmIntervals,
+			ConfirmIntervals: confirmIntervals,
 		})
 		if err != nil {
 			return simulator.ExecutionSummary{}, err
@@ -302,17 +326,23 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		contexts = append(contexts, symbolContexts...)
 	}
 	sortBacktestContexts(contexts)
-	summary, err = executor.Execute(ctx, contexts)
-	if err != nil {
-		return simulator.ExecutionSummary{}, fmt.Errorf("execute backtest: %w", err)
+	summary, executionErr := executor.Execute(ctx, contexts)
+	events := store.Events()
+	summary.StrategyEvents = events
+	summary.Events = len(events)
+	summary.OrderFills = 0
+	for _, event := range events {
+		if event.EventType == strategy.EventTypeOrderFilled {
+			summary.OrderFills++
+		}
 	}
-	trades, err := simulator.BuildBacktestTrades(store.Events())
+	trades, err := simulator.BuildBacktestTrades(events)
 	if err != nil {
 		return simulator.ExecutionSummary{}, err
 	}
-	runSummary := simulator.BuildBacktestRunSummary(store.Events(), simulator.SummaryOptions{
+	runSummary := simulator.BuildBacktestRunSummary(events, simulator.SummaryOptions{
 		RunID:        cfg.Runtime.RunID,
-		StrategySet:  cfg.Runtime.StrategySet,
+		StrategySet:  spec.Name,
 		Exchange:     cfg.Data.Exchange,
 		Market:       cfg.Data.Market,
 		Symbols:      cfg.Data.Symbols,
@@ -320,6 +350,19 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		StartTime:    startTime.UnixMilli(),
 		EndTime:      endTime.UnixMilli(),
 	})
+	strategySpecJSON, err := json.Marshal(spec)
+	if err != nil {
+		return simulator.ExecutionSummary{}, fmt.Errorf("marshal strategy spec: %w", err)
+	}
+	if runSummary.Metadata == nil {
+		runSummary.Metadata = map[string]string{}
+	}
+	runSummary.Metadata["strategy_spec"] = string(strategySpecJSON)
+	if executionErr != nil {
+		runSummary.Status = strategy.BacktestRunStatusFailed
+		runSummary.FailureReason = executionErr.Error()
+		runSummary.Metadata["strategy_failure_count"] = fmt.Sprintf("%d", len(summary.Failures))
+	}
 	if err := store.SaveBacktestRunSummary(ctx, runSummary); err != nil {
 		return simulator.ExecutionSummary{}, err
 	}
@@ -328,7 +371,36 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 	}
 	summary.BacktestTrades = trades
 	summary.RunSummary = runSummary
+	if executionErr != nil {
+		return summary, fmt.Errorf("execute backtest: %w", executionErr)
+	}
 	return summary, nil
+}
+
+func buildConfiguredStrategy(cfg config.Config) (strategy.Strategy, error) {
+	return buildStrategy(config.StrategySpec(cfg))
+}
+
+func backtestConfirmIntervals(cfg config.Config, item strategy.Strategy) ([]string, error) {
+	target := strategy.Target{Interval: cfg.Data.Interval}
+	required, err := strategy.NewEngine([]strategy.Strategy{item}).RequiredIntervals(target)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(required)+len(cfg.Data.ConfirmIntervals))
+	intervals := make([]string, 0, len(required)+len(cfg.Data.ConfirmIntervals))
+	for _, interval := range append(required, cfg.Data.ConfirmIntervals...) {
+		interval = strings.TrimSpace(interval)
+		if interval == "" || interval == cfg.Data.Interval {
+			continue
+		}
+		if _, ok := seen[interval]; ok {
+			continue
+		}
+		seen[interval] = struct{}{}
+		intervals = append(intervals, interval)
+	}
+	return intervals, nil
 }
 
 func symbolCapabilities(cfg config.Config) map[symbolspec.Key]symbolspec.Capability {

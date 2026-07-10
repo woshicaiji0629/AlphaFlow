@@ -40,8 +40,12 @@ func (s *Strategy) Name() string {
 	return Name
 }
 
-func (s *Strategy) RequiredIntervals(target strategy.Target) []string {
-	return []string{target.Interval}
+func (s *Strategy) Requirements(target strategy.Target) strategy.Requirements {
+	return strategy.Requirements{
+		EntryInterval:    target.Interval,
+		ConfirmIntervals: []string{"5m", "10m", "15m", "30m"},
+		Trigger:          strategy.TriggerOnEntryClose,
+	}
 }
 
 func (s *Strategy) Evaluate(

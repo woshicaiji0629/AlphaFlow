@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/configutil"
+	"alphaflow/go-service/pkg/strategyspec"
 )
 
 type Config struct {
 	Runtime     RuntimeConfig      `toml:"runtime"`
+	Strategy    strategyspec.Spec  `toml:"strategy"`
 	Data        DataConfig         `toml:"data"`
 	Sizing      SizingConfig       `toml:"sizing"`
 	Fee         FeeConfig          `toml:"fee"`
@@ -196,6 +198,7 @@ func normalize(cfg *Config) {
 	cfg.ClickHouse.Password = envOrValue("ALPHAFLOW_CLICKHOUSE_PASSWORD", cfg.ClickHouse.Password)
 	cfg.Runtime.RunID = strings.TrimSpace(cfg.Runtime.RunID)
 	cfg.Runtime.StrategySet = strings.TrimSpace(cfg.Runtime.StrategySet)
+	cfg.Strategy = strategyspec.Normalize(cfg.Strategy)
 	cfg.Data.Exchange = strings.ToLower(strings.TrimSpace(cfg.Data.Exchange))
 	cfg.Data.Market = strings.ToLower(strings.TrimSpace(cfg.Data.Market))
 	cfg.Data.Interval = strings.TrimSpace(cfg.Data.Interval)
@@ -252,10 +255,20 @@ func validateRuntime(cfg Config) error {
 	if cfg.Runtime.RunID == "" {
 		return fmt.Errorf("runtime.run_id cannot be empty")
 	}
-	if cfg.Runtime.StrategySet == "" {
-		return fmt.Errorf("runtime.strategy_set cannot be empty")
+	if cfg.Strategy.Name == "" && cfg.Runtime.StrategySet == "" {
+		return fmt.Errorf("strategy.name or runtime.strategy_set must be configured")
+	}
+	if cfg.Strategy.Name != "" && !cfg.Strategy.Enabled {
+		return fmt.Errorf("strategy must be enabled")
 	}
 	return nil
+}
+
+func StrategySpec(cfg Config) strategyspec.Spec {
+	if cfg.Strategy.Name != "" {
+		return cfg.Strategy
+	}
+	return strategyspec.Legacy(cfg.Runtime.StrategySet)
 }
 
 func validateData(cfg Config) error {

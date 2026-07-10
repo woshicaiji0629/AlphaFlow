@@ -10,6 +10,7 @@ import (
 	"alphaflow/go-service/pkg/configutil"
 	"alphaflow/go-service/pkg/redisclient"
 	"alphaflow/go-service/pkg/strategy"
+	"alphaflow/go-service/pkg/strategyspec"
 )
 
 type Config struct {
@@ -73,7 +74,8 @@ type PositionConfig struct {
 }
 
 type StrategiesConfig struct {
-	Enabled []string `toml:"enabled"`
+	Enabled []string            `toml:"enabled"`
+	Items   []strategyspec.Spec `toml:"items"`
 }
 
 type SizingConfig struct {
@@ -331,6 +333,9 @@ func normalize(cfg *Config) {
 	for index, name := range cfg.Strategies.Enabled {
 		cfg.Strategies.Enabled[index] = strings.ToLower(strings.TrimSpace(name))
 	}
+	for index, item := range cfg.Strategies.Items {
+		cfg.Strategies.Items[index] = strategyspec.Normalize(item)
+	}
 	cfg.Position.Scope = strings.TrimSpace(cfg.Position.Scope)
 	cfg.Position.Account = strings.TrimSpace(cfg.Position.Account)
 	cfg.MarketInput.Mode = strings.ToLower(strings.TrimSpace(cfg.MarketInput.Mode))
@@ -459,8 +464,28 @@ func validatePosition(cfg Config) error {
 }
 
 func validateStrategies(cfg Config) error {
+	if len(cfg.Strategies.Items) > 0 {
+		seen := make(map[string]struct{}, len(cfg.Strategies.Items))
+		enabled := 0
+		for index, item := range cfg.Strategies.Items {
+			if item.Name == "" {
+				return fmt.Errorf("strategies.items[%d].name cannot be empty", index)
+			}
+			if _, ok := seen[item.Name]; ok {
+				return fmt.Errorf("duplicate strategy name %q", item.Name)
+			}
+			seen[item.Name] = struct{}{}
+			if item.Enabled {
+				enabled++
+			}
+		}
+		if enabled == 0 {
+			return fmt.Errorf("at least one strategies.items entry must be enabled")
+		}
+		return nil
+	}
 	if len(cfg.Strategies.Enabled) == 0 {
-		return fmt.Errorf("strategies.enabled cannot be empty")
+		return fmt.Errorf("strategies.enabled or strategies.items cannot be empty")
 	}
 	for index, name := range cfg.Strategies.Enabled {
 		if name == "" {
@@ -468,6 +493,17 @@ func validateStrategies(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func StrategySpecs(cfg Config) []strategyspec.Spec {
+	if len(cfg.Strategies.Items) > 0 {
+		return append([]strategyspec.Spec(nil), cfg.Strategies.Items...)
+	}
+	specs := make([]strategyspec.Spec, 0, len(cfg.Strategies.Enabled))
+	for _, name := range cfg.Strategies.Enabled {
+		specs = append(specs, strategyspec.Legacy(name))
+	}
+	return specs
 }
 
 func validateTargets(cfg Config) error {

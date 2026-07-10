@@ -105,7 +105,7 @@ func buildRuntime(
 		MinOpenConfidence:    cfg.Sizing.MinOpenConfidence,
 		DisableShortExposure: cfg.Sizing.DisableShortExposure,
 	})
-	strategies, err := strategyregistry.BuildSet(cfg.Strategies.Enabled)
+	strategies, err := strategyregistry.BuildSpecs(config.StrategySpecs(cfg))
 	if err != nil {
 		return runtimeState{}, err
 	}
@@ -155,7 +155,7 @@ func (p busDecisionPublisher) PublishDecision(ctx context.Context, decision stra
 	if err != nil {
 		return err
 	}
-	slog.Info("strategy decision published", "message_id", messageID, "target", decision.Target, "results", len(decision.Results))
+	slog.Info("strategy decision published", "message_id", messageID, "target", decision.Target, "results", len(decision.Results), "failures", len(decision.Failures))
 	return nil
 }
 
@@ -293,7 +293,10 @@ func runLoop(ctx context.Context, cfg config.Config, runtime runtimeState, marke
 func seedMarketState(ctx context.Context, cfg config.Config, runtime runtimeState) error {
 	targets := config.Targets(cfg)
 	for index, target := range targets {
-		intervals := config.ConfirmIntervals(cfg.Targets[index])
+		intervals, err := targetIntervals(runtime, target, config.ConfirmIntervals(cfg.Targets[index]))
+		if err != nil {
+			return err
+		}
 		input, err := runtime.reader.Read(ctx, target, intervals)
 		if err != nil {
 			return err
@@ -345,8 +348,11 @@ func handleMarketSnapshotMessage(
 	}
 	matchedTargets := 0
 	for index, target := range targets {
-		intervals := config.ConfirmIntervals(cfg.Targets[index])
-		if !messageMatchesTarget(message.Envelope.Target, target, intervals) {
+		intervals, err := targetIntervals(runtime, target, config.ConfirmIntervals(cfg.Targets[index]))
+		if err != nil {
+			return err
+		}
+		if !messageTriggersTarget(message.Envelope, target) {
 			continue
 		}
 		matchedTargets++
@@ -356,6 +362,14 @@ func handleMarketSnapshotMessage(
 	}
 	slog.Debug("market snapshot consumed", append(attrs, "applied", true, "matched_targets", matchedTargets)...)
 	return marketBus.Ack(ctx, message.ID)
+}
+
+func messageTriggersTarget(envelope marketbus.SnapshotEnvelope, target strategy.Target) bool {
+	return envelope.Type == marketbus.SnapshotTypeClosed &&
+		strings.EqualFold(envelope.Target.Exchange, target.Exchange) &&
+		strings.EqualFold(envelope.Target.Market, target.Market) &&
+		strings.EqualFold(envelope.Target.Symbol, target.Symbol) &&
+		envelope.Target.Interval == target.Interval
 }
 
 func marketSnapshotLogAttrs(message marketbus.SnapshotMessage, now int64) []any {
@@ -395,13 +409,17 @@ func runTargetFromState(
 	if err != nil {
 		return fmt.Errorf("handle strategy target %s/%s/%s/%s: %w", target.Exchange, target.Market, target.Symbol, target.Interval, err)
 	}
+	logStrategyFailures(target, decision.Failures)
 	slog.Info("strategy target evaluated", "target", target, "results", len(decision.Results), "degraded", degraded, "degraded_reason", reason)
 	return nil
 }
 
 func runOnce(ctx context.Context, cfg config.Config, runtime runtimeState, targets []strategy.Target) error {
 	for index, target := range targets {
-		intervals := config.ConfirmIntervals(cfg.Targets[index])
+		intervals, err := targetIntervals(runtime, target, config.ConfirmIntervals(cfg.Targets[index]))
+		if err != nil {
+			return err
+		}
 		input, err := runtime.reader.Read(ctx, target, intervals)
 		if err != nil {
 			slog.Warn("read strategy snapshot skipped", "target", target, "error", err)
@@ -411,26 +429,43 @@ func runOnce(ctx context.Context, cfg config.Config, runtime runtimeState, targe
 		if err != nil {
 			return fmt.Errorf("handle strategy target %s/%s/%s/%s: %w", target.Exchange, target.Market, target.Symbol, target.Interval, err)
 		}
+		logStrategyFailures(target, decision.Failures)
 		slog.Info("strategy target evaluated", "target", target, "results", len(decision.Results))
 	}
 	return nil
 }
 
-func messageMatchesTarget(messageTarget marketbus.SnapshotTarget, target strategy.Target, intervals []string) bool {
-	if !strings.EqualFold(messageTarget.Exchange, target.Exchange) ||
-		!strings.EqualFold(messageTarget.Market, target.Market) ||
-		!strings.EqualFold(messageTarget.Symbol, target.Symbol) {
-		return false
+func logStrategyFailures(target strategy.Target, failures []strategy.StrategyFailure) {
+	for _, failure := range failures {
+		slog.Error(
+			"strategy evaluation failed",
+			"target", target,
+			"strategy", failure.StrategyName,
+			"error", failure.Error,
+			"duration_ms", failure.DurationMillis,
+		)
 	}
-	if messageTarget.Interval == target.Interval {
-		return true
+}
+
+func targetIntervals(runtime runtimeState, target strategy.Target, configured []string) ([]string, error) {
+	required, err := runtime.runner.RequiredIntervals(target)
+	if err != nil {
+		return nil, err
 	}
-	for _, interval := range intervals {
-		if messageTarget.Interval == interval {
-			return true
+	seen := make(map[string]struct{}, len(required)+len(configured))
+	intervals := make([]string, 0, len(required)+len(configured))
+	for _, interval := range append(required, configured...) {
+		interval = strings.TrimSpace(interval)
+		if interval == "" || interval == target.Interval {
+			continue
 		}
+		if _, ok := seen[interval]; ok {
+			continue
+		}
+		seen[interval] = struct{}{}
+		intervals = append(intervals, interval)
 	}
-	return false
+	return intervals, nil
 }
 
 func setupLogger(cfg config.Config) error {

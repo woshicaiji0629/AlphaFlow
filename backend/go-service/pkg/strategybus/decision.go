@@ -17,12 +17,13 @@ const (
 )
 
 type DecisionEnvelope struct {
-	Target    strategy.Target   `json:"target"`
-	Results   []strategy.Result `json:"results"`
-	TraceID   string            `json:"trace_id,omitempty"`
-	SignalID  string            `json:"signal_id,omitempty"`
-	CreatedAt int64             `json:"created_at"`
-	ExpiresAt int64             `json:"expires_at"`
+	Target    strategy.Target            `json:"target"`
+	Results   []strategy.Result          `json:"results"`
+	Failures  []strategy.StrategyFailure `json:"failures,omitempty"`
+	TraceID   string                     `json:"trace_id,omitempty"`
+	SignalID  string                     `json:"signal_id,omitempty"`
+	CreatedAt int64                      `json:"created_at"`
+	ExpiresAt int64                      `json:"expires_at"`
 }
 
 type DecisionMessage struct {
@@ -41,6 +42,7 @@ func NewDecisionEnvelope(decision strategy.Decision, createdAt int64, ttl time.D
 	return DecisionEnvelope{
 		Target:    decision.Target,
 		Results:   decision.Results,
+		Failures:  decision.Failures,
 		TraceID:   NewTraceID(decision, createdAt),
 		SignalID:  NewSignalID(decision),
 		CreatedAt: createdAt,
@@ -65,6 +67,16 @@ func NewSignalID(decision strategy.Decision) string {
 	}
 	sort.Strings(resultParts)
 	parts = append(parts, resultParts...)
+	failureParts := make([]string, 0, len(decision.Failures))
+	for _, failure := range decision.Failures {
+		failureParts = append(failureParts, strings.Join([]string{
+			"failure",
+			normalize(failure.StrategyName),
+			normalize(failure.Error),
+		}, ":"))
+	}
+	sort.Strings(failureParts)
+	parts = append(parts, failureParts...)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return "sig_" + hex.EncodeToString(sum[:16])
 }

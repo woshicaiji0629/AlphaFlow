@@ -35,19 +35,24 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 ### 策略框架
 
 - `pkg/strategy` 定义统一策略输入、输出、接口和基础 engine。
+- `pkg/strategyframe` 统一在线和回测的指标、窗口、多周期上下文组装与时间边界校验。
+- `pkg/strategyspec` 统一策略名称、启停状态和参数配置。
 - `pkg/strategyregistry` 提供策略注册和构造入口。
 - 当前已注册 `supertrend`。
 - `strategy-engine` 支持按配置启用策略集合，在线可以同时运行多个策略。
 - `strategy-engine` 启动时从 Redis 恢复特征快照，启动后消费 NATS market snapshot 更新内存市场态。
 - `strategy-engine` 会校验 market snapshot 的实时性；行情输入缺失或过期时降级，拒绝新开仓但保留退出路径。
 - 回测通常一次只回测一个策略，避免批量结果混杂；后续参数化批量回测应在回测层显式编排。
+- 多策略执行已支持错误隔离；单个策略失败不会阻断同批其他策略，失败信息会显式记录和发布。
 
 ### 回测引擎
 
 - `backtest-engine` 已具备独立入口和配置。
 - 已支持读取多 symbol、多 interval 历史 K 线数据集。
 - 已支持按入场周期滚动构造 `strategy.Snapshot`。
+- 已新增只读数据完整性检查命令，可检查重复 K 线、缺口、连续区间和可用 warmup。
 - 确认周期只使用当时已经闭合的数据，避免未来函数。
+- 指标计算已改为每个 symbol/interval 批量执行一次 `CalculateWindows`，窗口结果由 `PreparedSeries` 缓存，决策时按 `AsOf` 二分定位。
 - 已复用公共策略、仓位管理、paper broker 和 route dispatcher 执行回测。
 - 回测仓位使用独立 `bt` scope 和 run id，不写在线 paper 仓位。
 - 已生成并持久化策略事件、回测交易明细和 run 级摘要。
@@ -58,6 +63,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 同一 K 线时间点的多 symbol 批次会先统一刷新价格和账户浮盈亏，再执行该批次信号和订单，并只生成一条账户快照。
 - 已新增静态 symbol capability，回测/paper 下单前会按 base/contract 单位、contract size、数量步长和最小名义金额做数量归一化。
 - 回测/paper broker 已支持固定 bps 滑点，买入按成交价上浮、卖出按成交价下浮，并可通过 backtest-engine 配置控制。
+- 2026-07-10 使用 ETHUSDT、3 小时历史数据和 268 根 warmup 完成真实回测：优化前运行超过 8 分钟未完成，批量指标复用后约 61 秒完成；共生成 60 次决策和 60 个事件，策略均返回 `hold`，无策略异常、无成交，说明执行和持久化链路正常，零成交来自当前样板策略过滤条件。
 
 ### 仓位和执行路由
 
@@ -87,6 +93,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 在线策略引擎可以同时跑多个策略。
 - 在线策略引擎运行期主数据源是 NATS market snapshot 和内存市场态；Redis 特征 hash 是启动恢复、故障恢复、观测和兼容缓存。
 - 离线回测一般一次只回测一个策略；批量回测应显式生成多个 run。
+- 在线与回测共享指标公式、窗口语义和 `strategyframe` 上下文协议，但分别采用增量计算和批量预计算生命周期。
 - 上线或下线策略优先通过策略 registry 和配置控制，不在多个服务里分别硬编码。
 - 回测仓位应独立于在线 paper 仓位，使用 `bt` scope 和 run id 隔离。
 - `paper` / `bt` 是本地策略仓位；`testnet` / `live` 后续应按交易所账户级仓位处理，并通过内部账本做策略归因。
@@ -95,6 +102,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 - 回测还没有图表报告和结果查询 API。
 - 回测还没有参数化批量运行和策略参数配置入口。
+- 当前真实回测样本只有 3 小时，不足以评价策略有效性；当前 Supertrend 仍是链路验证用样板策略。
 - 回测爆仓当前按账户权益归零处理，还没有接入交易所维持保证金、标记价格和阶梯强平公式。
 - 回测滑点当前是固定 bps 模型，还没有按盘口深度、成交量、波动率或订单大小动态估算。
 - position-engine 还没有 `backtest` / `live` / `notify` handler。
@@ -112,10 +120,10 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 ## 建议下一步
 
-1. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
-2. 根据压测结果继续优化指标 worker 数、batch、Redis 写入路径、增量预热、指标流式状态或更细粒度缓存。
-3. 补回测图表报告和结果查询入口。
-4. 补回测参数化运行和策略配置加载。
+1. 增强策略可观测性，按决策记录主要阻断条件和关键指标值，区分引擎问题与策略过滤结果。
+2. 扩大连续历史区间做真实回测，先验证样本覆盖和信号分布，再讨论策略阈值与参数校准。
+3. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
+4. 补回测图表报告、结果查询入口和参数化批量运行。
 5. 实现 position-engine 的 notify handler。
 6. 增加交易所 symbol capability 自动同步和缓存。
 7. 明确过期策略反向退出但无 exit rule 时的 action 协议。
@@ -131,4 +139,4 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 GOCACHE=/private/tmp/alphaflow-go-cache GO111MODULE=on go test ./...
 ```
 
-最近几轮更新包含 NATS JetStream 队列替换、market-data 内部异步 backfill、清库全链路验证、指标 runner 三层拆分、指标 recent cache、指标扫描任务队列化、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态，以及 `queue-status` / `market-health` 观测命令。
+最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查和回测批量指标复用。最新一轮 `go test ./...` 已通过，真实数据回测已完成并落库。

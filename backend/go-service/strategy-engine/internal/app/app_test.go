@@ -15,6 +15,9 @@ import (
 func TestBuildRuntimeUsesConfiguredStrategy(t *testing.T) {
 	cfg := config.Config{
 		Position: config.PositionConfig{Scope: "paper"},
+		Strategies: config.StrategiesConfig{
+			Enabled: []string{"supertrend"},
+		},
 		Targets: []config.TargetConfig{{
 			Exchange: "binance",
 			Market:   "um",
@@ -37,6 +40,9 @@ func TestBuildRuntimeUsesConfiguredStrategy(t *testing.T) {
 func TestBuildRuntimeAcceptsEventStore(t *testing.T) {
 	cfg := config.Config{
 		Position: config.PositionConfig{Scope: "paper"},
+		Strategies: config.StrategiesConfig{
+			Enabled: []string{"supertrend"},
+		},
 		Targets: []config.TargetConfig{{
 			Exchange: "binance",
 			Market:   "um",
@@ -97,6 +103,27 @@ func TestMarketSnapshotLogAttrs(t *testing.T) {
 	}
 	if got := marketSnapshotLogAttrs(message, 1000); !reflect.DeepEqual(got, want) {
 		t.Fatalf("marketSnapshotLogAttrs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestMessageTriggersTargetOnlyForEntryClosedSnapshot(t *testing.T) {
+	target := strategy.Target{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"}
+	base := marketbus.SnapshotEnvelope{
+		Type:   marketbus.SnapshotTypeClosed,
+		Target: marketbus.SnapshotTarget{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"},
+	}
+	if !messageTriggersTarget(base, target) {
+		t.Fatal("entry closed snapshot should trigger target")
+	}
+	realtime := base
+	realtime.Type = marketbus.SnapshotTypeRealtime
+	if messageTriggersTarget(realtime, target) {
+		t.Fatal("entry realtime snapshot should not trigger target")
+	}
+	confirm := base
+	confirm.Target.Interval = "5m"
+	if messageTriggersTarget(confirm, target) {
+		t.Fatal("confirm closed snapshot should update state without triggering target")
 	}
 }
 

@@ -52,18 +52,18 @@ func TestReaderReadBuildsStrategyContext(t *testing.T) {
 	reader, err := New(Options{
 		Hashes: fakeHashReader{hashes: map[string]map[string]string{
 			marketkeys.IndicatorWindowKey("binance", "um", "ETHUSDT", "3m"): {
-				"meta:open_time":          "1000",
-				"meta:close_time":         "2000",
-				"meta:age_limit_ms":       "6000",
-				"meta:version":            "v1",
-				"meta:updated_at":         "3000",
-				"value:sample_count":      "20",
-				"value:macd_win_latest":   "1.5",
-				"value:macd_win_previous": "1.2",
-				"value:macd_win_slope":    "0.3",
-				"signal:trend_valid":      "true",
-				"signal:ma_win_latest":    "bull",
-				"signal:ma_win_previous":  "neutral",
+				"meta:open_time":            "1000",
+				"meta:close_time":           "2000",
+				"meta:age_limit_ms":         "6000",
+				"meta:version":              "v1",
+				"meta:updated_at":           "3000",
+				"value:window_sample_count": "20",
+				"value:macd_win_latest":     "1.5",
+				"value:macd_win_previous":   "1.2",
+				"value:macd_win_slope":      "0.3",
+				"signal:trend_valid":        "true",
+				"signal:ma_win_latest":      "bull",
+				"signal:ma_win_previous":    "neutral",
 			},
 			marketkeys.IndicatorRealtimeKey("binance", "um", "ETHUSDT", "3m"): {
 				"meta:open_time":                   "2000",
@@ -117,8 +117,8 @@ func TestReaderReadBuildsStrategyContext(t *testing.T) {
 	if snapshot.Window.Signals["ma"].Previous != "neutral" {
 		t.Fatalf("ma previous = %q, want neutral", snapshot.Window.Signals["ma"].Previous)
 	}
-	if snapshot.Indicator.Values["mark_price"] != "105.5" {
-		t.Fatalf("mark price indicator = %q, want 105.5", snapshot.Indicator.Values["mark_price"])
+	if snapshot.Realtime == nil || snapshot.Realtime.Indicator.Values["mark_price"] != "105.5" {
+		t.Fatalf("realtime indicator = %#v, want mark price 105.5", snapshot.Realtime)
 	}
 	if len(snapshot.Timeframes) != 1 {
 		t.Fatalf("len(timeframes) = %d, want 1", len(snapshot.Timeframes))

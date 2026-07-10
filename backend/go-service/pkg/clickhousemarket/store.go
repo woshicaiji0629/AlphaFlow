@@ -16,12 +16,13 @@ import (
 var clickHouseIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Options struct {
-	Addr        string
-	Database    string
-	Username    string
-	Password    string
-	DialTimeout time.Duration
-	ReadTimeout time.Duration
+	Addr           string
+	Database       string
+	Username       string
+	Password       string
+	DialTimeout    time.Duration
+	ReadTimeout    time.Duration
+	SkipSchemaInit bool
 }
 
 type Store struct {
@@ -48,9 +49,11 @@ func NewStore(ctx context.Context, options Options) (*Store, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("ping clickhouse: %w", err)
 	}
-	if err := store.initSchema(ctx); err != nil {
-		_ = store.Close()
-		return nil, err
+	if !options.SkipSchemaInit {
+		if err := store.initSchema(ctx); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	return store, nil
 }

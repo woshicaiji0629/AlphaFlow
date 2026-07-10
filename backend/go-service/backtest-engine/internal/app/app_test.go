@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"alphaflow/go-service/backtest-engine/internal/simulator"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
+	"alphaflow/go-service/pkg/strategyspec"
 	"alphaflow/go-service/pkg/symbolspec"
 )
 
@@ -67,14 +69,20 @@ output = "stdout"
 	if err := Run(context.Background(), path); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(store.requests) != 4 {
-		t.Fatalf("requests len = %d, want 4", len(store.requests))
+	if len(store.requests) != 10 {
+		t.Fatalf("requests len = %d, want 10", len(store.requests))
 	}
 	wantRequests := []reader.SeriesKey{
 		{Symbol: "ETHUSDT", Interval: "3m"},
 		{Symbol: "ETHUSDT", Interval: "5m"},
+		{Symbol: "ETHUSDT", Interval: "10m"},
+		{Symbol: "ETHUSDT", Interval: "15m"},
+		{Symbol: "ETHUSDT", Interval: "30m"},
 		{Symbol: "BTCUSDT", Interval: "3m"},
 		{Symbol: "BTCUSDT", Interval: "5m"},
+		{Symbol: "BTCUSDT", Interval: "10m"},
+		{Symbol: "BTCUSDT", Interval: "15m"},
+		{Symbol: "BTCUSDT", Interval: "30m"},
 	}
 	for index, want := range wantRequests {
 		got := store.requests[index]
@@ -97,6 +105,9 @@ output = "stdout"
 	if persistedStore.summary.RunID != "run-1" {
 		t.Fatalf("summary run id = %q, want run-1", persistedStore.summary.RunID)
 	}
+	if got := persistedStore.summary.Metadata["strategy_spec"]; !strings.Contains(got, `"name":"supertrend"`) {
+		t.Fatalf("summary strategy_spec = %q, want supertrend spec", got)
+	}
 }
 
 func TestRunWritesBacktestReportJSONWhenConfigured(t *testing.T) {
@@ -110,7 +121,7 @@ func TestRunWritesBacktestReportJSONWhenConfigured(t *testing.T) {
 	endTime := mustParseTime(t, "2026-01-01T00:30:00Z")
 	store := &fakeMarketStore{
 		klinesBySeries: map[reader.SeriesKey][]marketmodel.Kline{
-			{Symbol: "ETHUSDT", Interval: "3m"}: appTestKlines("ETHUSDT", "3m", startTime.UnixMilli(), endTime.UnixMilli(), int64(3*time.Minute/time.Millisecond)),
+			{Symbol: "ETHUSDT", Interval: "3m"}: appTestKlines("ETHUSDT", "3m", startTime.Add(-3*time.Minute).UnixMilli(), endTime.UnixMilli(), int64(3*time.Minute/time.Millisecond)),
 		},
 	}
 	buildMarketStore = func(ctx context.Context, cfg config.Config) (marketStore, error) {
@@ -131,7 +142,7 @@ market = "um"
 symbols = ["ETHUSDT"]
 interval = "3m"
 confirm_intervals = []
-warmup_bars = 0
+warmup_bars = 1
 start_time = "2026-01-01T00:15:00Z"
 end_time = "2026-01-01T00:30:00Z"
 
@@ -214,6 +225,58 @@ output = "stdout"
 	err := Run(context.Background(), path)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("Run() error = %v, want %v", err, writeErr)
+	}
+}
+
+func TestRunPersistsFailedSummaryForStrategyEvaluationError(t *testing.T) {
+	originalMarketBuilder := buildMarketStore
+	originalResultBuilder := buildResultStore
+	originalStrategyBuilder := buildStrategy
+	t.Cleanup(func() {
+		buildMarketStore = originalMarketBuilder
+		buildResultStore = originalResultBuilder
+		buildStrategy = originalStrategyBuilder
+	})
+	store := &fakeMarketStore{klinesBySeries: map[reader.SeriesKey][]marketmodel.Kline{}}
+	buildMarketStore = func(ctx context.Context, cfg config.Config) (marketStore, error) {
+		return store, nil
+	}
+	persisted := &fakeResultStore{}
+	buildResultStore = func(ctx context.Context, cfg config.Config) (resultStore, error) {
+		return persisted, nil
+	}
+	buildStrategy = func(spec strategyspec.Spec) (strategy.Strategy, error) {
+		return failingAppStrategy{}, nil
+	}
+	path := writeConfig(t, `
+[runtime]
+run_id = "failed-run"
+strategy_set = "supertrend"
+
+[data]
+exchange = "binance"
+market = "um"
+symbols = ["ETHUSDT"]
+interval = "3m"
+warmup_bars = 1
+start_time = "2026-01-01T00:15:00Z"
+end_time = "2026-01-01T00:30:00Z"
+
+[clickhouse]
+enabled = true
+
+[logging]
+output = "stdout"
+`)
+	err := Run(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("Run() error = %v, want strategy failure", err)
+	}
+	if persisted.summary.Status != strategy.BacktestRunStatusFailed || !strings.Contains(persisted.summary.FailureReason, "boom") {
+		t.Fatalf("persisted summary = %#v, want failed boom", persisted.summary)
+	}
+	if persisted.summary.Metadata["strategy_failure_count"] != "1" {
+		t.Fatalf("failure count = %q, want 1", persisted.summary.Metadata["strategy_failure_count"])
 	}
 }
 
@@ -480,6 +543,18 @@ func appTestContext(symbol string, interval string, openTime int64) strategy.Con
 	}
 }
 
+type failingAppStrategy struct{}
+
+func (failingAppStrategy) Name() string { return "failing" }
+
+func (failingAppStrategy) Requirements(target strategy.Target) strategy.Requirements {
+	return strategy.Requirements{EntryInterval: target.Interval, Trigger: strategy.TriggerOnEntryClose}
+}
+
+func (failingAppStrategy) Evaluate(context.Context, strategy.Snapshot, *strategy.Position) (strategy.Result, error) {
+	return strategy.Result{}, errors.New("boom")
+}
+
 func appTestKlines(symbol string, interval string, start int64, end int64, intervalMillis int64) []marketmodel.Kline {
 	klines := []marketmodel.Kline{}
 	for openTime := start; openTime < end; openTime += intervalMillis {
@@ -530,7 +605,15 @@ func (s *fakeMarketStore) RangeKlines(
 		End:      end,
 	}
 	s.requests = append(s.requests, s.request)
-	return s.klinesBySeries[reader.SeriesKey{Symbol: symbol, Interval: interval}], nil
+	key := reader.SeriesKey{Symbol: symbol, Interval: interval}
+	if klines, ok := s.klinesBySeries[key]; ok {
+		return klines, nil
+	}
+	intervalMillis, err := marketmodel.IntervalMillis(interval)
+	if err != nil {
+		return nil, err
+	}
+	return appTestKlines(symbol, interval, start, end, intervalMillis), nil
 }
 
 func (s *fakeMarketStore) Close() error {

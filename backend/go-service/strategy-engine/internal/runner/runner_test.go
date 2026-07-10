@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"alphaflow/go-service/pkg/execution"
@@ -13,6 +14,7 @@ import (
 type fixedStrategy struct {
 	name         string
 	result       strategy.Result
+	err          error
 	seenPosition *strategy.Position
 }
 
@@ -52,8 +54,8 @@ func (s *fixedStrategy) Name() string {
 	return s.name
 }
 
-func (s *fixedStrategy) RequiredIntervals(target strategy.Target) []string {
-	return []string{target.Interval}
+func (s *fixedStrategy) Requirements(target strategy.Target) strategy.Requirements {
+	return strategy.Requirements{EntryInterval: target.Interval, Trigger: strategy.TriggerOnEntryClose}
 }
 
 func (s *fixedStrategy) Evaluate(
@@ -65,7 +67,40 @@ func (s *fixedStrategy) Evaluate(
 		return strategy.Result{}, err
 	}
 	s.seenPosition = currentPosition
+	if s.err != nil {
+		return strategy.Result{}, s.err
+	}
 	return s.result, nil
+}
+
+func TestRunnerPublishesSuccessfulResultsAndIsolatedFailures(t *testing.T) {
+	publisher := &capturePublisher{}
+	item, err := New(Options{
+		Engine: strategy.NewEngine([]strategy.Strategy{
+			&fixedStrategy{name: "broken", err: errors.New("boom")},
+			&fixedStrategy{name: "healthy", result: strategy.Result{StrategyName: "healthy"}},
+		}),
+		Publisher:     publisher,
+		PositionStore: position.NewMemoryStore(),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	decision, err := item.Handle(context.Background(), strategy.Context{
+		Target: strategy.Target{
+			Scope: strategy.PositionScopePaper, Account: "default",
+			Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m",
+		},
+		Snapshots: map[string]strategy.Snapshot{
+			"3m": {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if !publisher.called || len(decision.Results) != 1 || len(decision.Failures) != 1 {
+		t.Fatalf("decision = %#v publisher_called=%v", decision, publisher.called)
+	}
 }
 
 func TestRunnerHandlePublishesDecisionWithoutLocalPaperDispatch(t *testing.T) {

@@ -7,6 +7,8 @@
 已经实现：
 
 - 公共策略模型和策略引擎：`pkg/strategy`
+- 在线和回测共享的上下文组装与校验：`pkg/strategyframe`
+- 稳定策略名称、启停和参数配置：`pkg/strategyspec`
 - 策略注册和构造入口：`pkg/strategyregistry`
 - 独立仓位管理、Redis 当前态、ClickHouse 事件态：`pkg/position`
 - 订单意图、执行报告和 paper broker：`pkg/execution`
@@ -19,6 +21,7 @@
 - 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - 独立回测引擎入口、历史读取、滚动 snapshot、模拟成交和结果持久化：`backtest-engine`
+- 回测数据完整性检查命令：`backtest-engine/cmd/backtest-dataset-check`
 - 独立仓位/执行路由服务：`position-engine`
 - 策略决策 NATS JetStream 协议：`pkg/strategybus`
 - 策略结果路由公共包：`pkg/strategyroute`
@@ -33,6 +36,7 @@
 - ClickHouse 回测摘要表：`backtest_run_summary`
 - paper 当前持仓 scanner：按最新价格滚动评估止盈、止损、移动止损和分批退出
 - 回测基础报告：trade 级权益曲线、逐 K 浮动权益曲线、组合权益曲线、账户资金曲线、最大回撤、胜率、profit factor 和连续亏损统计
+- 多策略错误隔离：单个策略失败不阻断同批其他策略，失败信息随 decision 单独输出
 
 尚未实现：
 
@@ -100,6 +104,24 @@ backend/go-service/pkg/strategyregistry/registry.go
 
 ```text
 supertrend
+```
+
+策略配置使用 `pkg/strategyspec.Spec` 表达稳定名称、启停状态和参数。新增策略只需要实现公共接口、注册 factory，并由在线或回测配置选择；不需要分别修改两套执行引擎。
+
+### `pkg/strategyframe`
+
+职责：
+
+- 把指标、窗口和多周期数据统一组装为 `strategy.Context`。
+- 统一在线恢复态、在线增量态和历史回放的字段转换。
+- 校验 target identity、周期完整性和 `AsOf` 时间边界。
+- 保证策略不感知数据来自在线行情还是历史数据集。
+
+关键文件：
+
+```text
+backend/go-service/pkg/strategyframe/context.go
+backend/go-service/pkg/strategyframe/view.go
 ```
 
 ### `pkg/position`
@@ -378,8 +400,8 @@ Redis indwin / indrt / health
 
 NATS market.snapshot.closed / market.snapshot.realtime
   -> strategy-engine/internal/marketstate（运行时更新）
-  -> strategy.Snapshot
-  -> strategy.Engine(Supertrend)
+  -> strategyframe.Context
+  -> strategy.Engine（配置启用的策略集合）
   -> strategy-engine/internal/runner
   -> pkg/strategybus.NATSPublisher
   -> NATS JetStream strategy.decision
@@ -392,6 +414,7 @@ NATS market.snapshot.closed / market.snapshot.realtime
 - 启动后消费 NATS market snapshot 并维护内存市场态。
 - 校验 market snapshot 实时性，旧消息不覆盖新状态。
 - 构造公共 `strategy.Snapshot`。
+- 只在策略声明的入场周期闭合事件上触发计算。
 - 调用公共 `strategy.Engine`。
 - 当行情输入缺失或 stale 时降级，拒绝开新仓但保留退出路径。
 - 发布 `strategy.Decision`。
@@ -415,8 +438,8 @@ backend/go-service/backtest-engine/cmd/backtest-engine/main.go
 ```text
 ClickHouse 历史 K 线
   -> backtest-engine/internal/reader.Dataset
-  -> backtest-engine/internal/simulator.SnapshotBuilder
-  -> strategy.Snapshot
+  -> backtest-engine/internal/simulator.PreparedSeries
+  -> strategyframe.Context
   -> pkg/strategy.Engine
   -> backtest-engine/internal/simulator.Executor
   -> pkg/positionhandler/paper + execution.PaperBroker
@@ -438,6 +461,8 @@ backend/go-service/backtest-engine/internal/simulator/
 
 - 从 ClickHouse 或文件读取历史 K 线。
 - 按入场周期时间推进，并读取当时已经闭合的确认周期数据。
+- 每个 symbol/interval 使用 `CalculateWindows` 批量计算一次指标，并缓存窗口结果。
+- 按 `AsOf` 二分定位当前可见数据，避免逐 bar 重算历史前缀。
 - 构造与在线服务一致的 `strategy.Snapshot`。
 - 调用同一套策略、仓位管理、paper broker 和 route dispatcher。
 - 用 `bt` scope 和 run id 隔离回测仓位。
@@ -445,13 +470,18 @@ backend/go-service/backtest-engine/internal/simulator/
 
 尚未完成的回测职责：
 
-- 权益曲线。
-- 图表或报告文件输出。
+- 图表化报告输出。
 - 参数化批量回测。
 - 回测结果查询 API。
 - 更完整的诊断报表，例如逐 bar 信号、错过交易原因和特征快照抽样。
 
 回测不应复用在线服务的 Redis reader，也不应写在线 paper 仓位状态。
+
+运行正式回测前可使用只读数据检查命令验证重复 K 线、缺口、连续区间和可用 warmup：
+
+```sh
+go run ./backtest-engine/cmd/backtest-dataset-check -config configs/backtest-engine.local.toml
+```
 
 ### 仓位/执行路由服务
 
@@ -503,7 +533,10 @@ strategy.Decision / strategy.Result
 type Snapshot struct {
 	Target     Target
 	Current    marketmodel.Kline
+	AsOf       int64
+	Trigger    Trigger
 	Indicator  IndicatorView
+	Realtime   *RealtimeView
 	Window     IndicatorWindowView
 	Timeframes map[string]TimeframeSnapshot
 	Price      PriceView
@@ -514,8 +547,10 @@ type Snapshot struct {
 
 设计约束：
 
-- `Current` 表示当前入场周期 K 线。
-- `Indicator` 表示当前入场周期指标。
+- `AsOf` 表示本次决策能够看到数据的时间上界。
+- `Trigger` 表示触发决策的行情事件，当前在线和回测都以入场周期闭合为主。
+- `Current`、`Indicator` 和 `Window` 表示已经闭合的入场周期数据。
+- `Realtime` 是可选的未闭合行情视图，不会替代闭合指标语义。
 - `Window` 表示已收盘 K 线对应的窗口语义。
 - `Timeframes` 只包含当时已经可用的确认周期窗口。
 - 回测构造多周期窗口时必须避免未来函数。
@@ -527,10 +562,12 @@ type Snapshot struct {
 ```go
 type Strategy interface {
 	Name() string
-	RequiredIntervals(target Target) []string
+	Requirements(target Target) Requirements
 	Evaluate(ctx context.Context, snapshot Snapshot, position *Position) (Result, error)
 }
 ```
+
+`Requirements` 声明入场周期、确认周期和触发模式。执行引擎先验证上下文满足声明，再调用策略，因此同一份策略可以直接运行在在线和回测入口。
 
 策略返回：
 
