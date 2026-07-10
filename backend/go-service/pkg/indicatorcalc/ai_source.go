@@ -153,16 +153,21 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 	allBank := make([]aiSourceRow, 0, cfg.memoryDepth*4)
 	weights := [6]float64{1, 1, 1, 1, 1, 1}
 	neural := aiSourceNeuralState{weights: [6]float64{0.01, 0.01, 0.01, 0.01, 0.01, 0.01}}
-	smoothedSource := make([]float64, 0, len(closes))
-	maValues := make([]float64, 0, len(closes))
-	stLines := make([]float64, 0, len(closes))
-	stDirections := make([]string, 0, len(closes))
-	selectedIDs := make([]int, 0, len(closes))
-	scoreHistory := make([][4]float64, 0, len(closes))
-	driveHistory := make([]float64, 0, len(closes))
-	adaptHistory := make([]float64, 0, len(closes))
+	ringSize := cfg.horizonBars + 1
+	if ringSize < 1 {
+		ringSize = 1
+	}
+	featureRing := make([][4][6]float64, ringSize)
+	validFeatureRing := make([][4]bool, ringSize)
 	var stLong, stShort float64
 	stDirection := "bull"
+	previousSTDirection := stDirection
+	currentSelected := 0
+	previousSelected := 0
+	selectedCount := 0
+	lineCount := 0
+	var sourceValue, maValue, stLine, drive, adaptMult float64
+	var scoreValues [4]float64
 	sourceEMA := newAISourceEMAState(cfg.sourceSmoothLen)
 	maEMA := newAISourceEMAState(cfg.maLength)
 	for index := range closes {
@@ -172,21 +177,23 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 		for sourceID := 0; sourceID < 4; sourceID++ {
 			features[sourceID], validFeatures[sourceID] = aiSourceFeaturesFromCache(featureCaches[sourceID], sources[sourceID], highs, lows, index, atrValue)
 		}
+		ringIndex := index % ringSize
+		featureRing[ringIndex] = features
+		validFeatureRing[ringIndex] = validFeatures
 		if sampleIndex := index - cfg.horizonBars; sampleIndex >= 0 {
 			outcome := aiSourceOutcome(closes, sampleIndex, index, atrValueAt(sampleIndex, atr14, atr14Offset), cfg.learnATRFactor)
+			sampleRingIndex := sampleIndex % ringSize
+			sampleFeatures := featureRing[sampleRingIndex]
+			sampleValidFeatures := validFeatureRing[sampleRingIndex]
 			for sourceID := 0; sourceID < 4; sourceID++ {
-				if outcome != 0 {
-					sampleFeatures, ok := aiSourceFeaturesFromCache(featureCaches[sourceID], sources[sourceID], highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
-					if ok {
-						row := aiSourceRow{features: sampleFeatures, outcome: outcome}
-						banks[sourceID] = prependAISourceRow(banks[sourceID], row, cfg.memoryDepth)
-						allBank = prependAISourceRow(allBank, row, cfg.memoryDepth*4)
-					}
+				if outcome != 0 && sampleValidFeatures[sourceID] {
+					row := aiSourceRow{features: sampleFeatures[sourceID], outcome: outcome}
+					banks[sourceID] = prependAISourceRow(banks[sourceID], row, cfg.memoryDepth)
+					allBank = prependAISourceRow(allBank, row, cfg.memoryDepth*4)
 				}
 			}
-			closeFeatures, ok := aiSourceFeaturesFromCache(featureCaches[aiSourceClose], closes, highs, lows, sampleIndex, atrValueAt(sampleIndex, atr14, atr14Offset))
-			if ok && outcome != 0 {
-				aiSourceTrainNeural(&neural, closeFeatures, outcome, cfg)
+			if sampleValidFeatures[aiSourceClose] && outcome != 0 {
+				aiSourceTrainNeural(&neural, sampleFeatures[aiSourceClose], outcome, cfg)
 			}
 		}
 		if len(allBank) >= cfg.minRows {
@@ -208,21 +215,20 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 		}
 		selected := aiSourceBestID(ranks)
 		hardSource := sources[selected][index]
-		sourceValue := sourceEMA.append(hardSource)
-		smoothedSource = append(smoothedSource, sourceValue)
-		maValue := maEMA.append(sourceValue)
-		maValues = append(maValues, maValue)
+		sourceValue = sourceEMA.append(hardSource)
+		maValue = maEMA.append(sourceValue)
 		avgAnalog := (scores[0].analog + scores[1].analog + scores[2].analog + scores[3].analog) / 4
 		avgAgree := (scores[0].agree + scores[1].agree + scores[2].agree + scores[3].agree) / 4
 		avgTight := (scores[0].tight + scores[1].tight + scores[2].tight + scores[3].tight) / 4
-		drive := clampFloat(absFloat(avgAnalog)*0.20+avgAgree*0.40+avgTight*0.40, 0, 1)
-		adaptMult := cfg.stMultiplier * (1 + cfg.stAdaptivity*(1-drive))
+		drive = clampFloat(absFloat(avgAnalog)*0.20+avgAgree*0.40+avgTight*0.40, 0, 1)
+		adaptMult = cfg.stMultiplier * (1 + cfg.stAdaptivity*(1-drive))
 		stATRValue := atrValueAt(index, stATR, stATROffset)
 		line := sourceValue
+		priorSTDirection := stDirection
 		if stATRValue > 0 {
 			upBand := sourceValue - adaptMult*stATRValue
 			downBand := sourceValue + adaptMult*stATRValue
-			if len(stLines) == 0 {
+			if lineCount == 0 {
 				stLong = upBand
 				stShort = downBand
 			} else {
@@ -248,37 +254,38 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 				line = stShort
 			}
 		}
-		stLines = append(stLines, line)
-		stDirections = append(stDirections, stDirection)
-		selectedIDs = append(selectedIDs, selected)
-		scoreHistory = append(scoreHistory, [4]float64{ranks[0], ranks[1], ranks[2], ranks[3]})
-		driveHistory = append(driveHistory, drive)
-		adaptHistory = append(adaptHistory, adaptMult)
+		stLine = line
+		previousSTDirection = priorSTDirection
+		previousSelected = currentSelected
+		currentSelected = selected
+		selectedCount++
+		scoreValues = [4]float64{ranks[0], ranks[1], ranks[2], ranks[3]}
+		lineCount++
 	}
 	last := len(closes) - 1
-	if len(maValues) == 0 || len(stLines) < 2 {
+	if lineCount < 2 {
 		return aiSourceResult{}, false
 	}
 	flip := "none"
-	if stDirections[last-1] == "bear" && stDirections[last] == "bull" {
+	if previousSTDirection == "bear" && stDirection == "bull" {
 		flip = "buy"
-	} else if stDirections[last-1] == "bull" && stDirections[last] == "bear" {
+	} else if previousSTDirection == "bull" && stDirection == "bear" {
 		flip = "sell"
 	}
 	return aiSourceResult{
-		ma:              maValues[last],
-		sourceValue:     smoothedSource[last],
-		drive:           driveHistory[last],
-		scoreOpen:       scoreHistory[last][0],
-		scoreHigh:       scoreHistory[last][1],
-		scoreLow:        scoreHistory[last][2],
-		scoreClose:      scoreHistory[last][3],
-		supertrend:      stLines[last],
-		supertrendDist:  percentDistance(closes[last], stLines[last]),
-		adaptMultiplier: adaptHistory[last],
-		selected:        aiSourceName(selectedIDs[last]),
-		changed:         len(selectedIDs) >= 2 && selectedIDs[last] != selectedIDs[last-1],
-		direction:       stDirections[last],
+		ma:              maValue,
+		sourceValue:     sourceValue,
+		drive:           drive,
+		scoreOpen:       scoreValues[0],
+		scoreHigh:       scoreValues[1],
+		scoreLow:        scoreValues[2],
+		scoreClose:      scoreValues[3],
+		supertrend:      stLine,
+		supertrendDist:  percentDistance(closes[last], stLine),
+		adaptMultiplier: adaptMult,
+		selected:        aiSourceName(currentSelected),
+		changed:         selectedCount >= 2 && currentSelected != previousSelected,
+		direction:       stDirection,
 		flip:            flip,
 		ready:           aiSourceBanksReady(banks, 20),
 	}, true

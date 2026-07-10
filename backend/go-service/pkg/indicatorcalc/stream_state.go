@@ -128,6 +128,10 @@ func buildBasicIndicatorState(highs []float64, lows []float64, closes []float64,
 }
 
 func (s *basicIndicatorState) clone() *basicIndicatorState {
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s *basicIndicatorState) cloneWithExtraCapacity(extra int) *basicIndicatorState {
 	if s == nil {
 		return nil
 	}
@@ -136,9 +140,9 @@ func (s *basicIndicatorState) clone() *basicIndicatorState {
 		smaValues:     make(map[int]float64, len(s.smaValues)),
 		ema:           make(map[int]*streamEMAState, len(s.ema)),
 		volumeSMA:     make(map[int]float64, len(s.volumeSMA)),
-		rsi14:         s.rsi14.clone(),
-		atr14:         s.atr14.clone(),
-		adx14:         s.adx14.clone(),
+		rsi14:         s.rsi14.cloneWithExtraCapacity(extra),
+		atr14:         s.atr14.cloneWithExtraCapacity(extra),
+		adx14:         s.adx14.cloneWithExtraCapacity(extra),
 		waveTrend:     s.waveTrend.clone(),
 		moneyFlow:     s.moneyFlow,
 		macd:          make(map[macdConfig]*streamMACDState, len(s.macd)),
@@ -156,7 +160,7 @@ func (s *basicIndicatorState) clone() *basicIndicatorState {
 		cloned.volumeSMA[period] = value
 	}
 	for config, state := range s.macd {
-		cloned.macd[config] = state.clone()
+		cloned.macd[config] = state.cloneWithExtraCapacity(extra)
 	}
 	return cloned
 }
@@ -346,7 +350,11 @@ func newStreamRSIState(period int) streamRSIState {
 }
 
 func (s streamRSIState) clone() streamRSIState {
-	s.series = append([]float64(nil), s.series...)
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s streamRSIState) cloneWithExtraCapacity(extra int) streamRSIState {
+	s.series = cloneSliceWithExtra(s.series, extra)
 	return s
 }
 
@@ -384,7 +392,11 @@ func newStreamATRState(period int) streamATRState {
 }
 
 func (s streamATRState) clone() streamATRState {
-	s.series = append([]float64(nil), s.series...)
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s streamATRState) cloneWithExtraCapacity(extra int) streamATRState {
+	s.series = cloneSliceWithExtra(s.series, extra)
 	return s
 }
 
@@ -412,7 +424,11 @@ func newStreamADXState(period int) streamADXState {
 }
 
 func (s streamADXState) clone() streamADXState {
-	s.dxValues = append([]float64(nil), s.dxValues...)
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s streamADXState) cloneWithExtraCapacity(extra int) streamADXState {
+	s.dxValues = cloneSliceWithExtra(s.dxValues, extra)
 	return s
 }
 
@@ -553,15 +569,19 @@ func newStreamMACDState(config macdConfig) *streamMACDState {
 }
 
 func (s *streamMACDState) clone() *streamMACDState {
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s *streamMACDState) cloneWithExtraCapacity(extra int) *streamMACDState {
 	if s == nil {
 		return nil
 	}
 	return &streamMACDState{
 		fastEMA:     *s.fastEMA.clone(),
 		slowEMA:     *s.slowEMA.clone(),
-		differences: append([]float64(nil), s.differences...),
+		differences: cloneSliceWithExtra(s.differences, extra),
 		signalEMA:   *s.signalEMA.clone(),
-		series:      append([]macdPoint(nil), s.series...),
+		series:      cloneSliceWithExtra(s.series, extra),
 	}
 }
 

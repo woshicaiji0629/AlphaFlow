@@ -217,7 +217,7 @@ func windowWithTemporaryKline(window *indicatorcalc.CalculationWindow, kline mod
 		klines[len(klines)-1] = temporary
 		return newCalculationWindowFromKlines(klines, limit)
 	}
-	window = window.Clone()
+	window = window.CloneForAppend()
 	window.Append([]model.Kline{temporary})
 	return window
 }

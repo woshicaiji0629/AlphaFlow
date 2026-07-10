@@ -101,6 +101,48 @@ func TestAISourceFeaturesFromCacheMatchesBatch(t *testing.T) {
 	}
 }
 
+func TestAISourceFeatureRingMatchesHistoricalRecalculation(t *testing.T) {
+	opens, highs, lows, closes := aiSourceTestOHLC(180)
+	sources := [][]float64{opens, highs, lows, closes}
+	caches := [4]aiSourceFeatureCache{}
+	for sourceID := range sources {
+		caches[sourceID] = newAISourceFeatureCache(sources[sourceID])
+	}
+	atrValues, ok := atrSeries(highs, lows, closes, 14)
+	if !ok {
+		t.Fatal("atrSeries returned false")
+	}
+	atrOffset := len(closes) - len(atrValues)
+	const horizon = 5
+	featureRing := make([][4][6]float64, horizon+1)
+	validRing := make([][4]bool, horizon+1)
+	for index := range closes {
+		atrValue := atrValueAt(index, atrValues, atrOffset)
+		features := [4][6]float64{}
+		valid := [4]bool{}
+		for sourceID := range sources {
+			features[sourceID], valid[sourceID] = aiSourceFeaturesFromCache(caches[sourceID], sources[sourceID], highs, lows, index, atrValue)
+		}
+		featureRing[index%(horizon+1)] = features
+		validRing[index%(horizon+1)] = valid
+		sampleIndex := index - horizon
+		if sampleIndex < 0 {
+			continue
+		}
+		for sourceID := range sources {
+			want, wantOK := aiSourceFeaturesFromCache(caches[sourceID], sources[sourceID], highs, lows, sampleIndex, atrValueAt(sampleIndex, atrValues, atrOffset))
+			got := featureRing[sampleIndex%(horizon+1)][sourceID]
+			gotOK := validRing[sampleIndex%(horizon+1)][sourceID]
+			if gotOK != wantOK {
+				t.Fatalf("source=%d index=%d valid=%v want=%v", sourceID, sampleIndex, gotOK, wantOK)
+			}
+			for featureIndex := range got {
+				assertFloatClose(t, "ring feature", got[featureIndex], want[featureIndex])
+			}
+		}
+	}
+}
+
 func TestPrependAISourceRowReusesLimitedWindow(t *testing.T) {
 	rows := make([]aiSourceRow, 0, 3)
 	for _, outcome := range []int{1, 2, 3, 4} {

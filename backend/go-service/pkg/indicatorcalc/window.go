@@ -26,21 +26,44 @@ func NewCalculationWindowFromKlines(klines []model.Kline, limit int) *Calculatio
 }
 
 func (w *CalculationWindow) Clone() *CalculationWindow {
+	return w.cloneWithExtraCapacity(0)
+}
+
+// CloneForAppend returns an isolated clone with room for one additional kline.
+// It avoids a second allocation when realtime preview immediately appends a
+// temporary closed kline.
+func (w *CalculationWindow) CloneForAppend() *CalculationWindow {
+	return w.cloneWithExtraCapacity(1)
+}
+
+func (w *CalculationWindow) cloneWithExtraCapacity(extra int) *CalculationWindow {
 	if w == nil {
 		return nil
 	}
 	return &CalculationWindow{
 		limit:    w.limit,
-		klines:   append([]model.Kline(nil), w.klines...),
-		opens:    append([]float64(nil), w.opens...),
-		highs:    append([]float64(nil), w.highs...),
-		lows:     append([]float64(nil), w.lows...),
-		closes:   append([]float64(nil), w.closes...),
-		volumes:  append([]float64(nil), w.volumes...),
+		klines:   cloneSliceWithExtra(w.klines, extra),
+		opens:    cloneSliceWithExtra(w.opens, extra),
+		highs:    cloneSliceWithExtra(w.highs, extra),
+		lows:     cloneSliceWithExtra(w.lows, extra),
+		closes:   cloneSliceWithExtra(w.closes, extra),
+		volumes:  cloneSliceWithExtra(w.volumes, extra),
 		parseErr: w.parseErr,
-		basic:    w.basic.clone(),
+		basic:    w.basic.cloneWithExtraCapacity(extra),
 		stream:   w.stream,
 	}
+}
+
+func cloneSliceWithExtra[T any](values []T, extra int) []T {
+	if extra < 0 {
+		extra = 0
+	}
+	if len(values) == 0 && extra == 0 {
+		return nil
+	}
+	cloned := make([]T, len(values), len(values)+extra)
+	copy(cloned, values)
+	return cloned
 }
 
 func (w *CalculationWindow) EnableBasicState() {
