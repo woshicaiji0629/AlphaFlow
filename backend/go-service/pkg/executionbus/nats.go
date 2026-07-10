@@ -24,6 +24,13 @@ type IntentMessage struct {
 	msg      *nats.Msg
 }
 
+type ReportMessage struct {
+	ID       string
+	Report   execution.ExecutionReport
+	Delivery int64
+	msg      *nats.Msg
+}
+
 type Options struct {
 	URL, Stream, IntentSubject, ReportSubject, Durable string
 	Batch                                              int
@@ -31,10 +38,11 @@ type Options struct {
 }
 
 type NATSBus struct {
-	conn    *nats.Conn
-	js      nats.JetStreamContext
-	sub     *nats.Subscription
-	options Options
+	conn      *nats.Conn
+	js        nats.JetStreamContext
+	intentSub *nats.Subscription
+	reportSub *nats.Subscription
+	options   Options
 }
 
 func NewNATSBus(options Options) (*NATSBus, error) {
@@ -92,14 +100,14 @@ func (b *NATSBus) ensure() error {
 }
 
 func (b *NATSBus) ReadIntents(ctx context.Context) ([]IntentMessage, error) {
-	if b.sub == nil {
+	if b.intentSub == nil {
 		sub, err := b.js.PullSubscribe(b.options.IntentSubject, b.options.Durable, nats.BindStream(b.options.Stream), nats.ManualAck(), nats.AckWait(b.options.AckWait))
 		if err != nil {
 			return nil, err
 		}
-		b.sub = sub
+		b.intentSub = sub
 	}
-	items, err := b.sub.Fetch(b.options.Batch, nats.Context(ctx), nats.MaxWait(b.options.Block))
+	items, err := b.intentSub.Fetch(b.options.Batch, nats.Context(ctx), nats.MaxWait(b.options.Block))
 	if errors.Is(err, nats.ErrTimeout) {
 		return nil, nil
 	}
@@ -123,6 +131,41 @@ func (b *NATSBus) ReadIntents(ctx context.Context) ([]IntentMessage, error) {
 	return result, nil
 }
 
+func (b *NATSBus) ReadReports(ctx context.Context, durable string) ([]ReportMessage, error) {
+	if b.reportSub == nil {
+		if durable == "" {
+			durable = "position-engine-execution"
+		}
+		sub, err := b.js.PullSubscribe(b.options.ReportSubject, durable, nats.BindStream(b.options.Stream), nats.ManualAck(), nats.AckWait(b.options.AckWait))
+		if err != nil {
+			return nil, err
+		}
+		b.reportSub = sub
+	}
+	items, err := b.reportSub.Fetch(b.options.Batch, nats.Context(ctx), nats.MaxWait(b.options.Block))
+	if errors.Is(err, nats.ErrTimeout) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ReportMessage, 0, len(items))
+	for _, item := range items {
+		var report execution.ExecutionReport
+		if err := json.Unmarshal(item.Data, &report); err != nil {
+			_ = item.Term()
+			continue
+		}
+		meta, _ := item.Metadata()
+		delivery := int64(0)
+		if meta != nil {
+			delivery = int64(meta.NumDelivered)
+		}
+		result = append(result, ReportMessage{ID: report.IntentID, Report: report, Delivery: delivery, msg: item})
+	}
+	return result, nil
+}
+
 func (b *NATSBus) PublishIntent(ctx context.Context, intent execution.OrderIntent) error {
 	return b.publish(ctx, b.options.IntentSubject, intent, intent.IntentID)
 }
@@ -141,12 +184,18 @@ func (b *NATSBus) publish(ctx context.Context, subject string, value any, id str
 func (b *NATSBus) Ack(ctx context.Context, message IntentMessage) error {
 	return message.msg.Ack(nats.Context(ctx))
 }
+func (b *NATSBus) AckReport(ctx context.Context, message ReportMessage) error {
+	return message.msg.Ack(nats.Context(ctx))
+}
 func (b *NATSBus) Close() error {
 	if b == nil || b.conn == nil {
 		return nil
 	}
-	if b.sub != nil {
-		_ = b.sub.Drain()
+	if b.intentSub != nil {
+		_ = b.intentSub.Drain()
+	}
+	if b.reportSub != nil {
+		_ = b.reportSub.Drain()
 	}
 	b.conn.Close()
 	return nil

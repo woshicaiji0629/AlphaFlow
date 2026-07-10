@@ -1,5 +1,7 @@
 package execution
 
+import "alphaflow/go-service/pkg/strategy"
+
 type OrderAction string
 
 const (
@@ -41,6 +43,7 @@ type OrderIntent struct {
 	Scope          string
 	Exchange       string
 	Account        string
+	RunID          string
 	Market         string
 	Symbol         string
 	PositionSide   string
@@ -53,6 +56,8 @@ type OrderIntent struct {
 	StopPrice      string
 	ReduceOnly     bool
 	Reason         string
+	BarOpenTime    int64
+	ExitRules      []strategy.ExitRule
 	CreatedAt      int64
 }
 

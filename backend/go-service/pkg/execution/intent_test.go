@@ -12,6 +12,7 @@ func TestBuildOrderIntentOpenLong(t *testing.T) {
 		IdempotencyKey: "idem-1",
 		Target: strategy.Target{
 			Scope:    strategy.PositionScopePaper,
+			RunID:    "run-1",
 			Exchange: "binance",
 			Market:   "um",
 			Symbol:   "ETHUSDT",
@@ -21,7 +22,9 @@ func TestBuildOrderIntentOpenLong(t *testing.T) {
 			Action:     strategy.PositionActionOpenLong,
 			TargetSize: 1.5,
 			Reason:     "open long",
+			ExitRules:  []strategy.ExitRule{{Type: strategy.ExitReasonStopLoss, TriggerPrice: "90"}},
 		},
+		BarOpenTime:    120,
 		ReferencePrice: "100.5",
 		CreatedAt:      123,
 	})
@@ -40,6 +43,9 @@ func TestBuildOrderIntentOpenLong(t *testing.T) {
 	}
 	if intent.ReferencePrice != "100.5" {
 		t.Fatalf("reference price = %q, want 100.5", intent.ReferencePrice)
+	}
+	if intent.RunID != "run-1" || intent.BarOpenTime != 120 || len(intent.ExitRules) != 1 {
+		t.Fatalf("recovery context missing: %#v", intent)
 	}
 }
 

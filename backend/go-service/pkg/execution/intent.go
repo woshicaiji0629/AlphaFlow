@@ -47,6 +47,7 @@ func BuildOrderIntent(request IntentRequest) (OrderIntent, bool, error) {
 		Scope:          string(request.Target.Scope),
 		Exchange:       request.Target.Exchange,
 		Account:        request.Target.Account,
+		RunID:          request.Target.RunID,
 		Market:         request.Target.Market,
 		Symbol:         request.Target.Symbol,
 		PositionSide:   string(positionSide),
@@ -57,6 +58,8 @@ func BuildOrderIntent(request IntentRequest) (OrderIntent, bool, error) {
 		ReferencePrice: request.ReferencePrice,
 		ReduceOnly:     reduceOnly,
 		Reason:         request.Plan.Reason,
+		BarOpenTime:    request.BarOpenTime,
+		ExitRules:      append([]strategy.ExitRule(nil), request.Plan.ExitRules...),
 		CreatedAt:      request.CreatedAt,
 	}
 	return intent, true, nil
