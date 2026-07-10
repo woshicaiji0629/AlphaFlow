@@ -58,6 +58,7 @@ type OrderIntent struct {
 	Reason         string
 	BarOpenTime    int64
 	ExitRules      []strategy.ExitRule
+	TriggeredRule  *strategy.ExitRule
 	CreatedAt      int64
 }
 

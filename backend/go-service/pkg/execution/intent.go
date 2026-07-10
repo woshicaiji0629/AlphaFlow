@@ -60,6 +60,7 @@ func BuildOrderIntent(request IntentRequest) (OrderIntent, bool, error) {
 		Reason:         request.Plan.Reason,
 		BarOpenTime:    request.BarOpenTime,
 		ExitRules:      append([]strategy.ExitRule(nil), request.Plan.ExitRules...),
+		TriggeredRule:  request.Plan.TriggeredRule,
 		CreatedAt:      request.CreatedAt,
 	}
 	return intent, true, nil

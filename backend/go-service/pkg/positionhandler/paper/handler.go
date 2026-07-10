@@ -10,6 +10,7 @@ import (
 
 	"alphaflow/go-service/pkg/execution"
 	"alphaflow/go-service/pkg/position"
+	fillhandler "alphaflow/go-service/pkg/positionhandler/fill"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategyroute"
 	"alphaflow/go-service/pkg/symbolspec"
@@ -121,7 +122,7 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	if err := h.appendEvent(ctx, orderFilledEvent(input.Target, result, currentPosition, intent, report, plan, h.feeConfig, h.sizingConfig, now)); err != nil {
 		return err
 	}
-	if err := h.applyLocalFill(ctx, input.Target, result, currentPosition, intent, report, plan); err != nil {
+	if err := h.applyLocalFill(ctx, intent, report); err != nil {
 		return fmt.Errorf("apply local fill for strategy %s: %w", result.StrategyName, err)
 	}
 	if err := h.saveIntentState(ctx, intent, report, execution.IntentStatePositionApplied); err != nil {
@@ -274,62 +275,14 @@ func (h *Handler) refreshLocalPosition(
 
 func (h *Handler) applyLocalFill(
 	ctx context.Context,
-	target strategy.Target,
-	result strategy.Result,
-	currentPosition *strategy.Position,
 	intent execution.OrderIntent,
 	report execution.ExecutionReport,
-	plan *strategy.OrderPlan,
 ) error {
-	if target.Scope != strategy.PositionScopeBacktest && target.Scope != strategy.PositionScopePaper {
-		return nil
+	applier, err := fillhandler.NewApplier(h.positionStore)
+	if err != nil {
+		return err
 	}
-	if report.Status != execution.ExecutionStatusFilled {
-		return nil
-	}
-	switch intent.Action {
-	case execution.OrderActionOpen:
-		return h.positionStore.SavePosition(ctx, strategy.Position{
-			Scope:        target.Scope,
-			RunID:        target.RunID,
-			Exchange:     target.Exchange,
-			Market:       target.Market,
-			Symbol:       target.Symbol,
-			Account:      target.Account,
-			StrategyName: result.StrategyName,
-			Mode:         strategy.ExchangePositionModeNet,
-			PositionSide: strategy.ExchangePositionSide(intent.PositionSide),
-			Side:         positionSideFromIntent(intent),
-			Size:         report.FilledQuantity,
-			InitialSize:  report.FilledQuantity,
-			EntryPrice:   report.AveragePrice,
-			HighestPrice: report.AveragePrice,
-			LowestPrice:  report.AveragePrice,
-			ExitRules:    result.ExitRules,
-			EntryTime:    report.UpdatedAt,
-			EntryReason:  intent.Reason,
-			UpdatedAt:    report.UpdatedAt,
-		})
-	case execution.OrderActionClose:
-		return h.positionStore.DeletePosition(ctx, positionKey(target, result.StrategyName))
-	case execution.OrderActionReduce:
-		if currentPosition == nil {
-			return nil
-		}
-		remaining := currentPosition.Size - report.FilledQuantity
-		if remaining <= 0 {
-			return h.positionStore.DeletePosition(ctx, positionKey(target, result.StrategyName))
-		}
-		updated := *currentPosition
-		updated.Size = remaining
-		updated.UpdatedAt = report.UpdatedAt
-		if plan != nil && plan.TriggeredRule != nil {
-			updated.ExitRules = removeExitRule(updated.ExitRules, *plan.TriggeredRule)
-		}
-		return h.positionStore.SavePosition(ctx, updated)
-	default:
-		return nil
-	}
+	return applier.Apply(ctx, intent, report)
 }
 
 func positionKey(target strategy.Target, strategyName string) position.Key {
@@ -343,13 +296,6 @@ func positionKey(target strategy.Target, strategyName string) position.Key {
 		StrategyName: strategyName,
 		PositionSide: strategy.ExchangePositionSideNet,
 	}
-}
-
-func positionSideFromIntent(intent execution.OrderIntent) strategy.PositionSide {
-	if intent.PositionSide == string(strategy.ExchangePositionSideShort) {
-		return strategy.PositionSideShort
-	}
-	return strategy.PositionSideLong
 }
 
 func signalEvent(target strategy.Target, result strategy.Result, now int64) strategy.StrategyEvent {
@@ -571,22 +517,6 @@ func normalizedRebatePct(value float64) float64 {
 		return 100
 	}
 	return value
-}
-
-func removeExitRule(rules []strategy.ExitRule, triggered strategy.ExitRule) []strategy.ExitRule {
-	for index, rule := range rules {
-		if exitRuleEqual(rule, triggered) {
-			return append(append([]strategy.ExitRule{}, rules[:index]...), rules[index+1:]...)
-		}
-	}
-	return rules
-}
-
-func exitRuleEqual(left strategy.ExitRule, right strategy.ExitRule) bool {
-	return left.Type == right.Type &&
-		left.Reason == right.Reason &&
-		left.TriggerPrice == right.TriggerPrice &&
-		left.SizePct == right.SizePct
 }
 
 func parseFloat(value string) (float64, bool) {
