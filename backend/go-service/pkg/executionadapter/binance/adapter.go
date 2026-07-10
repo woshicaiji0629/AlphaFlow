@@ -121,11 +121,31 @@ func (a *Adapter) Positions(ctx context.Context) ([]strategy.Position, error) {
 	}
 	return result, nil
 }
-func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.ExecutionReport, error) {
-	return execution.ExecutionReport{}, fmt.Errorf("binance trading is not enabled")
+func (a *Adapter) Execute(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, error) {
+	if err := executionadapter.EnsureTradingEnabled(a.account); err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	if intent.Quantity <= 0 {
+		return execution.ExecutionReport{}, fmt.Errorf("quantity must be positive")
+	}
+	query := map[string]string{"symbol": intent.Symbol, "side": strings.ToUpper(string(intent.Side)), "type": "MARKET", "quantity": strconv.FormatFloat(intent.Quantity, 'f', -1, 64), "newClientOrderId": executionadapter.ClientOrderID("af-", intent.IntentID, 36), "newOrderRespType": "RESULT"}
+	if a.account.PositionMode == executionaccount.PositionModeHedge {
+		query["positionSide"] = strings.ToUpper(intent.PositionSide)
+	} else if intent.ReduceOnly {
+		query["reduceOnly"] = "true"
+	}
+	body, err := a.signedRequest(ctx, http.MethodPost, "/fapi/v1/order", query)
+	if err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	return decodeOrderReport(body, intent.IntentID)
 }
-func (a *Adapter) CancelOrder(context.Context, string, string) error {
-	return fmt.Errorf("binance trading is not enabled")
+func (a *Adapter) CancelOrder(ctx context.Context, symbol string, intentID string) error {
+	if err := executionadapter.EnsureTradingEnabled(a.account); err != nil {
+		return err
+	}
+	_, err := a.signedRequest(ctx, http.MethodDelete, "/fapi/v1/order", map[string]string{"symbol": symbol, "origClientOrderId": executionadapter.ClientOrderID("af-", intentID, 36)})
+	return err
 }
 func (a *Adapter) OpenOrders(ctx context.Context, symbol string) ([]execution.ExchangeOrder, error) {
 	query := map[string]string{}
@@ -192,7 +212,7 @@ func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.Symb
 	return execution.SymbolCapability{}, fmt.Errorf("binance symbol %s missing", symbol)
 }
 func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
-	body, err := a.signedGet(ctx, "/fapi/v1/order", map[string]string{"symbol": intent.Symbol, "origClientOrderId": intent.IntentID})
+	body, err := a.signedGet(ctx, "/fapi/v1/order", map[string]string{"symbol": intent.Symbol, "origClientOrderId": executionadapter.ClientOrderID("af-", intent.IntentID, 36)})
 	if err != nil {
 		return execution.ExecutionReport{}, false, err
 	}
@@ -210,6 +230,9 @@ func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (ex
 	return execution.ExecutionReport{IntentID: intent.IntentID, ExchangeOrderID: strconv.FormatInt(row.OrderID, 10), Status: status, FilledQuantity: quantity, AveragePrice: row.AvgPrice, UpdatedAt: row.UpdateTime}, true, nil
 }
 func (a *Adapter) signedGet(ctx context.Context, path string, query map[string]string) ([]byte, error) {
+	return a.signedRequest(ctx, http.MethodGet, path, query)
+}
+func (a *Adapter) signedRequest(ctx context.Context, method string, path string, query map[string]string) ([]byte, error) {
 	values := url.Values{}
 	for key, value := range query {
 		values.Set(key, value)
@@ -219,7 +242,7 @@ func (a *Adapter) signedGet(ctx context.Context, path string, query map[string]s
 	mac := hmac.New(sha256.New, []byte(a.credential.APISecret))
 	_, _ = mac.Write([]byte(values.Encode()))
 	values.Set("signature", hex.EncodeToString(mac.Sum(nil)))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+path+"?"+values.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+path+"?"+values.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +252,21 @@ func (a *Adapter) signedGet(ctx context.Context, path string, query map[string]s
 		return nil, fmt.Errorf("binance %s: %w", path, err)
 	}
 	return body, nil
+}
+
+func decodeOrderReport(body []byte, intentID string) (execution.ExecutionReport, error) {
+	var row struct {
+		OrderID     int64  `json:"orderId"`
+		Status      string `json:"status"`
+		ExecutedQty string `json:"executedQty"`
+		AvgPrice    string `json:"avgPrice"`
+		UpdateTime  int64  `json:"updateTime"`
+	}
+	if err := json.Unmarshal(body, &row); err != nil {
+		return execution.ExecutionReport{}, fmt.Errorf("decode binance order: %w", err)
+	}
+	quantity, _ := strconv.ParseFloat(row.ExecutedQty, 64)
+	return execution.ExecutionReport{IntentID: intentID, ExchangeOrderID: strconv.FormatInt(row.OrderID, 10), Status: mapStatus(row.Status), FilledQuantity: quantity, AveragePrice: row.AvgPrice, UpdatedAt: row.UpdateTime}, nil
 }
 
 func (a *Adapter) publicGet(ctx context.Context, path string, query map[string]string) ([]byte, error) {

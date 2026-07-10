@@ -1,6 +1,7 @@
 package bitget
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -120,7 +121,7 @@ func (a *Adapter) Positions(ctx context.Context) ([]strategy.Position, error) {
 	return positions, nil
 }
 func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
-	body, err := a.get(ctx, "/api/v2/mix/order/detail", map[string]string{"symbol": intent.Symbol, "productType": "USDT-FUTURES", "clientOid": intent.IntentID})
+	body, err := a.get(ctx, "/api/v2/mix/order/detail", map[string]string{"symbol": intent.Symbol, "productType": "USDT-FUTURES", "clientOid": executionadapter.ClientOrderID("af-", intent.IntentID, 40)})
 	if err != nil {
 		return execution.ExecutionReport{}, false, err
 	}
@@ -137,11 +138,61 @@ func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (ex
 	quantity, _ := strconv.ParseFloat(result.Data.BaseVolume, 64)
 	return execution.ExecutionReport{IntentID: intent.IntentID, ExchangeOrderID: result.Data.OrderID, Status: mapStatus(result.Data.State), FilledQuantity: quantity, AveragePrice: result.Data.PriceAvg, UpdatedAt: result.Data.UTime}, true, nil
 }
-func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.ExecutionReport, error) {
-	return execution.ExecutionReport{}, fmt.Errorf("bitget trading is not enabled")
+func (a *Adapter) Execute(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, error) {
+	if err := executionadapter.EnsureTradingEnabled(a.account); err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	if intent.Quantity <= 0 {
+		return execution.ExecutionReport{}, fmt.Errorf("quantity must be positive")
+	}
+	payload := map[string]any{"symbol": intent.Symbol, "productType": "USDT-FUTURES", "marginMode": bitgetMarginMode(a.account.MarginMode), "marginCoin": "USDT", "size": strconv.FormatFloat(intent.Quantity, 'f', -1, 64), "side": string(intent.Side), "orderType": "market", "clientOid": executionadapter.ClientOrderID("af-", intent.IntentID, 40)}
+	if a.account.PositionMode == executionaccount.PositionModeHedge {
+		if intent.PositionSide == "long" {
+			payload["side"] = "buy"
+		} else {
+			payload["side"] = "sell"
+		}
+		if intent.ReduceOnly {
+			payload["tradeSide"] = "close"
+		} else {
+			payload["tradeSide"] = "open"
+		}
+	} else if intent.ReduceOnly {
+		payload["reduceOnly"] = "YES"
+	}
+	body, _ := json.Marshal(payload)
+	responseBody, err := a.request(ctx, http.MethodPost, "/api/v2/mix/order/place-order", nil, body)
+	if err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	var result response[struct {
+		OrderID string `json:"orderId"`
+	}]
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return execution.ExecutionReport{}, err
+	}
+	if result.Code != "00000" {
+		return execution.ExecutionReport{}, fmt.Errorf("bitget place order code %s: %s", result.Code, result.Msg)
+	}
+	return execution.ExecutionReport{IntentID: intent.IntentID, ExchangeOrderID: result.Data.OrderID, Status: execution.ExecutionStatusAccepted, UpdatedAt: result.RequestTime}, nil
 }
-func (a *Adapter) CancelOrder(context.Context, string, string) error {
-	return fmt.Errorf("bitget trading is not enabled")
+func (a *Adapter) CancelOrder(ctx context.Context, symbol string, intentID string) error {
+	if err := executionadapter.EnsureTradingEnabled(a.account); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"symbol": symbol, "productType": "USDT-FUTURES", "marginCoin": "USDT", "clientOid": executionadapter.ClientOrderID("af-", intentID, 40)})
+	responseBody, err := a.request(ctx, http.MethodPost, "/api/v2/mix/order/cancel-order", nil, body)
+	if err != nil {
+		return err
+	}
+	var result response[any]
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return err
+	}
+	if result.Code != "00000" {
+		return fmt.Errorf("bitget cancel order code %s: %s", result.Code, result.Msg)
+	}
+	return nil
 }
 func (a *Adapter) OpenOrders(ctx context.Context, symbol string) ([]execution.ExchangeOrder, error) {
 	query := map[string]string{"productType": "USDT-FUTURES"}
@@ -191,24 +242,28 @@ func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.Symb
 	return execution.SymbolCapability{}, fmt.Errorf("bitget symbol %s missing", symbol)
 }
 func (a *Adapter) get(ctx context.Context, path string, query map[string]string) ([]byte, error) {
+	return a.request(ctx, http.MethodGet, path, query, nil)
+}
+func (a *Adapter) request(ctx context.Context, method string, path string, query map[string]string, requestBody []byte) ([]byte, error) {
 	values := url.Values{}
 	for k, v := range query {
 		values.Set(k, v)
 	}
 	rawQuery := values.Encode()
 	timestamp := strconv.FormatInt(a.now().UnixMilli(), 10)
-	prehash := timestamp + http.MethodGet + path
+	prehash := timestamp + method + path
 	if rawQuery != "" {
 		prehash += "?" + rawQuery
 	}
+	prehash += string(requestBody)
 	mac := hmac.New(sha256.New, []byte(a.credential.APISecret))
 	_, _ = mac.Write([]byte(prehash))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+path+func() string {
+	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+path+func() string {
 		if rawQuery == "" {
 			return ""
 		}
 		return "?" + rawQuery
-	}(), nil)
+	}(), bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +271,9 @@ func (a *Adapter) get(ctx context.Context, path string, query map[string]string)
 	req.Header.Set("ACCESS-SIGN", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("ACCESS-PASSPHRASE", a.credential.Passphrase)
 	req.Header.Set("ACCESS-TIMESTAMP", timestamp)
+	if len(requestBody) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if a.account.Environment == executionaccount.EnvironmentTestnet {
 		req.Header.Set("paptrading", "1")
 	}
@@ -224,6 +282,13 @@ func (a *Adapter) get(ctx context.Context, path string, query map[string]string)
 		return nil, fmt.Errorf("bitget %s: %w", path, err)
 	}
 	return body, nil
+}
+
+func bitgetMarginMode(mode executionaccount.MarginMode) string {
+	if mode == executionaccount.MarginModeIsolated {
+		return "isolated"
+	}
+	return "crossed"
 }
 func mapStatus(v string) execution.ExecutionStatus {
 	switch v {

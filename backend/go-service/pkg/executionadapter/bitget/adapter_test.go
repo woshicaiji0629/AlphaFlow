@@ -1,12 +1,25 @@
 package bitget
 
 import (
+	"alphaflow/go-service/pkg/execution"
 	"alphaflow/go-service/pkg/executionaccount"
 	"context"
 	"net/http"
 	"testing"
 	"time"
 )
+
+func TestExecuteDemoMarketOrder(t *testing.T) {
+	client := &captureClient{body: []byte(`{"code":"00000","requestTime":200,"data":{"orderId":"o1"}}`)}
+	a, _ := New(Options{Account: executionaccount.Account{ID: "a", Exchange: "bitget", Environment: executionaccount.EnvironmentTestnet, Enabled: true, TradingEnabled: true, PositionMode: executionaccount.PositionModeOneWay, MarginMode: executionaccount.MarginModeCross}, Credential: executionaccount.Credential{APIKey: "k", APISecret: "s", Passphrase: "p"}, BaseURL: "https://example.test", HTTPClient: client})
+	report, err := a.Execute(context.Background(), execution.OrderIntent{IntentID: "intent:1", Symbol: "ETHUSDT", Side: execution.OrderSideBuy, Quantity: 1, ReduceOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.request.Method != http.MethodPost || client.request.Header.Get("paptrading") != "1" || report.ExchangeOrderID != "o1" {
+		t.Fatalf("request=%v report=%#v", client.request, report)
+	}
+}
 
 func TestDemoAccountAddsSignedHeaders(t *testing.T) {
 	client := &captureClient{body: []byte(`{"code":"00000","requestTime":123,"data":[{"marginCoin":"USDT","accountEquity":"100","available":"80","unrealizedPL":"2"}]}`)}

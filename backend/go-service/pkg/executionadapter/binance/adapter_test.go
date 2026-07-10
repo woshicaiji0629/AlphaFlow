@@ -7,8 +7,27 @@ import (
 	"testing"
 	"time"
 
+	"alphaflow/go-service/pkg/execution"
 	"alphaflow/go-service/pkg/executionaccount"
 )
+
+func TestExecuteMarketOrderWhenTradingEnabled(t *testing.T) {
+	client := &captureClient{body: []byte(`{"orderId":12,"status":"FILLED","executedQty":"1.5","avgPrice":"100","updateTime":200}`)}
+	adapter, _ := New(Options{Account: executionaccount.Account{ID: "a", Exchange: "binance", Environment: executionaccount.EnvironmentTestnet, Enabled: true, TradingEnabled: true}, Credential: executionaccount.Credential{APIKey: "k", APISecret: "s"}, BaseURL: "https://example.test", HTTPClient: client})
+	report, err := adapter.Execute(context.Background(), execution.OrderIntent{IntentID: "intent:long:value", Symbol: "ETHUSDT", Side: execution.OrderSideBuy, PositionSide: "long", Type: execution.OrderTypeMarket, Quantity: 1.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.request.Method != http.MethodPost || client.request.URL.Query().Get("newClientOrderId") == "" || report.Status != execution.ExecutionStatusFilled || report.FilledQuantity != 1.5 {
+		t.Fatalf("request=%v report=%#v", client.request, report)
+	}
+}
+func TestExecuteRejectsDisabledTrading(t *testing.T) {
+	adapter, _ := New(Options{Account: executionaccount.Account{ID: "a", Exchange: "binance", Environment: executionaccount.EnvironmentTestnet}, Credential: executionaccount.Credential{APIKey: "k", APISecret: "s"}})
+	if _, err := adapter.Execute(context.Background(), execution.OrderIntent{Quantity: 1}); err == nil {
+		t.Fatal("Execute() error=nil")
+	}
+}
 
 func TestAccountSignsPrivateRequest(t *testing.T) {
 	client := &captureClient{body: []byte(`[{"asset":"USDT","balance":"100","availableBalance":"80","crossUnPnl":"2","updateTime":123}]`)}
