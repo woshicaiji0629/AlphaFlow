@@ -1,0 +1,86 @@
+[nats]
+url = "nats://localhost:4222"
+stream = "ALPHAFLOW_EXECUTION"
+intent_subject = "execution.intent"
+report_subject = "execution.report"
+durable = "execution-engine-live"
+block = "1s"
+ack_wait = "30s"
+batch = 10
+
+[redis]
+addr = "localhost:6380"
+password = ""
+db = 0
+pool_size = 20
+min_idle_conns = 5
+
+[execution]
+mode = "live"
+
+[[accounts]]
+id = "weex-live"
+name = "WEEX Live"
+exchange = "weex"
+environment = "live"
+market = "um"
+position_mode = "hedge"
+margin_mode = "cross"
+enabled = false
+trading_enabled = false
+live_confirmed = false
+api_key_env = "ALPHAFLOW_WEEX_LIVE_API_KEY"
+api_secret_env = "ALPHAFLOW_WEEX_LIVE_API_SECRET"
+passphrase_env = "ALPHAFLOW_WEEX_LIVE_PASSPHRASE"
+symbols = ["BTCUSDT"]
+strategies = ["supertrend"]
+margin_quote = 100
+leverage = 10
+max_position_notional = 1000
+max_margin_usage_pct = 0.10
+disable_short = false
+
+[[accounts]]
+id = "deepcoin-live"
+name = "Deepcoin Live"
+exchange = "deepcoin"
+environment = "live"
+market = "um"
+position_mode = "hedge"
+margin_mode = "cross"
+enabled = false
+trading_enabled = false
+live_confirmed = false
+api_key_env = "ALPHAFLOW_DEEPCOIN_LIVE_API_KEY"
+api_secret_env = "ALPHAFLOW_DEEPCOIN_LIVE_API_SECRET"
+passphrase_env = "ALPHAFLOW_DEEPCOIN_LIVE_PASSPHRASE"
+symbols = ["BTC-USDT-SWAP"]
+symbol_map = { BTCUSDT = "BTC-USDT-SWAP" }
+strategies = ["supertrend"]
+margin_quote = 100
+leverage = 10
+max_position_notional = 1000
+max_margin_usage_pct = 0.10
+disable_short = false
+
+[[accounts]]
+id = "hotcoin-live"
+name = "Hotcoin Live"
+exchange = "hotcoin"
+environment = "live"
+market = "um"
+position_mode = "hedge"
+margin_mode = "cross"
+enabled = false
+trading_enabled = false
+live_confirmed = false
+api_key_env = "ALPHAFLOW_HOTCOIN_LIVE_API_KEY"
+api_secret_env = "ALPHAFLOW_HOTCOIN_LIVE_API_SECRET"
+symbols = ["btcusdt"]
+symbol_map = { BTCUSDT = "btcusdt" }
+strategies = ["supertrend"]
+margin_quote = 100
+leverage = 10
+max_position_notional = 1000
+max_margin_usage_pct = 0.10
+disable_short = false

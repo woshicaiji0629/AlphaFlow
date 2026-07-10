@@ -38,13 +38,12 @@
 - 回测基础报告：trade 级权益曲线、逐 K 浮动权益曲线、组合权益曲线、账户资金曲线、最大回撤、胜率、profit factor 和连续亏损统计
 - 多策略错误隔离：单个策略失败不阻断同批其他策略，失败信息随 decision 单独输出
 
-尚未实现：
+尚未完成：
 
-- 真实交易所 order executor
+- 真实交易所凭证端到端联调和小额订单验收
 - 图表化回测报告、参数化批量回测和结果查询入口
-- `testnet` / `live` / `notify` route handler
-- 交易所账户级风控和 symbol 下单能力换算
-- 订单服务级幂等落库和重复订单意图拦截
+- 独立 backtest / notify route handler
+- 完整账户级实时风控
 - HTTP 健康检查接口
 
 ## 目标边界
@@ -506,8 +505,10 @@ backend/go-service/position-engine/internal/config/
 strategy.Decision / strategy.Result
   -> pkg/idempotency.Store
   -> pkg/strategyroute.Dispatcher
-  -> paper handler / backtest handler / live handler / notify handler
-  -> position.Store / execution.Broker / notification sink
+  -> paper handler / testnet-live plan publisher / future backtest-notify handler
+  -> execution bus
+  -> execution-engine account subscription fan-out
+  -> exchange adapter / private state stream / REST reconciliation
 ```
 
 仓位/执行服务职责：
@@ -518,8 +519,9 @@ strategy.Decision / strategy.Result
 - 允许不同策略使用不同 sink，互不干扰。
 - 对 NATS JetStream 消息和 result-level signal 做幂等控制。
 - 对 paper 当前持仓做滚动扫描，用最新价格触发退出规则。
+- 对 testnet/live 发布账户无关仓位计划；账户的交易所、symbol 映射和 sizing 由 execution-engine 配置决定。
 
-在线和回测入口只负责产生 `strategy.Decision`，不直接决定信号最终进入 paper、实盘、回测还是通知。当前跨服务输入协议先落在 NATS JetStream 上，`position-engine` 通过 durable consumer 长驻读取 decision，并从 Redis `lp/mp` 价格 key 补最新价格上下文。处理成功后 Ack；空批次带 backoff；过期开仓类信号跳过并 Ack，过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决；处理失败的消息由 JetStream 按 ack wait 重投递，超过投递上限后进入 dead-letter subject。幂等优先使用 result-level signal id，兼容旧消息的 envelope signal id 或 message id。backtest/live/notify handler 后续补齐。
+在线和回测入口只负责产生 `strategy.Decision`。`position-engine` 通过 durable consumer 长驻读取 decision：paper route 继续使用本地仓位与 paper broker；testnet/live route 发布账户无关仓位计划。`execution-engine` 再按启用账户的策略订阅、目标交易所、symbol 映射、保证金或权益比例、杠杆、仓位上限和禁空规则生成独立账户意图。账户级意图、订单、仓位、幂等状态和错误处理互相隔离。
 
 当前 paper 持仓 scanner 使用 `position.Store.ListPositions` 读取 paper scope 当前仓位，按最新价格刷新最高价/最低价，并复用 `position.Manager.PlanWithPrice` 判断退出规则。触发后仍走既有 dispatcher 和 paper handler，因此扫描退出和策略信号退出共享同一套事件、成交和仓位更新路径。
 
@@ -1007,12 +1009,11 @@ position_side
 
 - 回测已经有历史读取、时间推进、模拟成交、交易明细、run 级摘要和基础权益曲线数据，但还没有图表化报告、参数化批量回测和结果查询 API。
 - position-engine 已接入 NATS JetStream `strategy.Decision` 输入、长驻消费、空批次 backoff、dead-letter、result-level 幂等和 paper route，并能从 Redis `lp/mp` 价格 key 补最新价格上下文；过期退出类信号会用当前持仓 exit rules 和最新价格做保守重裁决。
-- position-engine 已接入 paper 当前持仓 scanner，但还没有 backtest/live/notify handler 实现。
-- 还没有真实交易所订单服务。
-- 还没有交易所精度、张数、最小下单量换算。
-- 还没有订单服务级幂等落库和重复订单意图拦截。
+- position-engine 已接入 paper scanner 和 testnet/live 仓位计划发布，但还没有独立 backtest/notify handler。
+- execution-engine 已实现多账户路由、账户独立 sizing、交易所 capability 数量换算、客户端订单号幂等恢复、私有事件同步和 REST 对账。
+- WEEX、Deepcoin 使用私有 WebSocket；Hotcoin 官方未公开私有合约 WebSocket，因此使用按 symbol REST 对账。
+- 尚未使用真实用户凭证完成交易所端到端联调。
 - 还没有 HTTP 健康检查接口。
-- `testnet` / `live` handler 尚未接入真实交易所账户级仓位。
 - ClickHouse 表通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
 - 当前 PnL 估算适用于模拟和回测；实盘以交易所成交和手续费为准。
 
@@ -1023,8 +1024,7 @@ position_side
 1. 补回测权益曲线、报告输出和结果查询入口。
 2. 补回测参数化运行和策略配置加载。
 3. 实现 position-engine 的 notify handler。
-4. 增加交易所 symbol capability 缓存和数量换算。
+4. 增加交易所 symbol capability 缓存。
 5. 为过期策略反向退出但无 exit rule 的场景补明确 action 协议。
-6. 拆出 order executor 服务。
-7. 接入 testnet。
-8. 接入 live。
+6. 使用真实 demo/testnet 凭证做端到端验收。
+7. 使用最小订单做 live 安全验收。

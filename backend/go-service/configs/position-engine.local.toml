@@ -54,6 +54,16 @@ account = "default"
 enabled = true
 
 [[routes]]
+strategy = "supertrend"
+sink = "testnet"
+enabled = false
+
+[[routes]]
+strategy = "supertrend"
+sink = "live"
+enabled = false
+
+[[routes]]
 strategy = "breakout-alert"
 sink = "notify"
 notifier = "dingtalk-alpha"

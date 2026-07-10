@@ -65,8 +65,8 @@ func (c Credential) Validate(exchange string) error {
 	if strings.TrimSpace(c.APIKey) == "" || strings.TrimSpace(c.APISecret) == "" {
 		return fmt.Errorf("api key and secret are required")
 	}
-	if strings.EqualFold(exchange, "bitget") && strings.TrimSpace(c.Passphrase) == "" {
-		return fmt.Errorf("bitget passphrase is required")
+	if (strings.EqualFold(exchange, "bitget") || strings.EqualFold(exchange, "weex") || strings.EqualFold(exchange, "deepcoin")) && strings.TrimSpace(c.Passphrase) == "" {
+		return fmt.Errorf("%s passphrase is required", strings.ToLower(exchange))
 	}
 	return nil
 }

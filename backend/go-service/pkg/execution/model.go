@@ -114,6 +114,7 @@ type SymbolCapability struct {
 	MaxLeverage  string
 	MaxOrderQty  string
 	ContractSize string
+	QuantityUnit string
 	UpdatedAt    int64
 }
 

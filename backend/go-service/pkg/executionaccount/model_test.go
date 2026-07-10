@@ -30,3 +30,11 @@ func TestBitgetRequiresPassphrase(t *testing.T) {
 		t.Fatal("Validate() error=nil")
 	}
 }
+
+func TestPassphraseExchangesRequirePassphrase(t *testing.T) {
+	for _, exchange := range []string{"bitget", "weex", "deepcoin"} {
+		if err := (Credential{APIKey: "k", APISecret: "s"}).Validate(exchange); err == nil {
+			t.Fatalf("Validate(%s) error=nil", exchange)
+		}
+	}
+}

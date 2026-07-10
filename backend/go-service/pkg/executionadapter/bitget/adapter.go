@@ -70,6 +70,9 @@ func Register(r *executionadapter.Registry) error {
 	})
 }
 func (a *Adapter) TestConnection(ctx context.Context) error { _, err := a.Account(ctx); return err }
+func (a *Adapter) ClientOrderID(intentID string) string {
+	return executionadapter.ClientOrderID("af-", intentID, 40)
+}
 func (a *Adapter) Account(ctx context.Context) (execution.AccountSnapshot, error) {
 	body, err := a.get(ctx, "/api/v2/mix/account/accounts", map[string]string{"productType": "USDT-FUTURES"})
 	if err != nil {
@@ -236,7 +239,7 @@ func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.Symb
 	}
 	for _, row := range result.Data {
 		if row.Symbol == symbol {
-			return execution.SymbolCapability{Exchange: "bitget", Market: a.account.Market, Symbol: symbol, MinQty: row.MinTradeNum, QtyStep: row.SizeMultiplier, PriceTick: decimalStep(row.PriceEndStep, row.PricePlace), MinNotional: row.MinTradeUSDT, MaxLeverage: row.MaxLever, MaxOrderQty: row.MaxMarketOrderQty, ContractSize: "1", UpdatedAt: result.RequestTime}, nil
+			return execution.SymbolCapability{Exchange: "bitget", Market: a.account.Market, Symbol: symbol, MinQty: row.MinTradeNum, QtyStep: row.SizeMultiplier, PriceTick: decimalStep(row.PriceEndStep, row.PricePlace), MinNotional: row.MinTradeUSDT, MaxLeverage: row.MaxLever, MaxOrderQty: row.MaxMarketOrderQty, ContractSize: "1", QuantityUnit: "base", UpdatedAt: result.RequestTime}, nil
 		}
 	}
 	return execution.SymbolCapability{}, fmt.Errorf("bitget symbol %s missing", symbol)

@@ -20,7 +20,8 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 - NATS JetStream market snapshot bus，用于 `market-data -> strategy-engine` 的实时特征同步。
 - Go `strategy-engine` 在线策略服务。
 - Go `backtest-engine` 回测入口、滚动 snapshot、模拟成交和结果持久化。
-- Go `position-engine` 仓位/执行路由服务，当前已接入 paper route。
+- Go `position-engine` 仓位/执行路由服务，已接入 paper route 和 testnet/live 账户无关仓位计划发布。
+- Go `execution-engine` 订单执行服务，支持 paper、testnet、live、多账户 fan-out、交易所 REST 适配和私有状态同步。
 - 策略决策通过 NATS JetStream 从 `strategy-engine` 进入 `position-engine`。
 - 基于 Redis 的当前活跃 paper 仓位存储。
 - 基于 ClickHouse 的策略事件、回测交易明细和回测摘要。
@@ -28,7 +29,7 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 尚未作为生产模块实现：
 
 - 管理 API。
-- 真实交易所下单。
+- 真实交易所凭证端到端联调和小额实盘验收。
 - 账户级实时风控服务。
 - 前端。
 
@@ -213,8 +214,8 @@ backend/go-service/
   kline-aggregator/     # 如果聚合逻辑超出 market-data 边界，可考虑拆出
   strategy-engine/      # 已实现：在线策略引擎
   backtest-engine/      # 已实现：回测引擎
-  position-engine/      # 已实现：paper 仓位/执行路由；未来扩展 testnet/live/notify
-  order-executor/       # 未来真实订单下发和订单状态同步
+  position-engine/      # 已实现：paper 处理和 testnet/live 仓位计划发布；未来扩展 notify
+  execution-engine/     # 已实现：多账户订单执行、交易所适配、私有状态和 REST 对账
   realtime-risk/        # 未来低延迟实时风控
   stream-gateway/       # 未来 WebSocket/SSE 推送网关
 ```

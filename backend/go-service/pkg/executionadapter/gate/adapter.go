@@ -76,6 +76,9 @@ func Register(r *executionadapter.Registry) error {
 	})
 }
 func (a *Adapter) TestConnection(ctx context.Context) error { _, err := a.Account(ctx); return err }
+func (a *Adapter) ClientOrderID(intentID string) string {
+	return executionadapter.ClientOrderID("t-af-", intentID, 31)
+}
 func (a *Adapter) Account(ctx context.Context) (execution.AccountSnapshot, error) {
 	body, err := a.get(ctx, "/futures/"+a.settle+"/accounts", nil)
 	if err != nil {
@@ -234,7 +237,7 @@ func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.Symb
 	if maxOrder == "" || maxOrder == "0" {
 		maxOrder = row.OrderSizeMax
 	}
-	return execution.SymbolCapability{Exchange: "gate", Market: a.account.Market, Symbol: row.Name, MinQty: row.OrderSizeMin, QtyStep: "1", PriceTick: row.OrderPriceRound, MaxLeverage: row.LeverageMax, MaxOrderQty: maxOrder, ContractSize: row.QuantoMultiplier, UpdatedAt: int64(row.ConfigChangeTime * 1000)}, nil
+	return execution.SymbolCapability{Exchange: "gate", Market: a.account.Market, Symbol: row.Name, MinQty: row.OrderSizeMin, QtyStep: "1", PriceTick: row.OrderPriceRound, MaxLeverage: row.LeverageMax, MaxOrderQty: maxOrder, ContractSize: row.QuantoMultiplier, QuantityUnit: "contract", UpdatedAt: int64(row.ConfigChangeTime * 1000)}, nil
 }
 func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
 	order, found, err := a.findOrder(ctx, intent.Symbol, intent.IntentID)

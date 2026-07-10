@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/execution"
+	"alphaflow/go-service/pkg/executionbus"
 	"alphaflow/go-service/pkg/idempotency"
 	"alphaflow/go-service/pkg/logger"
 	"alphaflow/go-service/pkg/position"
+	executionroute "alphaflow/go-service/pkg/positionhandler/executionroute"
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
 	"alphaflow/go-service/pkg/redisclient"
 	"alphaflow/go-service/pkg/strategy"
@@ -461,7 +463,15 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect redis position store: %w", err)
 	}
+	executionBus, err := executionbus.NewNATSBus(executionbus.Options{URL: cfg.NATS.URL, Durable: "position-engine-execution-publisher"})
+	if err != nil {
+		redisclient.Close(redisClient)
+		return nil, nil, err
+	}
 	closeProcessor := func() {
+		if err := executionBus.Close(); err != nil {
+			slog.Error("close execution bus failed", "error", err)
+		}
 		if err := redisclient.Close(redisClient); err != nil {
 			slog.Error("close position redis failed", "error", err)
 		}
@@ -499,10 +509,17 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 		closeProcessor()
 		return nil, nil, err
 	}
+	exchangeHandler, err := executionroute.New(positionManager, executionBus, now)
+	if err != nil {
+		closeProcessor()
+		return nil, nil, err
+	}
 	dispatcher, err := strategyroute.NewDispatcher(strategyroute.DispatcherOptions{
 		Routes: routes,
 		Handlers: map[strategyroute.Sink]strategyroute.ResultHandler{
-			strategyroute.SinkPaper: paperHandler,
+			strategyroute.SinkPaper:   paperHandler,
+			strategyroute.SinkTestnet: exchangeHandler,
+			strategyroute.SinkLive:    exchangeHandler,
 		},
 	})
 	if err != nil {

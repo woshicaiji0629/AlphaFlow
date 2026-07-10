@@ -71,6 +71,9 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - paper route 已接入公共 paper handler，支持开仓、平仓、减仓、止盈、止损、移动止损和分批退出。
 - paper 当前持仓 scanner 已接入，可按最新价格滚动检查退出规则。
 - paper 和 backtest 使用本地策略仓位，不依赖交易所账户仓位。
+- `pkg/executionadapter` 已提供 Binance、Bitget、Gate、WEEX、Deepcoin、Hotcoin 的统一执行适配器，覆盖账户、仓位、挂单、合约能力、下单、撤单和按客户端订单号恢复。WEEX 支持官方 demo 路由；Deepcoin 和 Hotcoin 官方 API 未提供独立测试网，适配器会拒绝 `testnet` 环境，避免误连实盘。
+- `execution-engine` 已支持 `paper` / `testnet` / `live`、环境变量凭证、多账户执行路由、启动连接检查、客户端订单号反查、submitted 意图恢复和私有状态 Redis 当前态。WEEX live 与 Deepcoin live 接入私有 WebSocket，包含重连、重新鉴权/订阅和心跳处理；所有账户同时运行周期 REST 账户、仓位、挂单对账。Hotcoin 官方合约 API 未公开私有 WebSocket，按配置 symbol 使用 REST 对账。
+- position-engine 的 testnet/live route 会发布账户无关仓位计划；execution-engine 按账户 `strategies`、`symbols` / `symbol_map`、固定保证金或权益比例、杠杆、最大仓位、最大保证金占用和禁空规则生成独立账户意图。反向信号会先读取各账户真实仓位，已有同向仓位跳过，反向仓位先平仓；单账户执行失败不会停止其他账户。
 
 ### 持久化
 
@@ -105,8 +108,8 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 当前真实回测样本只有 3 小时，不足以评价策略有效性；当前 Supertrend 仍是链路验证用样板策略。
 - 回测爆仓当前按账户权益归零处理，还没有接入交易所维持保证金、标记价格和阶梯强平公式。
 - 回测滑点当前是固定 bps 模型，还没有按盘口深度、成交量、波动率或订单大小动态估算。
-- position-engine 还没有 `backtest` / `live` / `notify` handler。
-- 真实交易所 order executor 尚未实现。
+- position-engine 还没有独立 `backtest` / `notify` handler；testnet/live 已通过账户无关计划接入 execution-engine。
+- 真实执行代码已装配，但尚未使用用户真实凭证完成交易所端到端联调；不能把 mock 测试视为实盘验收。
 - 交易所 symbol capability 目前来自静态配置，尚未接交易所 API 自动同步。
 - 订单服务级幂等落库和重复订单意图拦截尚未实现。
 - 账户级实时风控尚未实现。
@@ -127,9 +130,8 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 5. 实现 position-engine 的 notify handler。
 6. 增加交易所 symbol capability 自动同步和缓存。
 7. 明确过期策略反向退出但无 exit rule 时的 action 协议。
-8. 拆出真实 order executor 服务。
-9. 接入 testnet。
-10. 接入 live。
+8. 使用真实 demo/testnet 凭证完成 execution-engine 端到端验收。
+9. 使用最小订单完成 live 安全验收。
 
 ## 验证状态
 

@@ -71,6 +71,9 @@ func Register(registry *executionadapter.Registry) error {
 }
 
 func (a *Adapter) TestConnection(ctx context.Context) error { _, err := a.Account(ctx); return err }
+func (a *Adapter) ClientOrderID(intentID string) string {
+	return executionadapter.ClientOrderID("af-", intentID, 36)
+}
 func (a *Adapter) Account(ctx context.Context) (execution.AccountSnapshot, error) {
 	body, err := a.signedGet(ctx, "/fapi/v3/balance", nil)
 	if err != nil {
@@ -193,7 +196,7 @@ func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.Symb
 		if item.Symbol != symbol {
 			continue
 		}
-		capability := execution.SymbolCapability{Exchange: "binance", Market: a.account.Market, Symbol: symbol, ContractSize: "1", UpdatedAt: response.ServerTime}
+		capability := execution.SymbolCapability{Exchange: "binance", Market: a.account.Market, Symbol: symbol, ContractSize: "1", QuantityUnit: "base", UpdatedAt: response.ServerTime}
 		for _, filter := range item.Filters {
 			switch filter.FilterType {
 			case "LOT_SIZE":
