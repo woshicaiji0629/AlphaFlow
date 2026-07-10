@@ -24,6 +24,9 @@ func TestEncodeDecodeDecision(t *testing.T) {
 				Confidence: 0.9,
 				OpenTime:   1000,
 			},
+			Analysis: strategy.Analysis{Checks: []strategy.DiagnosticCheck{{
+				Name: "trend", Side: strategy.SignalSideBuy, Status: strategy.DiagnosticStatusPass, Score: 0.2,
+			}}},
 		}},
 		CreatedAt: 2000,
 	}
@@ -41,6 +44,9 @@ func TestEncodeDecodeDecision(t *testing.T) {
 	}
 	if got.Results[0].StrategyName != "supertrend" {
 		t.Fatalf("strategy = %q, want supertrend", got.Results[0].StrategyName)
+	}
+	if len(got.Results[0].Analysis.Checks) != 1 || got.Results[0].Analysis.Checks[0].Name != "trend" {
+		t.Fatalf("diagnostic checks = %#v", got.Results[0].Analysis.Checks)
 	}
 	if got.TraceID != envelope.TraceID {
 		t.Fatalf("trace id = %q, want %q", got.TraceID, envelope.TraceID)

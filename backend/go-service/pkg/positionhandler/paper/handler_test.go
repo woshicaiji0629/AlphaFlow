@@ -2,6 +2,7 @@ package paper
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"alphaflow/go-service/pkg/execution"
@@ -46,6 +47,9 @@ func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
 			Reason:     "trend up",
 			OpenTime:   1000,
 		},
+		Analysis: strategy.Analysis{Summary: "trend up", Checks: []strategy.DiagnosticCheck{{
+			Name: "trend", Side: strategy.SignalSideBuy, Status: strategy.DiagnosticStatusPass,
+		}}},
 	}
 
 	if err := handler.HandleResult(context.Background(), input, result, strategyroute.Route{Sink: strategyroute.SinkPaper}); err != nil {
@@ -73,6 +77,13 @@ func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
 	}
 	if events[0].EventType != strategy.EventTypeSignalGenerated {
 		t.Fatalf("first event = %q, want signal_generated", events[0].EventType)
+	}
+	var analysis strategy.Analysis
+	if err := json.Unmarshal([]byte(events[0].Metadata["analysis"]), &analysis); err != nil {
+		t.Fatalf("decode event analysis: %v", err)
+	}
+	if len(analysis.Checks) != 1 || analysis.Checks[0].Name != "trend" {
+		t.Fatalf("event analysis = %#v", analysis)
 	}
 }
 

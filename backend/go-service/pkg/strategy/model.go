@@ -194,6 +194,25 @@ type Analysis struct {
 	Volume     string
 	Risk       string
 	KeyLevels  map[string]string
+	Checks     []DiagnosticCheck
+}
+
+type DiagnosticStatus string
+
+const (
+	DiagnosticStatusPass    DiagnosticStatus = "pass"
+	DiagnosticStatusBlocked DiagnosticStatus = "blocked"
+	DiagnosticStatusMissing DiagnosticStatus = "missing"
+	DiagnosticStatusInfo    DiagnosticStatus = "info"
+)
+
+type DiagnosticCheck struct {
+	Name   string
+	Side   SignalSide
+	Status DiagnosticStatus
+	Score  float64
+	Reason string
+	Values map[string]string
 }
 
 type ExitRule struct {

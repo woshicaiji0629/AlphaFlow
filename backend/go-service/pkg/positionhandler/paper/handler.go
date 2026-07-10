@@ -2,6 +2,7 @@ package paper
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -568,6 +569,14 @@ func (b eventBuilder) withSignal(result strategy.Result) strategy.StrategyEvent 
 	event.Score = result.Signal.Score
 	event.Confidence = result.Signal.Confidence
 	event.Reason = result.Signal.Reason
+	if result.Analysis.Summary != "" || len(result.Analysis.Checks) > 0 {
+		encoded, err := json.Marshal(result.Analysis)
+		if err != nil {
+			event.Metadata = map[string]string{"analysis_error": err.Error()}
+		} else {
+			event.Metadata = map[string]string{"analysis": string(encoded)}
+		}
+	}
 	return event
 }
 

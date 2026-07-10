@@ -3,6 +3,7 @@ package supertrend
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"alphaflow/go-service/pkg/strategy"
@@ -24,6 +25,7 @@ type entryDecision struct {
 	score   float64
 	blocked bool
 	reasons []string
+	checks  []strategy.DiagnosticCheck
 }
 
 func New(config Config) *Strategy {
@@ -68,11 +70,14 @@ func (s *Strategy) Evaluate(
 
 	longDecision := s.entry(snapshot, strategy.SignalSideBuy)
 	shortDecision := s.entry(snapshot, strategy.SignalSideSell)
+	longDecision = withThresholdCheck(longDecision, s.config.EntryThreshold)
+	shortDecision = withThresholdCheck(shortDecision, s.config.EntryThreshold)
+	checks := append(append([]strategy.DiagnosticCheck{}, longDecision.checks...), shortDecision.checks...)
 	selected := selectEntry(longDecision, shortDecision, s.config.EntryThreshold)
 	if selected.side == strategy.SignalSideHold {
-		return s.hold(snapshot, strings.Join(append(longDecision.reasons, shortDecision.reasons...), "; ")), nil
+		return s.holdWithChecks(snapshot, strings.Join(append(longDecision.reasons, shortDecision.reasons...), "; "), checks), nil
 	}
-	return s.signal(snapshot, selected.side, selected.score, strings.Join(selected.reasons, "; "), exitRules(snapshot, selected.side)), nil
+	return s.signalWithChecks(snapshot, selected.side, selected.score, strings.Join(selected.reasons, "; "), exitRules(snapshot, selected.side), checks), nil
 }
 
 func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *strategy.Position) strategy.Result {
@@ -86,13 +91,16 @@ func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *str
 		return s.hold(snapshot, "position side not actionable")
 	}
 	decision := s.entry(snapshot, opposite)
+	decision = withThresholdCheck(decision, s.config.EntryThreshold)
 	if decision.blocked {
-		return s.hold(snapshot, strings.Join(decision.reasons, "; "))
+		return s.holdWithChecks(snapshot, strings.Join(decision.reasons, "; "), decision.checks)
 	}
 	if !reverseConfirmed(snapshot, opposite) {
-		return s.hold(snapshot, "reverse signal not confirmed")
+		checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, false, 0, "reverse signal not confirmed", nil))
+		return s.holdWithChecks(snapshot, "reverse signal not confirmed", checks)
 	}
-	return s.signal(snapshot, opposite, decision.score, strings.Join(decision.reasons, "; "), nil)
+	checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, true, 0, "reverse signal confirmed", nil))
+	return s.signalWithChecks(snapshot, opposite, decision.score, strings.Join(decision.reasons, "; "), nil, checks)
 }
 
 func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
@@ -104,26 +112,33 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	if len(window.Values) == 0 && len(window.Signals) == 0 {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "indicator window missing")
+		decision.checks = append(decision.checks, strategy.DiagnosticCheck{Name: "indicator_window", Side: side, Status: strategy.DiagnosticStatusMissing, Reason: "indicator window missing"})
 		return decision
 	}
-	if !entryTriggered(window, side) {
+	triggered := entryTriggered(window, side)
+	if !triggered {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, fmt.Sprintf("%s trigger missing", side))
+		decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, false, 0, fmt.Sprintf("%s trigger missing", side), nil))
 		return decision
 	}
 	decision.score = 0.30
 	decision.reasons = append(decision.reasons, fmt.Sprintf("%s trigger", side))
+	decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, true, 0.30, fmt.Sprintf("%s trigger", side), nil))
 
-	if fakeRiskBlocked(window, side) {
+	fakeBlocked := fakeRiskBlocked(window, side)
+	if fakeBlocked {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "fake signal risk blocked")
 	}
+	decision.checks = append(decision.checks, diagnosticCheck("fake_signal_risk", side, !fakeBlocked, 0, checkReason(fakeBlocked, "fake signal risk blocked", "fake signal risk accepted"), nil))
 	trendOK, trendScore, trendReasons := trendConfirmation(window, side)
 	if !trendOK {
 		decision.blocked = true
 	}
 	decision.score += trendScore
 	decision.reasons = append(decision.reasons, trendReasons...)
+	decision.checks = append(decision.checks, diagnosticCheck("trend", side, trendOK, trendScore, strings.Join(trendReasons, "; "), nil))
 
 	maOK, maScore, maReasons := maConfirmation(window, side)
 	if !maOK {
@@ -131,6 +146,7 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	}
 	decision.score += maScore
 	decision.reasons = append(decision.reasons, maReasons...)
+	decision.checks = append(decision.checks, diagnosticCheck("moving_average", side, maOK, maScore, strings.Join(maReasons, "; "), nil))
 
 	macdOK, macdScore, macdReasons := macdConfirmation(window, side)
 	if !macdOK {
@@ -138,6 +154,7 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	}
 	decision.score += macdScore
 	decision.reasons = append(decision.reasons, macdReasons...)
+	decision.checks = append(decision.checks, diagnosticCheck("macd", side, macdOK, macdScore, strings.Join(macdReasons, "; "), nil))
 
 	volumeOK, volumeScore, volumeReasons := volumeConfirmation(window, side)
 	if !volumeOK {
@@ -145,9 +162,11 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	}
 	decision.score += volumeScore
 	decision.reasons = append(decision.reasons, volumeReasons...)
+	decision.checks = append(decision.checks, diagnosticCheck("volume", side, volumeOK, volumeScore, strings.Join(volumeReasons, "; "), nil))
 
 	aligned, blocked := classifyTimeframes(snapshot, side)
-	if blocked >= s.config.MaxBlockingTimeframes || shortTimeframesBlocked(snapshot, side) {
+	shortBlocked := shortTimeframesBlocked(snapshot, side)
+	if blocked >= s.config.MaxBlockingTimeframes || shortBlocked {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "timeframe blocked")
 	}
@@ -155,7 +174,34 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 		decision.score += 0.04 * float64(aligned)
 		decision.reasons = append(decision.reasons, "timeframes aligned")
 	}
+	timeframesOK := blocked < s.config.MaxBlockingTimeframes && !shortBlocked
+	decision.checks = append(decision.checks, diagnosticCheck("timeframes", side, timeframesOK, 0.04*float64(aligned), checkReason(!timeframesOK, "timeframe blocked", "timeframes evaluated"), map[string]string{
+		"aligned": strconv.Itoa(aligned), "blocked": strconv.Itoa(blocked),
+	}))
 	return decision
+}
+
+func withThresholdCheck(decision entryDecision, threshold float64) entryDecision {
+	passed := !decision.blocked && decision.score >= threshold
+	decision.checks = append(decision.checks, diagnosticCheck("entry_threshold", decision.side, passed, 0, checkReason(!passed, "entry threshold not met", "entry threshold met"), map[string]string{
+		"score": strconv.FormatFloat(decision.score, 'f', -1, 64), "threshold": strconv.FormatFloat(threshold, 'f', -1, 64),
+	}))
+	return decision
+}
+
+func diagnosticCheck(name string, side strategy.SignalSide, passed bool, score float64, reason string, values map[string]string) strategy.DiagnosticCheck {
+	status := strategy.DiagnosticStatusBlocked
+	if passed {
+		status = strategy.DiagnosticStatusPass
+	}
+	return strategy.DiagnosticCheck{Name: name, Side: side, Status: status, Score: score, Reason: reason, Values: values}
+}
+
+func checkReason(blocked bool, blockedReason string, passReason string) string {
+	if blocked {
+		return blockedReason
+	}
+	return passReason
 }
 
 func selectEntry(longDecision entryDecision, shortDecision entryDecision, threshold float64) entryDecision {
@@ -184,6 +230,10 @@ func (s *Strategy) signal(
 	reason string,
 	exitRules []strategy.ExitRule,
 ) strategy.Result {
+	return s.signalWithChecks(snapshot, side, score, reason, exitRules, nil)
+}
+
+func (s *Strategy) signalWithChecks(snapshot strategy.Snapshot, side strategy.SignalSide, score float64, reason string, exitRules []strategy.ExitRule, checks []strategy.DiagnosticCheck) strategy.Result {
 	return strategy.Result{
 		StrategyName: Name,
 		Signal: strategy.Signal{
@@ -201,16 +251,21 @@ func (s *Strategy) signal(
 		},
 		Analysis: strategy.Analysis{
 			Summary: reason,
+			Checks:  checks,
 		},
 		ExitRules: exitRules,
 	}
 }
 
 func (s *Strategy) hold(snapshot strategy.Snapshot, reason string) strategy.Result {
+	return s.holdWithChecks(snapshot, reason, nil)
+}
+
+func (s *Strategy) holdWithChecks(snapshot strategy.Snapshot, reason string, checks []strategy.DiagnosticCheck) strategy.Result {
 	if strings.TrimSpace(reason) == "" {
 		reason = "no actionable signal"
 	}
-	return s.signal(snapshot, strategy.SignalSideHold, 0, reason, nil)
+	return s.signalWithChecks(snapshot, strategy.SignalSideHold, 0, reason, nil, checks)
 }
 
 func dataQualityOK(window strategy.IndicatorWindowView) bool {

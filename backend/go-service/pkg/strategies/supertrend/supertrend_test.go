@@ -22,6 +22,9 @@ func TestEvaluateReturnsBuyWhenLongSetupConfirmed(t *testing.T) {
 	if len(result.ExitRules) != 2 {
 		t.Fatalf("exit rules = %d, want 2", len(result.ExitRules))
 	}
+	if check, ok := diagnostic(result.Analysis.Checks, "entry_threshold", strategy.SignalSideBuy); !ok || check.Status != strategy.DiagnosticStatusPass {
+		t.Fatalf("buy threshold diagnostic = %#v", check)
+	}
 }
 
 func TestEvaluateBlocksOppositeMACDBias(t *testing.T) {
@@ -35,6 +38,18 @@ func TestEvaluateBlocksOppositeMACDBias(t *testing.T) {
 	if result.Signal.Side != strategy.SignalSideHold {
 		t.Fatalf("side = %q, want hold", result.Signal.Side)
 	}
+	if check, ok := diagnostic(result.Analysis.Checks, "macd", strategy.SignalSideBuy); !ok || check.Status != strategy.DiagnosticStatusBlocked {
+		t.Fatalf("MACD diagnostic = %#v", check)
+	}
+}
+
+func diagnostic(checks []strategy.DiagnosticCheck, name string, side strategy.SignalSide) (strategy.DiagnosticCheck, bool) {
+	for _, check := range checks {
+		if check.Name == name && check.Side == side {
+			return check, true
+		}
+	}
+	return strategy.DiagnosticCheck{}, false
 }
 
 func TestEvaluateBlocksWhenShortTimeframesOppose(t *testing.T) {
