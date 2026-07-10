@@ -30,7 +30,7 @@ completed_ttl = "24h"
 
 [position]
 scope = "paper"
-account = "paper-default"
+account = "default"
 
 [position_scanner]
 enabled = true
@@ -50,7 +50,7 @@ rebate_pct = 0
 [[routes]]
 strategy = "supertrend"
 sink = "paper"
-account = "paper-default"
+account = "default"
 enabled = true
 
 [[routes]]

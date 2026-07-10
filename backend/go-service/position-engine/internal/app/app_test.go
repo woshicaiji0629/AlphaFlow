@@ -504,6 +504,55 @@ func TestProcessDecisionBatchSkipsCompletedResultAndProcessesRemaining(t *testin
 	}
 }
 
+func TestProcessDecisionBatchDeadLettersFailedResultAndProcessesRemaining(t *testing.T) {
+	first := strategy.Result{
+		StrategyName: "supertrend",
+		Signal:       strategy.Signal{Side: strategy.SignalSideBuy, OpenTime: 1000},
+	}
+	second := strategy.Result{
+		StrategyName: "breakout",
+		Signal:       strategy.Signal{Side: strategy.SignalSideHold, OpenTime: 1000},
+	}
+	message := strategybus.DecisionMessage{
+		ID:         "1-0",
+		RawPayload: []byte("original multi-result payload"),
+		Envelope: strategybus.DecisionEnvelope{
+			Target:  strategy.Target{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"},
+			Results: []strategy.Result{first, second},
+		},
+		DeliveryCount: 5,
+	}
+	reader := &fakeDecisionReader{messages: []strategybus.DecisionMessage{message}}
+	processor := &selectiveFailDecisionProcessor{failStrategy: "supertrend"}
+	store := newFakeIdempotencyStore(idempotency.StatusStarted)
+
+	stats, err := processDecisionBatch(context.Background(), config.Config{
+		Input: config.InputConfig{MaxDeliveries: 5},
+	}, reader, processor, store)
+	if err != nil {
+		t.Fatalf("processDecisionBatch() error = %v", err)
+	}
+	if len(reader.deadLetters) != 1 {
+		t.Fatalf("dead letters = %d, want 1", len(reader.deadLetters))
+	}
+	deadLetter := reader.deadLetters[0]
+	if len(deadLetter.Envelope.Results) != 1 || deadLetter.Envelope.Results[0].StrategyName != "supertrend" {
+		t.Fatalf("dead-letter results = %#v, want supertrend only", deadLetter.Envelope.Results)
+	}
+	if len(deadLetter.RawPayload) != 0 {
+		t.Fatalf("dead-letter raw payload = %q, want empty for single-result encoding", deadLetter.RawPayload)
+	}
+	if len(processor.messages) != 2 || processor.messages[1].Envelope.Results[0].StrategyName != "breakout" {
+		t.Fatalf("processed messages = %#v, want failed supertrend then successful breakout", processor.messages)
+	}
+	if len(reader.acked) != 1 || reader.acked[0] != message.ID {
+		t.Fatalf("acked = %v, want [%s]", reader.acked, message.ID)
+	}
+	if stats.acked != 1 || stats.deadLettered != 1 {
+		t.Fatalf("stats = %#v, want acked=1 deadLettered=1", stats)
+	}
+}
+
 func TestIdempotencyKeyPrefersSignalID(t *testing.T) {
 	key := idempotencyKey(strategybus.DecisionMessage{
 		ID: "1-0",
@@ -748,6 +797,22 @@ func (p failingDecisionProcessor) ProcessDecision(ctx context.Context, message s
 		return false, err
 	}
 	return false, os.ErrInvalid
+}
+
+type selectiveFailDecisionProcessor struct {
+	failStrategy string
+	messages     []strategybus.DecisionMessage
+}
+
+func (p *selectiveFailDecisionProcessor) ProcessDecision(ctx context.Context, message strategybus.DecisionMessage) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	p.messages = append(p.messages, message)
+	if len(message.Envelope.Results) == 1 && message.Envelope.Results[0].StrategyName == p.failStrategy {
+		return false, os.ErrInvalid
+	}
+	return true, nil
 }
 
 type fakePriceReader struct {

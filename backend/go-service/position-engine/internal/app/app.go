@@ -268,6 +268,7 @@ func processDecisionMessage(
 	}
 
 	allResultsDone := true
+	deadLettered := false
 	for _, result := range message.Envelope.Results {
 		singleResultMessage := message
 		singleResultMessage.Envelope.Results = []strategy.Result{result}
@@ -288,13 +289,15 @@ func processDecisionMessage(
 		shouldAck, err := processor.ProcessDecision(ctx, singleResultMessage)
 		if err != nil {
 			if shouldDeadLetter(message, cfg.Input.MaxDeliveries) {
-				if err := decisionReader.DeadLetter(ctx, message, err.Error()); err != nil {
+				singleResultMessage.RawPayload = nil
+				if err := decisionReader.DeadLetter(ctx, singleResultMessage, err.Error()); err != nil {
 					return messageProcessingResult{}, fmt.Errorf("dead-letter decision message %s: %w", message.ID, err)
 				}
 				if err := idempotencyStore.Complete(ctx, key); err != nil {
 					return messageProcessingResult{}, err
 				}
-				return messageProcessingResult{ack: true, deadLettered: true}, nil
+				deadLettered = true
+				continue
 			}
 			slog.Warn("position-engine decision result processing failed", "message_id", message.ID, "strategy", result.StrategyName, "delivery_count", message.DeliveryCount, "error", err)
 			if err := idempotencyStore.Fail(ctx, key); err != nil {
@@ -313,7 +316,7 @@ func processDecisionMessage(
 		}
 		allResultsDone = false
 	}
-	return messageProcessingResult{ack: allResultsDone}, nil
+	return messageProcessingResult{ack: allResultsDone, deadLettered: deadLettered}, nil
 }
 
 func processDecisionMessageWithoutIdempotency(
