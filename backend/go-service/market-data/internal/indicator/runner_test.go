@@ -16,6 +16,7 @@ import (
 type fakeStore struct {
 	mu                       sync.Mutex
 	available                bool
+	symbolAvailable          *bool
 	hasLast                  bool
 	lastOpenTime             int64
 	hasLastIndicator         bool
@@ -34,6 +35,15 @@ type fakeStore struct {
 	rangeDelay               time.Duration
 	activeRangeCalls         atomic.Int64
 	maxActiveRangeCalls      atomic.Int64
+}
+
+func (s *fakeStore) IsSymbolAvailable(context.Context, string, string, string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.symbolAvailable == nil {
+		return s.available, nil
+	}
+	return *s.symbolAvailable, nil
 }
 
 func (s *fakeStore) LastOpenTime(context.Context, string, string, string, string) (int64, bool, error) {
@@ -257,6 +267,29 @@ func TestRunnerSkipsUnavailableMarket(t *testing.T) {
 
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.snapshots) != 0 {
+		t.Fatalf("snapshots = %d, want 0", len(store.snapshots))
+	}
+}
+
+func TestRunnerSkipsUnavailableSymbol(t *testing.T) {
+	unavailable := false
+	store := &fakeStore{available: true, symbolAvailable: &unavailable}
+	runner := NewRunner(store, RunnerOptions{Rules: []Rule{{
+		Exchange: "binance", Market: "um", Symbols: []string{"ETHUSDT"}, Intervals: []string{"1m"},
+	}}})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if store.rangeCalls != 0 {
+		t.Fatalf("range calls = %d, want 0", store.rangeCalls)
+	}
+	if err := runner.HandleKline(context.Background(), model.Kline{
+		Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", IsClosed: true,
+	}); err != nil {
+		t.Fatalf("HandleKline: %v", err)
 	}
 	if len(store.snapshots) != 0 {
 		t.Fatalf("snapshots = %d, want 0", len(store.snapshots))

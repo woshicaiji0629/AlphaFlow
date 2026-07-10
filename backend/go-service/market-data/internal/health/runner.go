@@ -44,6 +44,10 @@ type Store interface {
 	SetDataHealth(ctx context.Context, health model.DataHealth) error
 }
 
+type symbolAvailabilityStore interface {
+	IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error)
+}
+
 type Rule struct {
 	Exchange  string
 	Market    string
@@ -116,6 +120,19 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			continue
 		}
 		for _, symbol := range rule.Symbols {
+			symbolAvailable, err := healthSymbolAvailable(ctx, r.store, rule.Exchange, rule.Market, symbol)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("read symbol status %s %s %s: %w", rule.Exchange, rule.Market, symbol, err))
+				continue
+			}
+			if !symbolAvailable {
+				for _, interval := range rule.Intervals {
+					if err := r.writeSkipped(ctx, rule, symbol, interval); err != nil {
+						errs = append(errs, err)
+					}
+				}
+				continue
+			}
 			for _, interval := range rule.Intervals {
 				if err := r.checkSymbolInterval(ctx, rule, symbol, interval); err != nil {
 					errs = append(errs, fmt.Errorf("check data health %s %s %s %s: %w",
@@ -130,6 +147,13 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func healthSymbolAvailable(ctx context.Context, store Store, exchange string, market string, symbol string) (bool, error) {
+	if symbolStore, ok := store.(symbolAvailabilityStore); ok {
+		return symbolStore.IsSymbolAvailable(ctx, exchange, market, symbol)
+	}
+	return store.IsMarketAvailable(ctx, exchange, market)
 }
 
 func (r *Runner) runOnceWithLogging(ctx context.Context) {

@@ -242,3 +242,25 @@ func TestRedisStoreMaintainLiquidationKeyUsesFreqCall(t *testing.T) {
 		t.Fatalf("calls after different key = %d, want 2", calls)
 	}
 }
+
+func TestRedisStoreMaintainKlineKeyUsesFreqCall(t *testing.T) {
+	store := &RedisStore{klineMaintenance: lcache.MustNew(10)}
+	calls := 0
+
+	store.maintainKlineKey("kline:key", func() {
+		calls++
+	})
+	store.maintainKlineKey("kline:key", func() {
+		calls++
+	})
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+
+	store.maintainKlineKey("kline:other", func() {
+		calls++
+	})
+	if calls != 2 {
+		t.Fatalf("calls after different key = %d, want 2", calls)
+	}
+}

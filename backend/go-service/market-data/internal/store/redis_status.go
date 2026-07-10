@@ -18,7 +18,7 @@ func (s *RedisStore) SetMarketStatus(ctx context.Context, status model.MarketSta
 	}
 	defer release()
 
-	key := model.MarketStatusKey(status.Exchange, status.Market)
+	key := model.MarketStatusKey(status.Exchange, status.Market, status.Symbol)
 	payload, err := json.Marshal(status)
 	if err != nil {
 		return fmt.Errorf("marshal market status: %w", err)
@@ -54,26 +54,55 @@ func (s *RedisStore) SetWebSocketStatus(ctx context.Context, status model.WebSoc
 }
 
 func (s *RedisStore) IsMarketAvailable(ctx context.Context, exchange string, market string) (bool, error) {
-	release, err := s.acquire(ctx)
+	return s.isStatusAvailable(ctx, model.MarketStatusKey(exchange, market))
+}
+
+func (s *RedisStore) IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error) {
+	marketAvailable, err := s.IsMarketAvailable(ctx, exchange, market)
+	if err != nil || !marketAvailable {
+		return marketAvailable, err
+	}
+	available, found, err := s.readStatusAvailable(ctx, model.MarketStatusKey(exchange, market, symbol))
 	if err != nil {
 		return false, err
 	}
-	defer release()
+	if found {
+		return available, nil
+	}
+	return true, nil
+}
 
-	key := model.MarketStatusKey(exchange, market)
-	value, err := s.client.Get(ctx, key).Result()
-	if err == redis.Nil {
+func (s *RedisStore) isStatusAvailable(ctx context.Context, key string) (bool, error) {
+	available, found, err := s.readStatusAvailable(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	if !found {
 		return true, nil
 	}
+	return available, nil
+}
+
+func (s *RedisStore) readStatusAvailable(ctx context.Context, key string) (bool, bool, error) {
+	release, err := s.acquire(ctx)
 	if err != nil {
-		return false, fmt.Errorf("read market status: %w", err)
+		return false, false, err
+	}
+	defer release()
+
+	value, err := s.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read market status: %w", err)
 	}
 
 	var status model.MarketStatus
 	if err := json.Unmarshal([]byte(value), &status); err != nil {
-		return false, fmt.Errorf("decode market status: %w", err)
+		return false, false, fmt.Errorf("decode market status: %w", err)
 	}
-	return status.Available, nil
+	return status.Available, true, nil
 }
 
 func (s *RedisStore) SetDataHealth(ctx context.Context, health model.DataHealth) error {

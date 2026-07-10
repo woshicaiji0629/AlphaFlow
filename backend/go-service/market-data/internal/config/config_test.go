@@ -202,8 +202,8 @@ func TestDefaultMarketPolicy(t *testing.T) {
 	if KlineLimit() != IndicatorKlineCacheLimit() {
 		t.Fatalf("KlineLimit = %d, want %d", KlineLimit(), IndicatorKlineCacheLimit())
 	}
-	if KlineTTL() != 7*24*time.Hour {
-		t.Fatalf("KlineTTL = %s, want 168h", KlineTTL())
+	if KlineTTL() != 24*time.Hour {
+		t.Fatalf("KlineTTL = %s, want 24h", KlineTTL())
 	}
 	if LiquidationLimit() != 200 {
 		t.Fatalf("LiquidationLimit = %d, want 200", LiquidationLimit())

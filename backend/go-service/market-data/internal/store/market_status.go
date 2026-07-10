@@ -25,12 +25,16 @@ func (s *MarketStore) IsMarketAvailable(ctx context.Context, exchange string, ma
 	return s.redis.IsMarketAvailable(ctx, exchange, market)
 }
 
+func (s *MarketStore) IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error) {
+	return s.redis.IsSymbolAvailable(ctx, exchange, market, symbol)
+}
+
 func (s *MarketStore) SetDataHealth(ctx context.Context, health model.DataHealth) error {
 	return s.redis.SetDataHealth(ctx, health)
 }
 
 func (s *MarketStore) shouldWriteMarketStatus(status model.MarketStatus) bool {
-	key := model.MarketStatusKey(status.Exchange, status.Market)
+	key := model.MarketStatusKey(status.Exchange, status.Market, status.Symbol)
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 
@@ -44,7 +48,7 @@ func (s *MarketStore) shouldWriteMarketStatus(status model.MarketStatus) bool {
 }
 
 func (s *MarketStore) rememberMarketStatus(status model.MarketStatus) {
-	key := model.MarketStatusKey(status.Exchange, status.Market)
+	key := model.MarketStatusKey(status.Exchange, status.Market, status.Symbol)
 	s.statusMu.Lock()
 	s.marketStatuses[key] = status
 	s.statusMu.Unlock()

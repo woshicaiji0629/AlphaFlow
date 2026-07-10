@@ -13,7 +13,15 @@ type fakeStore struct {
 	lastIndicatorOpenTimes map[string]int64
 	klines                 map[string][]model.Kline
 	marketAvailable        bool
+	symbolAvailable        *bool
 	written                []model.DataHealth
+}
+
+func (s *fakeStore) IsSymbolAvailable(context.Context, string, string, string) (bool, error) {
+	if s.symbolAvailable == nil {
+		return s.marketAvailable, nil
+	}
+	return *s.symbolAvailable, nil
 }
 
 func newFakeStore() *fakeStore {
@@ -171,6 +179,20 @@ func TestRunnerSkipsUnavailableMarket(t *testing.T) {
 	}
 	if got.IndicatorStatus != model.HealthStatusSkipped {
 		t.Fatalf("indicator status = %q, want skipped", got.IndicatorStatus)
+	}
+}
+
+func TestRunnerSkipsUnavailableSymbol(t *testing.T) {
+	unavailable := false
+	store := newFakeStore()
+	store.symbolAvailable = &unavailable
+	runner := testRunner(store, time.UnixMilli(10*60*1000))
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.written) == 0 || store.written[0].KlineStatus != model.HealthStatusSkipped || store.written[0].IndicatorStatus != model.HealthStatusSkipped {
+		t.Fatalf("health = %#v, want skipped", store.written)
 	}
 }
 

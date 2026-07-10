@@ -63,6 +63,10 @@ func (s *loadStore) LastOpenTime(
 	return 0, false, nil
 }
 
+func (s *loadStore) RangeKlines(context.Context, string, string, string, string, int64, int64) ([]model.Kline, error) {
+	return nil, nil
+}
+
 func (s *loadStore) UpsertKline(context.Context, model.Kline) error {
 	s.write()
 	return nil

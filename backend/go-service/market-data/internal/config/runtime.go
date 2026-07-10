@@ -10,7 +10,7 @@ func KlineLimit() int64 {
 }
 
 func KlineTTL() time.Duration {
-	return 7 * 24 * time.Hour
+	return 24 * time.Hour
 }
 
 func LiquidationLimit() int64 {

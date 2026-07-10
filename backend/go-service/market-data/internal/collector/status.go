@@ -16,13 +16,26 @@ func (c *Collector) setMarketUnavailable(ctx context.Context, reason string) {
 	c.setMarketStatus(ctx, false, reason)
 }
 
+func (c *Collector) setSymbolAvailable(ctx context.Context, symbol string) {
+	c.setStatus(ctx, symbol, true, "")
+}
+
+func (c *Collector) setSymbolUnavailable(ctx context.Context, symbol string, reason string) {
+	c.setStatus(ctx, symbol, false, reason)
+}
+
 func (c *Collector) setMarketStatus(ctx context.Context, available bool, reason string) {
+	c.setStatus(ctx, "", available, reason)
+}
+
+func (c *Collector) setStatus(ctx context.Context, symbol string, available bool, reason string) {
 	if ctx.Err() != nil {
 		return
 	}
 	if err := c.store.SetMarketStatus(ctx, model.MarketStatus{
 		Exchange:  c.rest.Exchange(),
 		Market:    c.rest.Market(),
+		Symbol:    symbol,
 		Available: available,
 		Reason:    reason,
 		UpdatedAt: time.Now().UnixMilli(),
@@ -31,6 +44,7 @@ func (c *Collector) setMarketStatus(ctx context.Context, available bool, reason 
 			"set market status failed",
 			"exchange", c.rest.Exchange(),
 			"market", c.rest.Market(),
+			"symbol", symbol,
 			"available", available,
 			"error", err,
 		)

@@ -62,6 +62,10 @@ type Store interface {
 	SetIndicatorRealtime(ctx context.Context, snapshot model.IndicatorRealtimeSnapshot) error
 }
 
+type symbolAvailabilityStore interface {
+	IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error)
+}
+
 type Rule struct {
 	Exchange  string
 	Market    string
@@ -240,6 +244,15 @@ func (r *Runner) dueJobs(ctx context.Context) ([]indicatorJob, error) {
 			continue
 		}
 		for _, symbol := range rule.Symbols {
+			symbolAvailable, err := indicatorSymbolAvailable(ctx, r.store, rule.Exchange, rule.Market, symbol)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("read symbol status %s %s %s: %w", rule.Exchange, rule.Market, symbol, err))
+				continue
+			}
+			if !symbolAvailable {
+				slog.Warn("skip indicators for unavailable symbol", "exchange", rule.Exchange, "market", rule.Market, "symbol", symbol)
+				continue
+			}
 			for _, interval := range rule.Intervals {
 				if due, err := r.needsCalculation(ctx, rule, symbol, interval); err != nil {
 					errs = append(errs, fmt.Errorf("check indicator task %s %s %s %s: %w",
@@ -260,6 +273,13 @@ func (r *Runner) dueJobs(ctx context.Context) ([]indicatorJob, error) {
 		}
 	}
 	return jobs, errors.Join(errs...)
+}
+
+func indicatorSymbolAvailable(ctx context.Context, store Store, exchange string, market string, symbol string) (bool, error) {
+	if symbolStore, ok := store.(symbolAvailabilityStore); ok {
+		return symbolStore.IsSymbolAvailable(ctx, exchange, market, symbol)
+	}
+	return store.IsMarketAvailable(ctx, exchange, market)
 }
 
 func (r *Runner) needsCalculation(ctx context.Context, rule Rule, symbol string, interval string) (bool, error) {
@@ -295,6 +315,14 @@ func (r *Runner) HandleKline(ctx context.Context, kline model.Kline) error {
 	var errs []error
 	for _, rule := range r.options.Rules {
 		if !ruleMatchesKline(rule, kline) {
+			continue
+		}
+		available, err := indicatorSymbolAvailable(ctx, r.store, rule.Exchange, rule.Market, kline.Symbol)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read symbol status %s %s %s: %w", rule.Exchange, rule.Market, kline.Symbol, err))
+			continue
+		}
+		if !available {
 			continue
 		}
 		if err := r.calculateKline(ctx, rule, kline); err != nil {

@@ -1,8 +1,10 @@
 package app
 
 import (
+	"strings"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/aggregator"
 	"alphaflow/go-service/market-data/internal/collector"
 	"alphaflow/go-service/market-data/internal/config"
 	"alphaflow/go-service/market-data/internal/exchange/binance"
@@ -32,6 +34,8 @@ func buildCollectors(
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Binance.WebSocketConnections,
+				StartupLookback:      config.KlineLimit(),
+				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "binance"),
 			},
 			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
 			binance.NewWSClient(config.BinanceWSBase()),
@@ -51,6 +55,8 @@ func buildCollectors(
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Gate.WebSocketConnections,
+				StartupLookback:      config.KlineLimit(),
+				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "gate"),
 			},
 			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
 			gate.NewWSClient(config.GateWSBase(), config.GateSettle(), gateIntervals[0]),
@@ -58,6 +64,7 @@ func buildCollectors(
 		))
 	}
 	if cfg.Bitget.Enabled {
+		bitgetBackfillIntervals := withExtraIntervals(config.BitgetIntervals(), "3m")
 		collectors = append(collectors, collector.New(
 			collector.Options{
 				Symbols:              cfg.Bitget.Symbols,
@@ -69,6 +76,9 @@ func buildCollectors(
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Bitget.WebSocketConnections,
+				StartupLookback:      config.KlineLimit(),
+				BackfillIntervals:    bitgetBackfillIntervals,
+				StartupDerivedRules:  rulesExceptTarget(aggregationRules(cfg), "bitget", "3m"),
 			},
 			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
 			bitget.NewWSClient(config.BitgetWSBase(), config.BitgetProductType()),
@@ -87,6 +97,8 @@ func buildCollectors(
 				OpenInterestInterval: config.OpenInterestInterval(),
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Bybit.WebSocketConnections,
+				StartupLookback:      config.KlineLimit(),
+				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "bybit"),
 			},
 			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),
 			bybit.NewWSClient(config.BybitWSBase(), config.BybitCategory()),
@@ -94,4 +106,25 @@ func buildCollectors(
 		))
 	}
 	return collectors
+}
+
+func rulesForExchange(rules []aggregator.Rule, exchange string) []aggregator.Rule {
+	result := make([]aggregator.Rule, 0, len(rules))
+	for _, rule := range rules {
+		if strings.EqualFold(rule.Exchange, exchange) {
+			result = append(result, rule)
+		}
+	}
+	return result
+}
+
+func rulesExceptTarget(rules []aggregator.Rule, exchange string, target string) []aggregator.Rule {
+	result := rulesForExchange(rules, exchange)
+	filtered := result[:0]
+	for _, rule := range result {
+		if rule.TargetInterval != target {
+			filtered = append(filtered, rule)
+		}
+	}
+	return filtered
 }

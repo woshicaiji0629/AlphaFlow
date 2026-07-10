@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/aggregator"
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
 )
@@ -18,6 +19,7 @@ type Store interface {
 		symbol string,
 		interval string,
 	) (int64, bool, error)
+	RangeKlines(ctx context.Context, exchange string, market string, symbol string, interval string, start int64, end int64) ([]model.Kline, error)
 	UpsertKline(ctx context.Context, kline model.Kline) error
 	UpsertKlines(ctx context.Context, klines []model.Kline) error
 	SetLastPrice(ctx context.Context, price model.LastPrice) error
@@ -91,6 +93,9 @@ type Options struct {
 	OpenInterestInterval time.Duration
 	MarkPriceInterval    string
 	WebSocketConnections int
+	StartupLookback      int64
+	BackfillIntervals    []string
+	StartupDerivedRules  []aggregator.Rule
 }
 
 func New(

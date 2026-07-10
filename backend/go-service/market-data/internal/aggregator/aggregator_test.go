@@ -9,11 +9,19 @@ import (
 )
 
 type fakeStore struct {
-	lastOpenTime int64
-	hasLast      bool
-	ranges       map[int64][]model.Kline
-	writes       []model.Kline
-	available    *bool
+	lastOpenTime    int64
+	hasLast         bool
+	ranges          map[int64][]model.Kline
+	writes          []model.Kline
+	available       *bool
+	symbolAvailable *bool
+}
+
+func (s *fakeStore) IsSymbolAvailable(context.Context, string, string, string) (bool, error) {
+	if s.symbolAvailable == nil {
+		return s.IsMarketAvailable(context.Background(), "", "")
+	}
+	return *s.symbolAvailable, nil
 }
 
 func (s *fakeStore) LastOpenTime(
@@ -174,6 +182,20 @@ func TestRunOnceSkipsUnavailableMarket(t *testing.T) {
 	}
 
 	if err := agg.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("writes = %d, want 0", len(store.writes))
+	}
+}
+
+func TestRunOnceSkipsUnavailableSymbol(t *testing.T) {
+	available := true
+	unavailable := false
+	store := &fakeStore{available: &available, symbolAvailable: &unavailable}
+	aggregator := New(store, Options{Rules: []Rule{{Exchange: "gate", Market: "usdt", Symbols: []string{"ETH_USDT"}, SourceInterval: "5m", TargetInterval: "10m"}}})
+
+	if err := aggregator.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if len(store.writes) != 0 {

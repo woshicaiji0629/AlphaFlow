@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/aggregator"
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
 )
@@ -24,6 +25,7 @@ type fakeStore struct {
 	lastPrices        int64
 	lastPriceBySymbol map[string]model.LastPrice
 	bookTickers       int64
+	rangeKlines       []model.Kline
 }
 
 type fakeREST struct {
@@ -40,6 +42,8 @@ type fakeREST struct {
 type backfillRequest struct {
 	symbol   string
 	interval string
+	limit    int
+	start    int64
 }
 
 type fakeWS struct {
@@ -60,12 +64,12 @@ func (r *fakeREST) FetchKlines(
 	_ context.Context,
 	symbol string,
 	interval string,
-	_ int,
-	_ int64,
+	limit int,
+	start int64,
 ) ([]model.Kline, error) {
 	r.fetchKlines++
 	r.fetchTimes = append(r.fetchTimes, time.Now())
-	r.fetchRequests = append(r.fetchRequests, backfillRequest{symbol: symbol, interval: interval})
+	r.fetchRequests = append(r.fetchRequests, backfillRequest{symbol: symbol, interval: interval, limit: limit, start: start})
 	if err := r.fetchKlinesErrBySymbol[symbol]; err != nil {
 		return nil, err
 	}
@@ -75,13 +79,15 @@ func (r *fakeREST) FetchKlines(
 	if r.klines != nil {
 		return append([]model.Kline(nil), r.klines...), nil
 	}
+	intervalMillis, _ := model.IntervalMillis(interval)
+	openTime := start
 	return []model.Kline{{
 		Exchange:  "binance",
 		Market:    "um",
 		Symbol:    "ETHUSDT",
-		Interval:  "1m",
-		OpenTime:  1700000000000,
-		CloseTime: 1700000059999,
+		Interval:  interval,
+		OpenTime:  openTime,
+		CloseTime: openTime + intervalMillis - 1,
 		IsClosed:  true,
 	}}, nil
 }
@@ -117,6 +123,10 @@ func (s *fakeStore) LastOpenTime(
 	string,
 ) (int64, bool, error) {
 	return s.lastOpenTime, s.hasLast, nil
+}
+
+func (s *fakeStore) RangeKlines(context.Context, string, string, string, string, int64, int64) ([]model.Kline, error) {
+	return append([]model.Kline(nil), s.rangeKlines...), nil
 }
 
 func (s *fakeStore) UpsertKline(context.Context, model.Kline) error {
@@ -203,19 +213,20 @@ func TestBackfillMarksMarketAvailableAfterSuccessfulUpdate(t *testing.T) {
 	if err := c.Backfill(context.Background()); err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
-	if len(store.statuses) != 1 {
-		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	if len(store.statuses) != 2 {
+		t.Fatalf("statuses = %d, want symbol and market statuses", len(store.statuses))
 	}
-	if !store.statuses[0].Available {
-		t.Fatalf("market status available = false, want true")
+	if !store.statuses[0].Available || store.statuses[0].Symbol != "ETHUSDT" || !store.statuses[1].Available || store.statuses[1].Symbol != "" {
+		t.Fatalf("statuses = %#v, want available symbol then market", store.statuses)
 	}
 }
 
 func TestBackfillStoresOnlyClosedKlines(t *testing.T) {
-	now := int64(1700000120000)
+	currentOpen := time.UnixMilli(1700000120000).Truncate(time.Minute).UnixMilli()
+	now := currentOpen + 30000
 	rest := &fakeREST{klines: []model.Kline{
-		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: now - 60000},
-		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: now},
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: currentOpen - 60000},
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: currentOpen},
 	}}
 	store := &fakeStore{}
 	c := New(testOptions(), rest, nil, store)
@@ -245,6 +256,7 @@ func TestBackfillContinuesAfterPartialFailures(t *testing.T) {
 		PollOpenInterest:     false,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
+		StartupLookback:      1,
 	}, rest, nil, store)
 
 	if err := c.Backfill(context.Background()); err != nil {
@@ -256,8 +268,8 @@ func TestBackfillContinuesAfterPartialFailures(t *testing.T) {
 	if got := atomic.LoadInt64(&store.klines); got != 1 {
 		t.Fatalf("klines = %d, want 1", got)
 	}
-	if len(store.statuses) != 1 || !store.statuses[0].Available {
-		t.Fatalf("statuses = %#v, want one available status", store.statuses)
+	if len(store.statuses) != 3 || store.statuses[0].Symbol != "BADUSDT" || store.statuses[0].Available || store.statuses[1].Symbol != "ETHUSDT" || !store.statuses[1].Available || store.statuses[2].Symbol != "" || !store.statuses[2].Available {
+		t.Fatalf("statuses = %#v, want unavailable BADUSDT and available ETHUSDT/market", store.statuses)
 	}
 }
 
@@ -268,11 +280,11 @@ func TestRunMarksMarketUnavailableAfterBackfillFailure(t *testing.T) {
 	if err := c.Run(context.Background()); err == nil {
 		t.Fatal("expected Run to fail")
 	}
-	if len(store.statuses) != 1 {
-		t.Fatalf("statuses = %d, want 1", len(store.statuses))
+	if len(store.statuses) < 2 {
+		t.Fatalf("statuses = %#v, want symbol and market unavailable", store.statuses)
 	}
-	if store.statuses[0].Available {
-		t.Fatalf("market status available = true, want false")
+	if store.statuses[0].Symbol != "ETHUSDT" || store.statuses[0].Available {
+		t.Fatalf("symbol status = %#v, want unavailable ETHUSDT", store.statuses[0])
 	}
 	if store.statuses[0].Reason == "" {
 		t.Fatal("expected unavailable reason")
@@ -294,6 +306,7 @@ func TestPollOpenInterestLimitsSymbols(t *testing.T) {
 		PollOpenInterest:     true,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
+		StartupLookback:      1,
 	}, rest, nil, &fakeStore{})
 
 	c.pollOpenInterest(context.Background())
@@ -325,7 +338,7 @@ func TestOpenInterestDoesNotSetMarketAvailable(t *testing.T) {
 	}
 }
 
-func TestBackfillSkipsWhenNextStartTimeHasNoClosedWindow(t *testing.T) {
+func TestBackfillUsesRollingWindowEvenWhenLatestKlineIsCurrent(t *testing.T) {
 	rest := &fakeREST{}
 	store := &fakeStore{
 		lastOpenTime: 1700000000000,
@@ -339,11 +352,11 @@ func TestBackfillSkipsWhenNextStartTimeHasNoClosedWindow(t *testing.T) {
 	if err := c.Backfill(context.Background()); err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
-	if rest.fetchKlines != 0 {
-		t.Fatalf("FetchKlines calls = %d, want 0", rest.fetchKlines)
+	if rest.fetchKlines != 1 {
+		t.Fatalf("FetchKlines calls = %d, want 1", rest.fetchKlines)
 	}
-	if len(store.statuses) != 0 {
-		t.Fatalf("statuses = %d, want 0", len(store.statuses))
+	if len(store.statuses) != 2 || store.statuses[0].Symbol != "ETHUSDT" || !store.statuses[0].Available || store.statuses[1].Symbol != "" || !store.statuses[1].Available {
+		t.Fatalf("statuses = %#v, want available symbol and market", store.statuses)
 	}
 }
 
@@ -358,6 +371,7 @@ func TestBackfillThrottlesFetchRequests(t *testing.T) {
 		PollOpenInterest:     false,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
+		StartupLookback:      1,
 	}, rest, nil, &fakeStore{})
 
 	if err := c.Backfill(context.Background()); err != nil {
@@ -382,6 +396,7 @@ func TestBackfillUsesIntervalPriority(t *testing.T) {
 		PollOpenInterest:     false,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
+		StartupLookback:      1,
 	}, rest, nil, &fakeStore{})
 
 	if err := c.Backfill(context.Background()); err != nil {
@@ -394,14 +409,83 @@ func TestBackfillUsesIntervalPriority(t *testing.T) {
 	}
 	want := []string{
 		"ETHUSDT:1m",
-		"BTCUSDT:1m",
 		"ETHUSDT:5m",
-		"BTCUSDT:5m",
 		"ETHUSDT:1h",
+		"BTCUSDT:1m",
+		"BTCUSDT:5m",
 		"BTCUSDT:1h",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fetch order = %#v, want %#v", got, want)
+	}
+}
+
+func TestBackfillRequestsCurrentRollingWindow(t *testing.T) {
+	now := time.UnixMilli(1700000120000).Truncate(time.Minute).Add(30 * time.Second)
+	rest := &fakeREST{klines: []model.Kline{}}
+	options := testOptions()
+	options.StartupLookback = 310
+	c := New(options, rest, nil, &fakeStore{})
+	c.now = func() time.Time { return now }
+
+	if err := c.Backfill(context.Background()); err == nil {
+		t.Fatal("expected incomplete rolling window")
+	}
+	request := rest.fetchRequests[0]
+	wantEnd := now.Truncate(time.Minute).Add(-time.Minute).UnixMilli()
+	wantStart := wantEnd - 309*time.Minute.Milliseconds()
+	if request.start != wantStart {
+		t.Fatalf("start = %d, want %d", request.start, wantStart)
+	}
+	if request.limit != 310 {
+		t.Fatalf("limit = %d, want 310", request.limit)
+	}
+}
+
+func TestBackfillReusesCompleteRecentWindow(t *testing.T) {
+	now := time.UnixMilli(1700000120000).Truncate(time.Minute).Add(30 * time.Second)
+	end := now.Truncate(time.Minute).Add(-time.Minute).UnixMilli()
+	klines := make([]model.Kline, 0, 3)
+	for index := int64(2); index >= 0; index-- {
+		klines = append(klines, model.Kline{OpenTime: end - index*time.Minute.Milliseconds(), IsClosed: true})
+	}
+	store := &fakeStore{rangeKlines: klines}
+	rest := &fakeREST{}
+	options := testOptions()
+	options.StartupLookback = 3
+	c := New(options, rest, nil, store)
+	c.now = func() time.Time { return now }
+
+	if err := c.Backfill(context.Background()); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if rest.fetchKlines != 0 {
+		t.Fatalf("FetchKlines calls = %d, want 0", rest.fetchKlines)
+	}
+}
+
+func TestAggregateRecentKlinesBuildsExactTargetWindow(t *testing.T) {
+	const minute = int64(time.Minute / time.Millisecond)
+	rule := aggregator.Rule{
+		Exchange:       "gate",
+		Market:         "usdt",
+		SourceInterval: "1m",
+		TargetInterval: "3m",
+	}
+	source := make([]model.Kline, 0, 6)
+	for index := int64(0); index < 6; index++ {
+		source = append(source, model.Kline{
+			Exchange: "gate", Market: "usdt", Symbol: "ETH_USDT", Interval: "1m",
+			OpenTime: index * minute, IsClosed: true, Open: "1", High: "2", Low: "1", Close: "2",
+		})
+	}
+
+	got, err := aggregateRecentKlines(rule, "ETH_USDT", source, 2, 6*minute)
+	if err != nil {
+		t.Fatalf("aggregateRecentKlines: %v", err)
+	}
+	if len(got) != 2 || got[0].OpenTime != 0 || got[1].OpenTime != 3*minute {
+		t.Fatalf("aggregated window = %#v", got)
 	}
 }
 
@@ -841,5 +925,6 @@ func testOptions() Options {
 		PollOpenInterest:     false,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
+		StartupLookback:      1,
 	}
 }

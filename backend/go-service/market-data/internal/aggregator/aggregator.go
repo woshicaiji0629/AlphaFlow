@@ -33,6 +33,10 @@ type Store interface {
 	IsMarketAvailable(ctx context.Context, exchange string, market string) (bool, error)
 }
 
+type symbolAvailabilityStore interface {
+	IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error)
+}
+
 type Rule struct {
 	Exchange       string
 	Market         string
@@ -100,6 +104,15 @@ func (a *Aggregator) RunOnce(ctx context.Context) error {
 			continue
 		}
 		for _, symbol := range rule.Symbols {
+			available, err := isSymbolAvailable(ctx, a.store, rule.Exchange, rule.Market, symbol)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("read symbol status %s %s %s: %w", rule.Exchange, rule.Market, symbol, err))
+				continue
+			}
+			if !available {
+				slog.Warn("skip aggregation for unavailable symbol", "exchange", rule.Exchange, "market", rule.Market, "symbol", symbol)
+				continue
+			}
 			if err := a.aggregateSymbol(ctx, rule, symbol); err != nil {
 				errs = append(errs, fmt.Errorf("aggregate %s %s %s %s->%s: %w",
 					rule.Exchange,
@@ -114,6 +127,13 @@ func (a *Aggregator) RunOnce(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func isSymbolAvailable(ctx context.Context, store Store, exchange string, market string, symbol string) (bool, error) {
+	if symbolStore, ok := store.(symbolAvailabilityStore); ok {
+		return symbolStore.IsSymbolAvailable(ctx, exchange, market, symbol)
+	}
+	return store.IsMarketAvailable(ctx, exchange, market)
 }
 
 func (a *Aggregator) runOnceWithLogging(ctx context.Context) {
