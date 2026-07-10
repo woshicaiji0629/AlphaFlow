@@ -343,6 +343,17 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 	}
 	calcWindow := window
 	if !kline.IsClosed {
+		if !windowImmediatelyPrecedesKline(window, kline, intervalMillis) {
+			slog.Debug(
+				"skip realtime indicator before previous kline closes",
+				"exchange", rule.Exchange,
+				"market", rule.Market,
+				"symbol", kline.Symbol,
+				"interval", kline.Interval,
+				"open_time", kline.OpenTime,
+			)
+			return nil
+		}
 		calcWindow = windowWithTemporaryKline(window, kline, int(r.options.LookbackPeriods))
 	}
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
@@ -402,6 +413,14 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		return err
 	}
 	return r.publishRealtimeSnapshot(ctx, realtimeSnapshot)
+}
+
+func windowImmediatelyPrecedesKline(window *indicatorcalc.CalculationWindow, kline model.Kline, intervalMillis int64) bool {
+	if window == nil {
+		return false
+	}
+	lastOpenTime, ok := window.LastOpenTime()
+	return ok && lastOpenTime+intervalMillis == kline.OpenTime
 }
 
 func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol string, interval string) error {

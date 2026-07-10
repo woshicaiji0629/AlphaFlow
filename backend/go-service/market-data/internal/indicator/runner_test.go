@@ -591,6 +591,41 @@ func TestRunnerWritesRealtimeSnapshotForOpenKlineFromHandler(t *testing.T) {
 	}
 }
 
+func TestRunnerWaitsForPreviousClosedKlineBeforeRealtimeSnapshot(t *testing.T) {
+	klines := minuteKlines(10)
+	store := &fakeStore{
+		available:    true,
+		hasLast:      true,
+		lastOpenTime: klines[len(klines)-1].OpenTime,
+		klines:       klines,
+	}
+	runner := NewRunner(store, RunnerOptions{
+		Rules: []Rule{{
+			Exchange: "binance", Market: "um", Symbols: []string{"ETHUSDT"}, Intervals: []string{"1m"},
+		}},
+		LookbackPeriods: 5,
+	})
+
+	open := minuteKline(11, 111)
+	open.IsClosed = false
+	if err := runner.HandleKline(context.Background(), open); err != nil {
+		t.Fatalf("HandleKline before close: %v", err)
+	}
+	if len(store.latestSnapshots) != 0 || len(store.realtimeSnapshots) != 0 {
+		t.Fatalf("realtime snapshots written before previous close: latest=%d realtime=%d", len(store.latestSnapshots), len(store.realtimeSnapshots))
+	}
+
+	previous := minuteKline(10, 110)
+	store.klines = append(store.klines, previous)
+	store.lastOpenTime = previous.OpenTime
+	if err := runner.HandleKline(context.Background(), open); err != nil {
+		t.Fatalf("HandleKline after close: %v", err)
+	}
+	if len(store.latestSnapshots) != 1 || len(store.realtimeSnapshots) != 1 {
+		t.Fatalf("realtime snapshots after previous close: latest=%d realtime=%d, want 1 each", len(store.latestSnapshots), len(store.realtimeSnapshots))
+	}
+}
+
 func TestRunnerCachedIndicatorSnapshotsReturnsAlignedSuffixWithCurrentSnapshot(t *testing.T) {
 	klines := minuteKlines(25)
 	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
