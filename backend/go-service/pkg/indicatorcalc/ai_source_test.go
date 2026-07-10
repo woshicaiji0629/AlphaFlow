@@ -101,6 +101,36 @@ func TestAISourceFeaturesFromCacheMatchesBatch(t *testing.T) {
 	}
 }
 
+func TestAISourceFeatureCursorMatchesBatchCache(t *testing.T) {
+	_, highs, lows, closes := aiSourceTestOHLC(180)
+	cache := newAISourceFeatureCache(closes)
+	cursor := newAISourceFeatureCursor(closes)
+	atrValues, ok := atrSeries(highs, lows, closes, 14)
+	if !ok {
+		t.Fatal("atrSeries returned false")
+	}
+	atrOffset := len(closes) - len(atrValues)
+	for index := range closes {
+		gotPoint := cursor.next(index)
+		wantPoint := cache.points[index]
+		if gotPoint != wantPoint {
+			t.Fatalf("point[%d] = %#v, want %#v", index, gotPoint, wantPoint)
+		}
+		atrValue := atrValueAt(index, atrValues, atrOffset)
+		got, gotOK := aiSourceFeaturesFromPoint(gotPoint, closes, highs, lows, index, atrValue)
+		want, wantOK := aiSourceFeaturesFromCache(cache, closes, highs, lows, index, atrValue)
+		if gotOK != wantOK {
+			t.Fatalf("features[%d] valid = %v, want %v", index, gotOK, wantOK)
+		}
+		if !gotOK {
+			continue
+		}
+		for featureIndex := range got {
+			assertFloatClose(t, "cursor feature", got[featureIndex], want[featureIndex])
+		}
+	}
+}
+
 func TestAISourceFeatureRingMatchesHistoricalRecalculation(t *testing.T) {
 	opens, highs, lows, closes := aiSourceTestOHLC(180)
 	sources := [][]float64{opens, highs, lows, closes}

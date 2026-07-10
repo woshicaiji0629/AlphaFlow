@@ -142,9 +142,9 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 	atr14Offset := len(closes) - len(atr14)
 	stATROffset := len(closes) - len(stATR)
 	sources := [][]float64{opens, highs, lows, closes}
-	featureCaches := [4]aiSourceFeatureCache{}
+	featureCursors := [4]aiSourceFeatureCursor{}
 	for sourceID := range sources {
-		featureCaches[sourceID] = newAISourceFeatureCache(sources[sourceID])
+		featureCursors[sourceID] = newAISourceFeatureCursor(sources[sourceID])
 	}
 	banks := make([][]aiSourceRow, 4)
 	for sourceID := range banks {
@@ -175,7 +175,8 @@ func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, 
 		validFeatures := [4]bool{}
 		atrValue := atrValueAt(index, atr14, atr14Offset)
 		for sourceID := 0; sourceID < 4; sourceID++ {
-			features[sourceID], validFeatures[sourceID] = aiSourceFeaturesFromCache(featureCaches[sourceID], sources[sourceID], highs, lows, index, atrValue)
+			point := featureCursors[sourceID].next(index)
+			features[sourceID], validFeatures[sourceID] = aiSourceFeaturesFromPoint(point, sources[sourceID], highs, lows, index, atrValue)
 		}
 		ringIndex := index % ringSize
 		featureRing[ringIndex] = features
@@ -313,6 +314,68 @@ type aiSourceFeatureCachePoint struct {
 	volHigh100 float64
 }
 
+type aiSourceFeatureCursor struct {
+	source        []float64
+	ema10         aiSourceEMAState
+	ema34         aiSourceEMAState
+	sum30         float64
+	sumSq30       float64
+	sum20         float64
+	sumSq20       float64
+	volLowWindow  floatMonotonicWindow
+	volHighWindow floatMonotonicWindow
+}
+
+func newAISourceFeatureCursor(source []float64) aiSourceFeatureCursor {
+	return aiSourceFeatureCursor{
+		source:        source,
+		ema10:         *newAISourceEMAState(10),
+		ema34:         *newAISourceEMAState(34),
+		volLowWindow:  newFloatMonotonicWindow(false),
+		volHighWindow: newFloatMonotonicWindow(true),
+	}
+}
+
+func (c *aiSourceFeatureCursor) next(index int) aiSourceFeatureCachePoint {
+	point := aiSourceFeatureCachePoint{}
+	if c == nil || index < 0 || index >= len(c.source) {
+		return point
+	}
+	value := c.source[index]
+	point.ema10 = c.ema10.append(value)
+	point.ema34 = c.ema34.append(value)
+	c.sum30 += value
+	c.sumSq30 += value * value
+	if index >= 30 {
+		drop := c.source[index-30]
+		c.sum30 -= drop
+		c.sumSq30 -= drop * drop
+	}
+	if index >= 29 {
+		mean := c.sum30 / 30
+		point.sma30 = mean
+		point.stddev30 = math.Sqrt(math.Max(c.sumSq30/30-mean*mean, 0))
+	}
+	c.sum20 += value
+	c.sumSq20 += value * value
+	if index >= 20 {
+		drop := c.source[index-20]
+		c.sum20 -= drop
+		c.sumSq20 -= drop * drop
+	}
+	if index >= 19 {
+		mean := c.sum20 / 20
+		point.stddev20 = math.Sqrt(math.Max(c.sumSq20/20-mean*mean, 0))
+		c.volLowWindow.push(index, point.stddev20)
+		c.volHighWindow.push(index, point.stddev20)
+		c.volLowWindow.expireBefore(index - 99)
+		c.volHighWindow.expireBefore(index - 99)
+		point.volLow100, _ = c.volLowWindow.value()
+		point.volHigh100, _ = c.volHighWindow.value()
+	}
+	return point
+}
+
 func newAISourceFeatureCache(source []float64) aiSourceFeatureCache {
 	cache := aiSourceFeatureCache{
 		points: make([]aiSourceFeatureCachePoint, len(source)),
@@ -363,11 +426,17 @@ func newAISourceFeatureCache(source []float64) aiSourceFeatureCache {
 }
 
 func aiSourceFeaturesFromCache(cache aiSourceFeatureCache, source []float64, highs []float64, lows []float64, index int, atrValue float64) ([6]float64, bool) {
+	if index < 0 || index >= len(cache.points) {
+		return [6]float64{}, false
+	}
+	return aiSourceFeaturesFromPoint(cache.points[index], source, highs, lows, index, atrValue)
+}
+
+func aiSourceFeaturesFromPoint(point aiSourceFeatureCachePoint, source []float64, highs []float64, lows []float64, index int, atrValue float64) ([6]float64, bool) {
 	var result [6]float64
 	if index < 100 || index >= len(source) || atrValue <= 0 {
 		return result, false
 	}
-	point := cache.points[index]
 	fast := point.ema10
 	slow := point.ema34
 	mean := point.sma30

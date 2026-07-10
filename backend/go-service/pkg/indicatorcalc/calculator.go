@@ -28,6 +28,8 @@ const (
 	dataQualityGap          = "gap"
 	dataQualityInvalidOHLC  = "invalid_ohlc"
 	dataQualityZeroVolume   = "zero_volume"
+	resultValuesCapacity    = 300
+	resultSignalsCapacity   = 160
 )
 
 func DefaultOptions() Options {
@@ -83,8 +85,8 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		options = DefaultOptions()
 	}
 
-	values := map[string]string{}
-	signals := map[string]string{}
+	values := make(map[string]string, resultValuesCapacity)
+	signals := make(map[string]string, resultSignalsCapacity)
 	requiredSamples := requiredSampleCount(options)
 	values["sample_count"] = strconv.Itoa(len(closed))
 	values["required_count"] = strconv.Itoa(requiredSamples)
