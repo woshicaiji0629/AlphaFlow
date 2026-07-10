@@ -42,6 +42,18 @@ func TestNewSelectsEnvironmentURL(t *testing.T) {
 	}
 }
 
+func TestCapabilityParsesExchangeFilters(t *testing.T) {
+	client := &captureClient{body: []byte(`{"serverTime":123,"symbols":[{"symbol":"ETHUSDT","status":"TRADING","filters":[{"filterType":"LOT_SIZE","minQty":"0.001","maxQty":"100","stepSize":"0.001"},{"filterType":"MARKET_LOT_SIZE","maxQty":"50"},{"filterType":"PRICE_FILTER","tickSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}`)}
+	adapter, _ := New(Options{Account: executionaccount.Account{ID: "a", Exchange: "binance", Environment: executionaccount.EnvironmentTestnet, Market: "um"}, Credential: executionaccount.Credential{APIKey: "k", APISecret: "s"}, BaseURL: "https://example.test", HTTPClient: client})
+	got, err := adapter.Capability(context.Background(), "ETHUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.QtyStep != "0.001" || got.PriceTick != "0.01" || got.MinNotional != "5" || got.MaxOrderQty != "50" {
+		t.Fatalf("capability=%#v", got)
+	}
+}
+
 type captureClient struct {
 	request *http.Request
 	body    []byte

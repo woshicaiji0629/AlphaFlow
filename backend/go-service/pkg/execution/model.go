@@ -109,6 +109,7 @@ type SymbolCapability struct {
 	Symbol       string
 	MinQty       string
 	QtyStep      string
+	PriceTick    string
 	MinNotional  string
 	MaxLeverage  string
 	MaxOrderQty  string

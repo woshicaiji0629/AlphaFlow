@@ -127,11 +127,69 @@ func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.Exe
 func (a *Adapter) CancelOrder(context.Context, string, string) error {
 	return fmt.Errorf("binance trading is not enabled")
 }
-func (a *Adapter) OpenOrders(context.Context, string) ([]execution.ExchangeOrder, error) {
-	return nil, fmt.Errorf("binance open orders are not implemented")
+func (a *Adapter) OpenOrders(ctx context.Context, symbol string) ([]execution.ExchangeOrder, error) {
+	query := map[string]string{}
+	if symbol != "" {
+		query["symbol"] = symbol
+	}
+	body, err := a.signedGet(ctx, "/fapi/v1/openOrders", query)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		OrderID                                                                  int64  `json:"orderId"`
+		ClientOrderID                                                            string `json:"clientOrderId"`
+		Symbol, Side, PositionSide, Type, Status, OrigQty, ExecutedQty, AvgPrice string
+		ReduceOnly                                                               bool
+		Time, UpdateTime                                                         int64
+	}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, fmt.Errorf("decode binance open orders: %w", err)
+	}
+	orders := make([]execution.ExchangeOrder, 0, len(rows))
+	for _, row := range rows {
+		quantity, _ := strconv.ParseFloat(row.OrigQty, 64)
+		filled, _ := strconv.ParseFloat(row.ExecutedQty, 64)
+		orders = append(orders, execution.ExchangeOrder{Exchange: "binance", Account: a.account.ID, Symbol: row.Symbol, OrderID: strconv.FormatInt(row.OrderID, 10), ClientOrderID: row.ClientOrderID, Side: execution.OrderSide(strings.ToLower(row.Side)), PositionSide: strings.ToLower(row.PositionSide), Type: execution.OrderType(strings.ToLower(row.Type)), Status: mapStatus(row.Status), Quantity: quantity, FilledQuantity: filled, AveragePrice: row.AvgPrice, ReduceOnly: row.ReduceOnly, CreatedAt: row.Time, UpdatedAt: row.UpdateTime})
+	}
+	return orders, nil
 }
-func (a *Adapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
-	return execution.SymbolCapability{}, fmt.Errorf("binance capability is not implemented")
+func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.SymbolCapability, error) {
+	body, err := a.publicGet(ctx, "/fapi/v1/exchangeInfo", map[string]string{"symbol": symbol})
+	if err != nil {
+		return execution.SymbolCapability{}, err
+	}
+	var response struct {
+		ServerTime int64
+		Symbols    []struct {
+			Symbol, Status string
+			Filters        []struct{ FilterType, MinQty, MaxQty, StepSize, TickSize, Notional string }
+		}
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return execution.SymbolCapability{}, fmt.Errorf("decode binance exchange info: %w", err)
+	}
+	for _, item := range response.Symbols {
+		if item.Symbol != symbol {
+			continue
+		}
+		capability := execution.SymbolCapability{Exchange: "binance", Market: a.account.Market, Symbol: symbol, ContractSize: "1", UpdatedAt: response.ServerTime}
+		for _, filter := range item.Filters {
+			switch filter.FilterType {
+			case "LOT_SIZE":
+				capability.MinQty = filter.MinQty
+				capability.QtyStep = filter.StepSize
+			case "MARKET_LOT_SIZE":
+				capability.MaxOrderQty = filter.MaxQty
+			case "PRICE_FILTER":
+				capability.PriceTick = filter.TickSize
+			case "MIN_NOTIONAL":
+				capability.MinNotional = filter.Notional
+			}
+		}
+		return capability, nil
+	}
+	return execution.SymbolCapability{}, fmt.Errorf("binance symbol %s missing", symbol)
 }
 func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
 	body, err := a.signedGet(ctx, "/fapi/v1/order", map[string]string{"symbol": intent.Symbol, "origClientOrderId": intent.IntentID})
@@ -166,6 +224,26 @@ func (a *Adapter) signedGet(ctx context.Context, path string, query map[string]s
 		return nil, err
 	}
 	req.Header.Set("X-MBX-APIKEY", a.credential.APIKey)
+	body, err := a.client.DoBytes(req)
+	if err != nil {
+		return nil, fmt.Errorf("binance %s: %w", path, err)
+	}
+	return body, nil
+}
+
+func (a *Adapter) publicGet(ctx context.Context, path string, query map[string]string) ([]byte, error) {
+	values := url.Values{}
+	for key, value := range query {
+		values.Set(key, value)
+	}
+	endpoint := a.baseURL + path
+	if encoded := values.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
 	body, err := a.client.DoBytes(req)
 	if err != nil {
 		return nil, fmt.Errorf("binance %s: %w", path, err)
