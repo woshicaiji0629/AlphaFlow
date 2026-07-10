@@ -232,16 +232,15 @@ func prepareIndicatorSeries(klines []marketmodel.Kline, options indicatorcalc.Op
 			UpdatedAt: result.CloseTime,
 		})
 	}
-	windows := make([]strategy.IndicatorWindowView, 0, len(indicators))
-	for index := range indicators {
-		start := index + 1 - indicatorwindow.DefaultLookback
-		if start < 0 {
-			start = 0
-		}
-		result, err := indicatorwindow.Analyze(indicators[start : index+1])
-		if err != nil {
-			return preparedSeries{}, err
-		}
+	windowResults, err := indicatorwindow.CalculateWindows(indicators)
+	if err != nil {
+		return preparedSeries{}, err
+	}
+	if len(windowResults) != len(indicators) {
+		return preparedSeries{}, fmt.Errorf("window results=%d do not match indicators=%d", len(windowResults), len(indicators))
+	}
+	windows := make([]strategy.IndicatorWindowView, 0, len(windowResults))
+	for _, result := range windowResults {
 		window, err := strategyframe.WindowViewFromResult(result, result.CloseTime)
 		if err != nil {
 			return preparedSeries{}, err

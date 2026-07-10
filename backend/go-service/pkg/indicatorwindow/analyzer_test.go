@@ -1,10 +1,67 @@
 package indicatorwindow
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 
 	model "alphaflow/go-service/pkg/marketmodel"
 )
+
+func TestCalculateWindowsMatchesAnalyzePrefixes(t *testing.T) {
+	snapshots := benchmarkSnapshots(40)
+	results, err := CalculateWindows(snapshots)
+	if err != nil {
+		t.Fatalf("CalculateWindows: %v", err)
+	}
+	if len(results) != len(snapshots) {
+		t.Fatalf("results = %d, want %d", len(results), len(snapshots))
+	}
+	for index := range snapshots {
+		want, err := Analyze(snapshots[:index+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(results[index], want) {
+			t.Fatalf("result[%d] does not match Analyze prefix", index)
+		}
+	}
+}
+
+func BenchmarkCalculateWindows300(b *testing.B) {
+	snapshots := benchmarkSnapshots(300)
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := CalculateWindows(snapshots); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkAnalyzePrefixes300(b *testing.B) {
+	snapshots := benchmarkSnapshots(300)
+	b.ReportAllocs()
+	for range b.N {
+		for index := range snapshots {
+			if _, err := Analyze(snapshots[:index+1]); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func benchmarkSnapshots(count int) []model.IndicatorSnapshot {
+	snapshots := make([]model.IndicatorSnapshot, 0, count)
+	for index := 0; index < count; index++ {
+		snapshots = append(snapshots, testSnapshot(int64(index+1), map[string]string{
+			"ema7": fmt.Sprintf("%d", 100+index), "macd_hist": fmt.Sprintf("%d", index%7),
+			"rsi14": fmt.Sprintf("%d", 40+index%30), "volume_ratio20": "1.2",
+		}, map[string]string{
+			"ema_alignment": "bull", "supertrend_direction": "up",
+		}))
+	}
+	return snapshots
+}
 
 func TestAnalyzeBuildsWindowSnapshotFromIndicatorSequence(t *testing.T) {
 	snapshots := []model.IndicatorSnapshot{

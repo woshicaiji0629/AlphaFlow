@@ -3,9 +3,21 @@ package indicatorcalc
 import "math"
 
 func addTradingViewFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addTradingViewFeaturesWithContext(values, signals, highs, lows, closes, nil)
+}
+
+func addTradingViewFeaturesWithContext(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
 	addQQEModFeatures(values, signals, closes, 6, 5, 3)
 	addQQEModEnhancedFeatures(values, signals, closes)
-	addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
+	if features != nil {
+		if atrValues, ok := features.atrSeries(10); ok {
+			addUTBotFeaturesWithATR(values, signals, closes, 10, 1, atrValues)
+		} else {
+			addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
+		}
+	} else {
+		addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
+	}
 	addSSLChannelFeatures(values, signals, highs, lows, closes, 10)
 	addRangeFilterFeatures(values, signals, closes, 100, 3)
 	addWilliamsVixFixFeatures(values, signals, highs, lows, closes, 22, 20, 2, 50, 0.85)
@@ -263,7 +275,15 @@ func qqeMod(closes []float64, rsiPeriod int, smoothing int, factor float64) (flo
 }
 
 func addUTBotFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
-	stop, direction, previousDirection, ok := utBot(highs, lows, closes, period, multiplier)
+	atrValues, ok := atrSeries(highs, lows, closes, period)
+	if !ok {
+		return
+	}
+	addUTBotFeaturesWithATR(values, signals, closes, period, multiplier, atrValues)
+}
+
+func addUTBotFeaturesWithATR(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64, atrValues []float64) {
+	stop, direction, previousDirection, ok := utBotWithATR(closes, period, multiplier, atrValues)
 	if !ok {
 		return
 	}
@@ -275,7 +295,14 @@ func addUTBotFeatures(values map[string]string, signals map[string]string, highs
 
 func utBot(highs []float64, lows []float64, closes []float64, period int, multiplier float64) (float64, string, string, bool) {
 	atrValues, ok := atrSeries(highs, lows, closes, period)
-	if !ok || len(atrValues) < 2 {
+	if !ok {
+		return 0, "", "", false
+	}
+	return utBotWithATR(closes, period, multiplier, atrValues)
+}
+
+func utBotWithATR(closes []float64, period int, multiplier float64, atrValues []float64) (float64, string, string, bool) {
+	if len(atrValues) < 2 || len(closes) <= period {
 		return 0, "", "", false
 	}
 	stop := closes[period] - multiplier*atrValues[0]

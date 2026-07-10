@@ -1,9 +1,18 @@
 package indicatorcalc
 
 func addTrendFeatures(values map[string]string, signals map[string]string, closes []float64) {
+	addTrendFeaturesWithContext(values, signals, closes, nil)
+}
+
+func addTrendFeaturesWithContext(values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
 	ema7, ok7 := ema(closes, 7)
 	ema25, ok25 := ema(closes, 25)
 	ema99, ok99 := ema(closes, 99)
+	if features != nil {
+		ema7, ok7 = features.emaValue(7)
+		ema25, ok25 = features.emaValue(25)
+		ema99, ok99 = features.emaValue(99)
+	}
 	last := closes[len(closes)-1]
 	if ok7 && ok25 && ok99 {
 		setValue(values, "price_ema7_distance_pct", percentDistance(last, ema7), true)

@@ -89,7 +89,18 @@ func defaultAISourceConfig() aiSourceConfig {
 }
 
 func addAISourceSwitchingFeatures(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
-	result, ok := aiSourceSwitching(opens, highs, lows, closes, defaultAISourceConfig())
+	addAISourceSwitchingFeaturesWithContext(values, signals, opens, highs, lows, closes, nil)
+}
+
+func addAISourceSwitchingFeaturesWithContext(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, features *featureContext) {
+	cfg := defaultAISourceConfig()
+	var atr14, stATR []float64
+	var ok14, okST bool
+	if features != nil {
+		atr14, ok14 = features.atrSeries(14)
+		stATR, okST = features.atrSeries(cfg.stLength)
+	}
+	result, ok := aiSourceSwitchingWithATR(opens, highs, lows, closes, cfg, atr14, ok14, stATR, okST)
 	if !ok {
 		signals["ai_source_ready"] = "false"
 		return
@@ -112,11 +123,19 @@ func addAISourceSwitchingFeatures(values map[string]string, signals map[string]s
 }
 
 func aiSourceSwitching(opens []float64, highs []float64, lows []float64, closes []float64, cfg aiSourceConfig) (aiSourceResult, bool) {
+	return aiSourceSwitchingWithATR(opens, highs, lows, closes, cfg, nil, false, nil, false)
+}
+
+func aiSourceSwitchingWithATR(opens []float64, highs []float64, lows []float64, closes []float64, cfg aiSourceConfig, atr14 []float64, ok14 bool, stATR []float64, okST bool) (aiSourceResult, bool) {
 	if !validAISourceInput(opens, highs, lows, closes, cfg) {
 		return aiSourceResult{}, false
 	}
-	atr14, ok14 := atrSeries(highs, lows, closes, 14)
-	stATR, okST := atrSeries(highs, lows, closes, cfg.stLength)
+	if !ok14 {
+		atr14, ok14 = atrSeries(highs, lows, closes, 14)
+	}
+	if !okST {
+		stATR, okST = atrSeries(highs, lows, closes, cfg.stLength)
+	}
 	if !ok14 || !okST {
 		return aiSourceResult{}, false
 	}

@@ -78,7 +78,16 @@ func squeezeState(squeeze string, momentum float64, previous float64) string {
 }
 
 func addBollingerFeatures(values map[string]string, signals map[string]string, closes []float64) {
-	upper, middle, lower, ok := bollinger(closes, 20, 2)
+	addBollingerFeaturesWithContext(values, signals, closes, nil)
+}
+
+func addBollingerFeaturesWithContext(values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
+	upper, middle, lower, ok := 0.0, 0.0, 0.0, false
+	if features != nil {
+		upper, middle, lower, ok = features.bollinger(20, 2)
+	} else {
+		upper, middle, lower, ok = bollinger(closes, 20, 2)
+	}
 	if !ok || middle == 0 || upper == lower {
 		return
 	}
@@ -120,13 +129,40 @@ func addBollingerShapeFeatures(values map[string]string, signals map[string]stri
 }
 
 func addChannelFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
-	addDonchianChannelFeatures(values, signals, highs, lows, closes, 20)
+	addChannelFeaturesWithContext(values, signals, highs, lows, closes, nil)
+}
+
+func addChannelFeaturesWithContext(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
+	if features != nil {
+		if upper, lower, ok := features.donchian(20); ok {
+			addDonchianChannelFeaturesWithRange(values, signals, highs, lows, closes, 20, upper, lower)
+		} else {
+			addDonchianChannelFeatures(values, signals, highs, lows, closes, 20)
+		}
+	} else {
+		addDonchianChannelFeatures(values, signals, highs, lows, closes, 20)
+	}
+	if features != nil {
+		atrValue, atrOK := features.atrValue(20)
+		middle, middleOK := features.emaValue(20)
+		if atrOK && middleOK {
+			addKeltnerChannelFeaturesWithValues(values, signals, closes, middle, atrValue, 2)
+			return
+		}
+	}
 	addKeltnerChannelFeatures(values, signals, highs, lows, closes, 20, 20, 2)
 }
 
 func addDonchianChannelFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
 	upper, lower, ok := donchian(highs, lows, period)
 	if !ok || len(closes) == 0 {
+		return
+	}
+	addDonchianChannelFeaturesWithRange(values, signals, highs, lows, closes, period, upper, lower)
+}
+
+func addDonchianChannelFeaturesWithRange(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, upper float64, lower float64) {
+	if len(closes) == 0 {
 		return
 	}
 	middle := (upper + lower) / 2
@@ -148,12 +184,23 @@ func addDonchianChannelFeatures(values map[string]string, signals map[string]str
 }
 
 func addKeltnerChannelFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, emaPeriod int, atrPeriod int, multiplier float64) {
-	middle, ok := ema(closes, emaPeriod)
-	if !ok {
-		return
-	}
 	atrValue, ok := atr(highs, lows, closes, atrPeriod)
 	if !ok || len(closes) == 0 {
+		return
+	}
+	addKeltnerChannelFeaturesWithATR(values, signals, closes, emaPeriod, atrValue, multiplier)
+}
+
+func addKeltnerChannelFeaturesWithATR(values map[string]string, signals map[string]string, closes []float64, emaPeriod int, atrValue float64, multiplier float64) {
+	middle, ok := ema(closes, emaPeriod)
+	if !ok || len(closes) == 0 {
+		return
+	}
+	addKeltnerChannelFeaturesWithValues(values, signals, closes, middle, atrValue, multiplier)
+}
+
+func addKeltnerChannelFeaturesWithValues(values map[string]string, signals map[string]string, closes []float64, middle float64, atrValue float64, multiplier float64) {
+	if len(closes) == 0 {
 		return
 	}
 	upper := middle + atrValue*multiplier

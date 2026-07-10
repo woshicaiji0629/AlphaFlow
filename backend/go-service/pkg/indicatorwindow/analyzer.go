@@ -32,7 +32,43 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	for _, snapshot := range ordered {
 		points = append(points, pointFromSnapshot(snapshot))
 	}
-	last := ordered[len(ordered)-1]
+	return analyzePoints(points)
+}
+
+// CalculateWindows analyzes every ordered suffix once while reusing the
+// snapshot ordering and point conversion work across results.
+func CalculateWindows(snapshots []model.IndicatorSnapshot) ([]Result, error) {
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	ordered := append([]model.IndicatorSnapshot(nil), snapshots...)
+	sort.SliceStable(ordered, func(i int, j int) bool {
+		return ordered[i].OpenTime < ordered[j].OpenTime
+	})
+	points := make([]point, 0, len(ordered))
+	for _, snapshot := range ordered {
+		points = append(points, pointFromSnapshot(snapshot))
+	}
+	results := make([]Result, 0, len(points))
+	for index := range points {
+		start := index + 1 - DefaultLookback
+		if start < 0 {
+			start = 0
+		}
+		result, err := analyzePoints(points[start : index+1])
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func analyzePoints(points []point) (Result, error) {
+	if len(points) == 0 {
+		return Result{}, fmt.Errorf("no indicator points")
+	}
+	last := points[len(points)-1]
 	ctx := &analysisContext{
 		values: map[string]string{
 			"window_sample_count": strconv.Itoa(len(points)),
@@ -58,8 +94,8 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	addGenericWindowAnalysis(ctx)
 
 	return Result{
-		OpenTime:  last.OpenTime,
-		CloseTime: last.CloseTime,
+		OpenTime:  last.openTime,
+		CloseTime: last.closeTime,
 		Version:   Version,
 		Values:    ctx.values,
 		Signals:   ctx.signals,

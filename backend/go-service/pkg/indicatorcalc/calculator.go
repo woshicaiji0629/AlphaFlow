@@ -121,6 +121,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		}, nil
 	}
 	basic := window.basic
+	features := newFeatureContext(highs, lows, closes, basic)
 
 	for _, period := range options.SMAPeriods {
 		value, ok := basic.sma(period)
@@ -158,14 +159,12 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
 	}
 	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series, basic)
-	if atr14Series, ok := basic.atrSeries14(); ok {
-		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
-	} else if atr14Series, ok := atrSeries(highs, lows, closes, 14); ok {
+	if atr14Series, ok := features.atrSeries(14); ok {
 		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
 	} else {
 		addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
 	}
-	upper, middle, lower, ok := bollinger(closes, 20, 2)
+	upper, middle, lower, ok := features.bollinger(20, 2)
 	if ok {
 		setValue(values, "bb_upper", upper, true)
 		setValue(values, "bb_middle", middle, true)
@@ -181,7 +180,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	} else {
 		setValue(values, "obv", obv(closes, volumes), true)
 	}
-	donchianHigh, donchianLow, ok := donchian(highs, lows, 20)
+	donchianHigh, donchianLow, ok := features.donchian(20)
 	if ok {
 		setValue(values, "donchian_high20", donchianHigh, true)
 		setValue(values, "donchian_low20", donchianLow, true)
@@ -192,7 +191,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
 	}
 	addDerived(values, opens, highs, lows, closes, volumes)
-	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic)
+	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic, features)
 
 	return Result{
 		OpenTime:  last.OpenTime,

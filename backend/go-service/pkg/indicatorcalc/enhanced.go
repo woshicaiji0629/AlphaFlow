@@ -1,7 +1,7 @@
 package indicatorcalc
 
-func addEnhanced(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
-	addTrendFeatures(values, signals, closes)
+func addEnhanced(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState, features *featureContext) {
+	addTrendFeaturesWithContext(values, signals, closes, features)
 	addCandlePatterns(signals, opens, highs, lows, closes)
 	addHeikinAshiFeatures(values, signals, opens, highs, lows, closes)
 	addSupportResistance(values, signals, highs, lows, closes)
@@ -15,10 +15,10 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addMoneyFlowFeatures(values, signals, highs, lows, closes, volumes, basic)
 	addDynamicSwingAnchoredVWAP(values, signals, highs, lows, closes, volumes)
 	addSqueezeMomentum(values, signals, highs, lows, closes)
-	addBollingerFeatures(values, signals, closes)
-	addChannelFeatures(values, signals, highs, lows, closes)
-	addTradingViewFeatures(values, signals, highs, lows, closes)
+	addBollingerFeaturesWithContext(values, signals, closes, features)
+	addChannelFeaturesWithContext(values, signals, highs, lows, closes, features)
+	addTradingViewFeaturesWithContext(values, signals, highs, lows, closes, features)
 	addSmartMoney(values, signals, opens, highs, lows, closes)
 	addLivermoreFeatures(values, signals, highs, lows, closes, opens)
-	addAISourceSwitchingFeatures(values, signals, opens, highs, lows, closes)
+	addAISourceSwitchingFeaturesWithContext(values, signals, opens, highs, lows, closes, features)
 }
