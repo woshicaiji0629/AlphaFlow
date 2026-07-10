@@ -56,6 +56,7 @@ services:
     build:
       context: ./backend/go-service
       dockerfile: docker/market-data.Dockerfile
+      target: market-data-runtime
     container_name: alphaflow-market-data
     profiles: ["live"]
     depends_on:
