@@ -21,9 +21,10 @@ type RESTClient struct {
 }
 
 type candlesResponse struct {
-	Code string     `json:"code"`
-	Msg  string     `json:"msg"`
-	Data [][]string `json:"data"`
+	Code        string     `json:"code"`
+	Msg         string     `json:"msg"`
+	RequestTime int64      `json:"requestTime"`
+	Data        [][]string `json:"data"`
 }
 
 func NewRESTClient(baseURL string, productType string, httpClient HTTPClient) *RESTClient {
@@ -79,6 +80,9 @@ func (c *RESTClient) FetchKlines(
 			return nil, err
 		}
 		if startTime > 0 && kline.OpenTime < startTime {
+			continue
+		}
+		if response.RequestTime > 0 && kline.CloseTime >= response.RequestTime {
 			continue
 		}
 		klines = append(klines, kline)

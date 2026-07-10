@@ -332,24 +332,50 @@ func handleMarketSnapshotMessage(
 	message marketbus.SnapshotMessage,
 	targets []strategy.Target,
 ) error {
+	now := time.Now().UnixMilli()
+	attrs := marketSnapshotLogAttrs(message, now)
 	applied, err := runtime.marketState.Apply(message.Envelope)
 	if err != nil {
-		slog.Warn("market snapshot skipped", "message_id", message.ID, "error", err)
+		slog.Warn("market snapshot skipped", append(attrs, "error", err)...)
 		return marketBus.Ack(ctx, message.ID)
 	}
 	if !applied {
+		slog.Debug("market snapshot consumed", append(attrs, "applied", false, "matched_targets", 0)...)
 		return marketBus.Ack(ctx, message.ID)
 	}
+	matchedTargets := 0
 	for index, target := range targets {
 		intervals := config.ConfirmIntervals(cfg.Targets[index])
 		if !messageMatchesTarget(message.Envelope.Target, target, intervals) {
 			continue
 		}
+		matchedTargets++
 		if err := runTargetFromState(ctx, cfg, runtime, target, intervals); err != nil {
 			return err
 		}
 	}
+	slog.Debug("market snapshot consumed", append(attrs, "applied", true, "matched_targets", matchedTargets)...)
 	return marketBus.Ack(ctx, message.ID)
+}
+
+func marketSnapshotLogAttrs(message marketbus.SnapshotMessage, now int64) []any {
+	lagMillis := int64(0)
+	if message.Envelope.CreatedAt > 0 {
+		lagMillis = now - message.Envelope.CreatedAt
+	}
+	expiresInMillis := int64(0)
+	if message.Envelope.ExpiresAt > 0 {
+		expiresInMillis = message.Envelope.ExpiresAt - now
+	}
+	return []any{
+		"message_id", message.ID,
+		"snapshot_type", message.Envelope.Type,
+		"trace_id", message.Envelope.TraceID,
+		"target", message.Envelope.Target,
+		"lag_ms", lagMillis,
+		"expires_in_ms", expiresInMillis,
+		"delivery_count", message.DeliveryCount,
+	}
 }
 
 func runTargetFromState(

@@ -59,6 +59,15 @@ func (c *Collector) Backfill(ctx context.Context) error {
 				slog.Warn("backfill klines failed", "symbol", symbol, "interval", interval, "error", err)
 				continue
 			}
+			klines, err = closedBackfillKlines(klines, interval, c.now().UnixMilli())
+			if err != nil {
+				failures++
+				slog.Warn("filter backfill klines failed", "symbol", symbol, "interval", interval, "error", err)
+				continue
+			}
+			if len(klines) == 0 {
+				continue
+			}
 			if err := c.store.UpsertKlines(ctx, klines); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -78,6 +87,22 @@ func (c *Collector) Backfill(ctx context.Context) error {
 		return fmt.Errorf("all backfill attempts failed: attempts=%d failures=%d", attempts, failures)
 	}
 	return nil
+}
+
+func closedBackfillKlines(klines []model.Kline, interval string, now int64) ([]model.Kline, error) {
+	intervalMillis, err := model.IntervalMillis(interval)
+	if err != nil {
+		return nil, err
+	}
+	closed := make([]model.Kline, 0, len(klines))
+	for _, kline := range klines {
+		if kline.OpenTime+intervalMillis > now {
+			continue
+		}
+		kline.IsClosed = true
+		closed = append(closed, kline)
+	}
+	return closed, nil
 }
 
 func (c *Collector) backfillIntervals() []string {

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
+	"alphaflow/go-service/pkg/marketbus"
 	"alphaflow/go-service/pkg/position"
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/strategy-engine/internal/config"
@@ -69,6 +71,32 @@ func TestBrokerForScopeOnlyEnablesPaper(t *testing.T) {
 	}
 	if brokerForScope(strategy.PositionScopeBacktest) != nil {
 		t.Fatal("backtest broker != nil")
+	}
+}
+
+func TestMarketSnapshotLogAttrs(t *testing.T) {
+	message := marketbus.SnapshotMessage{
+		ID: "42",
+		Envelope: marketbus.SnapshotEnvelope{
+			Type:      marketbus.SnapshotTypeRealtime,
+			TraceID:   "trace-1",
+			Target:    marketbus.SnapshotTarget{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"},
+			CreatedAt: 900,
+			ExpiresAt: 1200,
+		},
+		DeliveryCount: 2,
+	}
+	want := []any{
+		"message_id", "42",
+		"snapshot_type", marketbus.SnapshotTypeRealtime,
+		"trace_id", "trace-1",
+		"target", message.Envelope.Target,
+		"lag_ms", int64(100),
+		"expires_in_ms", int64(200),
+		"delivery_count", int64(2),
+	}
+	if got := marketSnapshotLogAttrs(message, 1000); !reflect.DeepEqual(got, want) {
+		t.Fatalf("marketSnapshotLogAttrs() = %#v, want %#v", got, want)
 	}
 }
 

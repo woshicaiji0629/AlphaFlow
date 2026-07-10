@@ -73,6 +73,44 @@ services:
     command: ["market-data", "-config", "configs/market-data.live-top500.toml"]
     restart: unless-stopped
 
+  strategy-engine:
+    build:
+      context: ./backend/go-service
+      dockerfile: docker/market-data.Dockerfile
+    container_name: alphaflow-strategy-engine
+    profiles: ["live"]
+    depends_on:
+      - redis
+      - nats
+      - clickhouse
+    environment:
+      ALPHAFLOW_REDIS_ADDR: redis:6380
+      ALPHAFLOW_NATS_URL: nats://nats:4222
+      ALPHAFLOW_CLICKHOUSE_ADDR: clickhouse:9000
+      ALPHAFLOW_CLICKHOUSE_USERNAME: alphaflow
+      ALPHAFLOW_CLICKHOUSE_PASSWORD: alphaflow
+    volumes:
+      - ./logs/go-service:/workspace/logs/go-service
+    command: ["strategy-engine", "-config", "configs/strategy-engine.local.toml"]
+    restart: unless-stopped
+
+  position-engine:
+    build:
+      context: ./backend/go-service
+      dockerfile: docker/market-data.Dockerfile
+    container_name: alphaflow-position-engine
+    profiles: ["live"]
+    depends_on:
+      - redis
+      - nats
+    environment:
+      ALPHAFLOW_REDIS_ADDR: redis:6380
+      ALPHAFLOW_NATS_URL: nats://nats:4222
+    volumes:
+      - ./logs/go-service:/workspace/logs/go-service
+    command: ["position-engine", "-config", "configs/position-engine.local.toml"]
+    restart: unless-stopped
+
   kline-admin:
     build:
       context: ./backend/go-service

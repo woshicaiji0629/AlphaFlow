@@ -72,3 +72,10 @@ func TestUniqueSubjects(t *testing.T) {
 		t.Fatalf("subjects = %#v, want order-preserved unique subjects", subjects)
 	}
 }
+
+func TestDecisionStreamConfigExpiresMessages(t *testing.T) {
+	config := decisionStreamConfig("STRATEGY", []string{"strategy.decision"})
+	if config.MaxAge != 24*time.Hour {
+		t.Fatalf("max age = %s, want %s", config.MaxAge, 24*time.Hour)
+	}
+}

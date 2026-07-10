@@ -38,6 +38,11 @@ type queueStatusRow struct {
 
 var queueStatusTargets = []queueStatusTarget{
 	{
+		Name:     "market-snapshot",
+		Stream:   "ALPHAFLOW_MARKET",
+		Consumer: "strategy-engine-market",
+	},
+	{
 		Name:     "market-indicator",
 		Stream:   "ALPHAFLOW_MARKET_INDICATOR",
 		Consumer: "market-data-indicator-worker",

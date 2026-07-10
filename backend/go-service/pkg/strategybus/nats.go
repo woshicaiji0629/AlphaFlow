@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	DefaultNATSURL            = nats.DefaultURL
-	DefaultDecisionSubject    = "strategy.decision"
-	DefaultDecisionStreamName = "ALPHAFLOW_STRATEGY"
+	DefaultNATSURL              = nats.DefaultURL
+	DefaultDecisionSubject      = "strategy.decision"
+	DefaultDecisionStreamName   = "ALPHAFLOW_STRATEGY"
+	defaultDecisionStreamMaxAge = 24 * time.Hour
 )
 
 type NATSOptions struct {
@@ -321,12 +322,7 @@ func ensureDecisionStream(js nats.JetStreamContext, stream string, subjects ...s
 	if len(cleanSubjects) == 0 {
 		return fmt.Errorf("nats stream subjects cannot be empty")
 	}
-	cfg := &nats.StreamConfig{
-		Name:      stream,
-		Subjects:  cleanSubjects,
-		Storage:   nats.FileStorage,
-		Retention: nats.LimitsPolicy,
-	}
+	cfg := decisionStreamConfig(stream, cleanSubjects)
 	if _, err := js.StreamInfo(stream); err == nil {
 		_, err = js.UpdateStream(cfg)
 		if err != nil {
@@ -340,6 +336,16 @@ func ensureDecisionStream(js nats.JetStreamContext, stream string, subjects ...s
 		return fmt.Errorf("create nats decision stream: %w", err)
 	}
 	return nil
+}
+
+func decisionStreamConfig(stream string, subjects []string) *nats.StreamConfig {
+	return &nats.StreamConfig{
+		Name:      stream,
+		Subjects:  subjects,
+		Storage:   nats.FileStorage,
+		Retention: nats.LimitsPolicy,
+		MaxAge:    defaultDecisionStreamMaxAge,
+	}
 }
 
 func uniqueSubjects(subjects ...string) []string {

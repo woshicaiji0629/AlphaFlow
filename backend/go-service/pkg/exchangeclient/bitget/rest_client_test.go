@@ -1,6 +1,17 @@
 package bitget
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+type fakeHTTPClient struct {
+	body []byte
+}
+
+func (c fakeHTTPClient) Get(context.Context, string, map[string]string) ([]byte, error) {
+	return c.body, nil
+}
 
 func TestKlineFromRaw(t *testing.T) {
 	client := NewRESTClient("https://example.test", "USDT-FUTURES", nil)
@@ -22,6 +33,24 @@ func TestKlineFromRaw(t *testing.T) {
 	}
 	if kline.QuoteVolume != "15" {
 		t.Fatalf("quote volume = %q, want 15", kline.QuoteVolume)
+	}
+}
+
+func TestFetchKlinesExcludesCurrentCandle(t *testing.T) {
+	client := NewRESTClient("https://example.test", "USDT-FUTURES", fakeHTTPClient{body: []byte(`{
+		"code":"00000",
+		"requestTime":1700000060000,
+		"data":[
+			["1700000040000","1","2","0.5","1.5","10","15"],
+			["1699999980000","1","2","0.5","1.5","10","15"]
+		]
+	}`)})
+	klines, err := client.FetchKlines(context.Background(), "ETHUSDT", "1m", 100, 0)
+	if err != nil {
+		t.Fatalf("FetchKlines: %v", err)
+	}
+	if len(klines) != 1 || klines[0].OpenTime != 1699999980000 || !klines[0].IsClosed {
+		t.Fatalf("klines = %#v, want only closed candle", klines)
 	}
 }
 

@@ -34,6 +34,7 @@ type fakeREST struct {
 	fetchRequests          []backfillRequest
 	openInterestSymbols    []string
 	openInterestErr        error
+	klines                 []model.Kline
 }
 
 type backfillRequest struct {
@@ -70,6 +71,9 @@ func (r *fakeREST) FetchKlines(
 	}
 	if r.fetchKlinesErr != nil {
 		return nil, r.fetchKlinesErr
+	}
+	if r.klines != nil {
+		return append([]model.Kline(nil), r.klines...), nil
 	}
 	return []model.Kline{{
 		Exchange:  "binance",
@@ -204,6 +208,24 @@ func TestBackfillMarksMarketAvailableAfterSuccessfulUpdate(t *testing.T) {
 	}
 	if !store.statuses[0].Available {
 		t.Fatalf("market status available = false, want true")
+	}
+}
+
+func TestBackfillStoresOnlyClosedKlines(t *testing.T) {
+	now := int64(1700000120000)
+	rest := &fakeREST{klines: []model.Kline{
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: now - 60000},
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: now},
+	}}
+	store := &fakeStore{}
+	c := New(testOptions(), rest, nil, store)
+	c.now = func() time.Time { return time.UnixMilli(now) }
+
+	if err := c.Backfill(context.Background()); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if got := atomic.LoadInt64(&store.klines); got != 1 {
+		t.Fatalf("stored klines = %d, want only one closed kline", got)
 	}
 }
 

@@ -116,3 +116,10 @@ func TestSubjectForType(t *testing.T) {
 		t.Fatalf("closed subject = %q, want %q", got, DefaultClosedSubject)
 	}
 }
+
+func TestMarketStreamConfigExpiresMessages(t *testing.T) {
+	config := marketStreamConfig("MARKET", []string{"market.snapshot.*"})
+	if config.MaxAge != time.Hour {
+		t.Fatalf("max age = %s, want %s", config.MaxAge, time.Hour)
+	}
+}

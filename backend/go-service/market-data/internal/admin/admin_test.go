@@ -14,6 +14,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestQueueStatusTargetsIncludeMarketSnapshotConsumer(t *testing.T) {
+	for _, target := range queueStatusTargets {
+		if target.Name == "market-snapshot" {
+			if target.Stream != "ALPHAFLOW_MARKET" || target.Consumer != "strategy-engine-market" {
+				t.Fatalf("market snapshot target = %#v", target)
+			}
+			return
+		}
+	}
+	t.Fatal("market snapshot queue status target not found")
+}
+
 func TestTimeRangeUsesMinutePrecisionAndRightOpenEnd(t *testing.T) {
 	start, end, err := timeRange("202606010000", "202607010000", "Asia/Shanghai")
 	if err != nil {

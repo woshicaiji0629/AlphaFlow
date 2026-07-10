@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
@@ -17,6 +19,8 @@ import (
 type WSClient struct {
 	baseURL     string
 	productType string
+	klineMu     sync.Mutex
+	openKlines  map[string]model.Kline
 }
 
 type subscribeMessage struct {
@@ -165,16 +169,58 @@ func (c *WSClient) dispatchKlines(ctx context.Context, msg message, handler exch
 		return fmt.Errorf("decode kline data: %w", err)
 	}
 
+	klines := make([]model.Kline, 0, len(data))
 	for _, item := range data {
 		kline, err := exchangebitget.KlineFromRaw(c.productType, msg.Arg.InstID, interval, item)
 		if err != nil {
 			return err
 		}
+		kline.EventTime = int64(msg.Ts)
+		klines = append(klines, kline)
+	}
+	sort.SliceStable(klines, func(i, j int) bool {
+		return klines[i].OpenTime < klines[j].OpenTime
+	})
+	for _, kline := range c.klineEvents(klines, int64(msg.Ts)) {
 		if err := handler.HandleKline(ctx, kline); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *WSClient) klineEvents(klines []model.Kline, eventTime int64) []model.Kline {
+	c.klineMu.Lock()
+	defer c.klineMu.Unlock()
+	if c.openKlines == nil {
+		c.openKlines = make(map[string]model.Kline)
+	}
+
+	events := make([]model.Kline, 0, len(klines)+1)
+	for _, kline := range klines {
+		key := kline.Symbol + ":" + kline.Interval
+		current, hasCurrent := c.openKlines[key]
+		if eventTime > kline.CloseTime {
+			if hasCurrent && kline.OpenTime >= current.OpenTime {
+				kline.IsClosed = true
+				events = append(events, kline)
+				delete(c.openKlines, key)
+			}
+			continue
+		}
+		if hasCurrent && kline.OpenTime < current.OpenTime {
+			continue
+		}
+		if hasCurrent && kline.OpenTime > current.OpenTime {
+			current.IsClosed = true
+			current.EventTime = eventTime
+			events = append(events, current)
+		}
+		kline.IsClosed = false
+		c.openKlines[key] = kline
+		events = append(events, kline)
+	}
+	return events
 }
 
 func (c *WSClient) dispatchTickers(ctx context.Context, msg message, handler exchange.Handler) error {

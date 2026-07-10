@@ -11,6 +11,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const defaultSnapshotStreamMaxAge = time.Hour
+
 type NATSPublisherOptions struct {
 	URL             string
 	Stream          string
@@ -325,12 +327,7 @@ func ensureStream(js nats.JetStreamContext, stream string, subjects ...string) e
 	if len(cleanSubjects) == 0 {
 		return fmt.Errorf("nats stream subjects cannot be empty")
 	}
-	cfg := &nats.StreamConfig{
-		Name:      stream,
-		Subjects:  cleanSubjects,
-		Storage:   nats.FileStorage,
-		Retention: nats.LimitsPolicy,
-	}
+	cfg := marketStreamConfig(stream, cleanSubjects)
 	if _, err := js.StreamInfo(stream); err == nil {
 		_, err = js.UpdateStream(cfg)
 		if err != nil {
@@ -344,6 +341,16 @@ func ensureStream(js nats.JetStreamContext, stream string, subjects ...string) e
 		return fmt.Errorf("create nats market stream: %w", err)
 	}
 	return nil
+}
+
+func marketStreamConfig(stream string, subjects []string) *nats.StreamConfig {
+	return &nats.StreamConfig{
+		Name:      stream,
+		Subjects:  subjects,
+		Storage:   nats.FileStorage,
+		Retention: nats.LimitsPolicy,
+		MaxAge:    defaultSnapshotStreamMaxAge,
+	}
 }
 
 func uniqueSubjects(subjects ...string) []string {
