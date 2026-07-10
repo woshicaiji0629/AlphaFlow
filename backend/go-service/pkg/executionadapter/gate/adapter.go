@@ -125,6 +125,12 @@ func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.Exe
 func (a *Adapter) CancelOrder(context.Context, string, string) error {
 	return fmt.Errorf("gate trading is not enabled")
 }
+func (a *Adapter) OpenOrders(context.Context, string) ([]execution.ExchangeOrder, error) {
+	return nil, fmt.Errorf("gate open orders are not implemented")
+}
+func (a *Adapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
+	return execution.SymbolCapability{}, fmt.Errorf("gate capability is not implemented")
+}
 func (a *Adapter) Recover(context.Context, execution.OrderIntent) (execution.ExecutionReport, bool, error) {
 	return execution.ExecutionReport{}, false, nil
 }

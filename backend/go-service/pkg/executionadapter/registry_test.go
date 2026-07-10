@@ -34,4 +34,10 @@ func (fakeAdapter) Account(context.Context) (execution.AccountSnapshot, error) {
 	return execution.AccountSnapshot{}, nil
 }
 func (fakeAdapter) Positions(context.Context) ([]strategy.Position, error) { return nil, nil }
-func (fakeAdapter) CancelOrder(context.Context, string, string) error      { return nil }
+func (fakeAdapter) OpenOrders(context.Context, string) ([]execution.ExchangeOrder, error) {
+	return nil, nil
+}
+func (fakeAdapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
+	return execution.SymbolCapability{}, nil
+}
+func (fakeAdapter) CancelOrder(context.Context, string, string) error { return nil }

@@ -127,6 +127,12 @@ func (a *Adapter) Execute(context.Context, execution.OrderIntent) (execution.Exe
 func (a *Adapter) CancelOrder(context.Context, string, string) error {
 	return fmt.Errorf("binance trading is not enabled")
 }
+func (a *Adapter) OpenOrders(context.Context, string) ([]execution.ExchangeOrder, error) {
+	return nil, fmt.Errorf("binance open orders are not implemented")
+}
+func (a *Adapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
+	return execution.SymbolCapability{}, fmt.Errorf("binance capability is not implemented")
+}
 func (a *Adapter) Recover(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
 	body, err := a.signedGet(ctx, "/fapi/v1/order", map[string]string{"symbol": intent.Symbol, "origClientOrderId": intent.IntentID})
 	if err != nil {

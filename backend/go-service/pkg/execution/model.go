@@ -115,3 +115,21 @@ type SymbolCapability struct {
 	ContractSize string
 	UpdatedAt    int64
 }
+
+type ExchangeOrder struct {
+	Exchange       string
+	Account        string
+	Symbol         string
+	OrderID        string
+	ClientOrderID  string
+	Side           OrderSide
+	PositionSide   string
+	Type           OrderType
+	Status         ExecutionStatus
+	Quantity       float64
+	FilledQuantity float64
+	AveragePrice   string
+	ReduceOnly     bool
+	CreatedAt      int64
+	UpdatedAt      int64
+}
