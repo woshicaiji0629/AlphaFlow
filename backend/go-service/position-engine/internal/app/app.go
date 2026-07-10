@@ -483,6 +483,7 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 	paperHandler, err := paperhandler.New(paperhandler.Options{
 		PositionManager: positionManager,
 		PositionStore:   positionStore,
+		IntentStore:     execution.NewRedisIntentStore(redisClient, "position:execution:intent"),
 		Broker:          execution.NewPaperBroker("", now),
 		FeeConfig: paperhandler.FeeConfig{
 			FeeRate:   cfg.Fee.FeeRate,

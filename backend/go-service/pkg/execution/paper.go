@@ -65,6 +65,11 @@ func (b *PaperBroker) Execute(ctx context.Context, intent OrderIntent) (Executio
 	}, nil
 }
 
+func (b *PaperBroker) Recover(ctx context.Context, intent OrderIntent) (ExecutionReport, bool, error) {
+	report, err := b.Execute(ctx, intent)
+	return report, err == nil, err
+}
+
 func (b *PaperBroker) fillPrice(intent OrderIntent) string {
 	price := b.price
 	if price == "" {

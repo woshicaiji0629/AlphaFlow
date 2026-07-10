@@ -30,6 +30,7 @@ type Options struct {
 	PositionManager *position.Manager
 	PositionStore   position.Store
 	EventStore      position.EventStore
+	IntentStore     execution.IntentStore
 	Broker          execution.Broker
 	FeeConfig       FeeConfig
 	SizingConfig    SizingConfig
@@ -40,6 +41,7 @@ type Handler struct {
 	positionManager *position.Manager
 	positionStore   position.Store
 	eventStore      position.EventStore
+	intentStore     execution.IntentStore
 	broker          execution.Broker
 	feeConfig       FeeConfig
 	sizingConfig    SizingConfig
@@ -60,6 +62,7 @@ func New(options Options) (*Handler, error) {
 		positionManager: options.PositionManager,
 		positionStore:   options.PositionStore,
 		eventStore:      options.EventStore,
+		intentStore:     options.IntentStore,
 		broker:          options.Broker,
 		feeConfig:       options.FeeConfig,
 		sizingConfig:    options.SizingConfig,
@@ -108,15 +111,91 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	if h.broker == nil {
 		return nil
 	}
-	report, err := h.broker.Execute(ctx, intent)
+	report, alreadyApplied, err := h.executeRecoverable(ctx, intent)
 	if err != nil {
 		return fmt.Errorf("execute order intent %s: %w", intent.IntentID, err)
+	}
+	if alreadyApplied {
+		return nil
 	}
 	if err := h.appendEvent(ctx, orderFilledEvent(input.Target, result, currentPosition, intent, report, plan, h.feeConfig, h.sizingConfig, now)); err != nil {
 		return err
 	}
 	if err := h.applyLocalFill(ctx, input.Target, result, currentPosition, intent, report, plan); err != nil {
 		return fmt.Errorf("apply local fill for strategy %s: %w", result.StrategyName, err)
+	}
+	if err := h.saveIntentState(ctx, intent, report, execution.IntentStatePositionApplied); err != nil {
+		return err
+	}
+	if err := h.saveIntentState(ctx, intent, report, execution.IntentStateCompleted); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) executeRecoverable(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
+	if h.intentStore == nil {
+		report, err := h.broker.Execute(ctx, intent)
+		return report, false, err
+	}
+	record, err := h.intentStore.GetIntent(ctx, intent.IntentID)
+	if err != nil {
+		return execution.ExecutionReport{}, false, err
+	}
+	if record != nil {
+		switch record.State {
+		case execution.IntentStateCompleted, execution.IntentStatePositionApplied:
+			return record.Report, true, nil
+		case execution.IntentStateFilled, execution.IntentStateRejected:
+			return record.Report, false, nil
+		case execution.IntentStateSubmitted:
+			recoverable, ok := h.broker.(execution.RecoverableBroker)
+			if !ok {
+				return execution.ExecutionReport{}, false, fmt.Errorf("broker cannot recover submitted intent")
+			}
+			report, found, err := recoverable.Recover(ctx, intent)
+			if err != nil {
+				return execution.ExecutionReport{}, false, err
+			}
+			if !found {
+				return execution.ExecutionReport{}, false, fmt.Errorf("submitted intent outcome is unknown")
+			}
+			if err := h.saveReportState(ctx, intent, report); err != nil {
+				return execution.ExecutionReport{}, false, err
+			}
+			return report, false, nil
+		}
+	}
+	if err := h.saveIntentState(ctx, intent, execution.ExecutionReport{}, execution.IntentStateCreated); err != nil {
+		return execution.ExecutionReport{}, false, err
+	}
+	if err := h.saveIntentState(ctx, intent, execution.ExecutionReport{}, execution.IntentStateSubmitted); err != nil {
+		return execution.ExecutionReport{}, false, err
+	}
+	report, err := h.broker.Execute(ctx, intent)
+	if err != nil {
+		return execution.ExecutionReport{}, false, err
+	}
+	if err := h.saveReportState(ctx, intent, report); err != nil {
+		return execution.ExecutionReport{}, false, err
+	}
+	return report, false, nil
+}
+
+func (h *Handler) saveReportState(ctx context.Context, intent execution.OrderIntent, report execution.ExecutionReport) error {
+	state := execution.IntentStateRejected
+	if report.Status == execution.ExecutionStatusFilled {
+		state = execution.IntentStateFilled
+	}
+	return h.saveIntentState(ctx, intent, report, state)
+}
+
+func (h *Handler) saveIntentState(ctx context.Context, intent execution.OrderIntent, report execution.ExecutionReport, state execution.IntentState) error {
+	if h.intentStore == nil {
+		return nil
+	}
+	if err := h.intentStore.SaveIntent(ctx, execution.IntentRecord{Intent: intent, Report: report, State: state, UpdatedAt: h.now()}); err != nil {
+		return fmt.Errorf("save intent %s state %s: %w", intent.IntentID, state, err)
 	}
 	return nil
 }

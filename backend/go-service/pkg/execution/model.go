@@ -67,6 +67,24 @@ type ExecutionReport struct {
 	UpdatedAt       int64
 }
 
+type IntentState string
+
+const (
+	IntentStateCreated         IntentState = "created"
+	IntentStateSubmitted       IntentState = "submitted"
+	IntentStateFilled          IntentState = "filled"
+	IntentStatePositionApplied IntentState = "position_applied"
+	IntentStateCompleted       IntentState = "completed"
+	IntentStateRejected        IntentState = "rejected"
+)
+
+type IntentRecord struct {
+	Intent    OrderIntent
+	Report    ExecutionReport
+	State     IntentState
+	UpdatedAt int64
+}
+
 type AccountSnapshot struct {
 	Scope            string
 	Account          string
