@@ -1,6 +1,193 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestSupertrendCompactMatchesReference(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	for _, item := range []struct {
+		period     int
+		multiplier float64
+	}{{7, 2}, {10, 3}, {10, 3.3}, {14, 4}} {
+		got, gotOK := supertrendSeries(highs, lows, closes, item.period, item.multiplier)
+		want, wantOK := supertrendSeriesReference(highs, lows, closes, item.period, item.multiplier)
+		if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+			t.Fatalf("period=%d multiplier=%v compact result differs", item.period, item.multiplier)
+		}
+	}
+}
+
+func BenchmarkSupertrendCompact300(b *testing.B) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	b.ReportAllocs()
+	for range b.N {
+		if _, ok := supertrendSeries(highs, lows, closes, 10, 3); !ok {
+			b.Fatal("supertrend unavailable")
+		}
+	}
+}
+
+func BenchmarkSupertrendReference300(b *testing.B) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	b.ReportAllocs()
+	for range b.N {
+		if _, ok := supertrendSeriesReference(highs, lows, closes, 10, 3); !ok {
+			b.Fatal("supertrend unavailable")
+		}
+	}
+}
+
+func TestSupertrendWithATRCompactMatchesReference(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	atrValues, ok := atrSeries(highs, lows, closes, 10)
+	if !ok {
+		t.Fatal("ATR unavailable")
+	}
+	assigned := make([]float64, len(closes))
+	start := len(closes) - len(atrValues)
+	copy(assigned[start:], atrValues)
+	got, gotOK := supertrendSeriesWithATR(highs, lows, closes, assigned, start, 3)
+	want, wantOK := supertrendSeriesWithATRReference(highs, lows, closes, assigned, start, 3)
+	if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+		t.Fatal("compact ATR result differs")
+	}
+}
+
+func BenchmarkSupertrendWithATRCompact300(b *testing.B) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	assigned, start := testAssignedATR(highs, lows, closes, 10)
+	b.ReportAllocs()
+	for range b.N {
+		if _, ok := supertrendSeriesWithATR(highs, lows, closes, assigned, start, 3); !ok {
+			b.Fatal("supertrend unavailable")
+		}
+	}
+}
+
+func BenchmarkSupertrendWithATRReference300(b *testing.B) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	assigned, start := testAssignedATR(highs, lows, closes, 10)
+	b.ReportAllocs()
+	for range b.N {
+		if _, ok := supertrendSeriesWithATRReference(highs, lows, closes, assigned, start, 3); !ok {
+			b.Fatal("supertrend unavailable")
+		}
+	}
+}
+
+func testAssignedATR(highs []float64, lows []float64, closes []float64, period int) ([]float64, int) {
+	atrValues, ok := atrSeries(highs, lows, closes, period)
+	if !ok {
+		panic("ATR unavailable")
+	}
+	assigned := make([]float64, len(closes))
+	start := len(closes) - len(atrValues)
+	copy(assigned[start:], atrValues)
+	return assigned, start
+}
+
+func supertrendSeriesWithATRReference(highs []float64, lows []float64, closes []float64, atrValues []float64, start int, multiplier float64) ([]trendPoint, bool) {
+	if start <= 0 || start >= len(closes) || len(atrValues) != len(closes) {
+		return nil, false
+	}
+	finalUpper := make([]float64, len(closes))
+	finalLower := make([]float64, len(closes))
+	direction := make([]string, len(closes))
+	for index := start; index < len(closes); index++ {
+		if atrValues[index] <= 0 {
+			return nil, false
+		}
+		mid := (highs[index] + lows[index]) / 2
+		basicUpper := mid + multiplier*atrValues[index]
+		basicLower := mid - multiplier*atrValues[index]
+		if index == start {
+			finalUpper[index], finalLower[index] = basicUpper, basicLower
+			if closes[index] >= mid {
+				direction[index] = "up"
+			} else {
+				direction[index] = "down"
+			}
+			continue
+		}
+		if basicUpper < finalUpper[index-1] || closes[index-1] > finalUpper[index-1] {
+			finalUpper[index] = basicUpper
+		} else {
+			finalUpper[index] = finalUpper[index-1]
+		}
+		if basicLower > finalLower[index-1] || closes[index-1] < finalLower[index-1] {
+			finalLower[index] = basicLower
+		} else {
+			finalLower[index] = finalLower[index-1]
+		}
+		direction[index] = direction[index-1]
+		if direction[index-1] == "down" && closes[index] > finalUpper[index] {
+			direction[index] = "up"
+		} else if direction[index-1] == "up" && closes[index] < finalLower[index] {
+			direction[index] = "down"
+		}
+	}
+	points := make([]trendPoint, 0, len(closes)-start)
+	for index := start; index < len(closes); index++ {
+		points = append(points, supertrendPoint(finalUpper[index], finalLower[index], direction[index]))
+	}
+	return points, len(points) >= 2
+}
+
+func supertrendSeriesReference(highs []float64, lows []float64, closes []float64, period int, multiplier float64) ([]trendPoint, bool) {
+	if period <= 0 || len(closes) <= period {
+		return nil, false
+	}
+	trs := trueRanges(highs, lows, closes)
+	if len(trs) < period {
+		return nil, false
+	}
+	atrValues := make([]float64, len(closes))
+	firstATR, _ := sma(trs[:period], period)
+	atrValues[period] = firstATR
+	for index := period + 1; index < len(closes); index++ {
+		atrValues[index] = (atrValues[index-1]*float64(period-1) + trs[index-1]) / float64(period)
+	}
+	finalUpper := make([]float64, len(closes))
+	finalLower := make([]float64, len(closes))
+	direction := make([]string, len(closes))
+	for index := period; index < len(closes); index++ {
+		mid := (highs[index] + lows[index]) / 2
+		basicUpper := mid + multiplier*atrValues[index]
+		basicLower := mid - multiplier*atrValues[index]
+		if index == period {
+			finalUpper[index], finalLower[index] = basicUpper, basicLower
+			if closes[index] >= mid {
+				direction[index] = "up"
+			} else {
+				direction[index] = "down"
+			}
+			continue
+		}
+		if basicUpper < finalUpper[index-1] || closes[index-1] > finalUpper[index-1] {
+			finalUpper[index] = basicUpper
+		} else {
+			finalUpper[index] = finalUpper[index-1]
+		}
+		if basicLower > finalLower[index-1] || closes[index-1] < finalLower[index-1] {
+			finalLower[index] = basicLower
+		} else {
+			finalLower[index] = finalLower[index-1]
+		}
+		direction[index] = direction[index-1]
+		if direction[index-1] == "down" && closes[index] > finalUpper[index] {
+			direction[index] = "up"
+		} else if direction[index-1] == "up" && closes[index] < finalLower[index] {
+			direction[index] = "down"
+		}
+	}
+	points := make([]trendPoint, 0, len(closes)-period)
+	for index := period; index < len(closes); index++ {
+		points = append(points, supertrendPoint(finalUpper[index], finalLower[index], direction[index]))
+	}
+	return points, len(points) >= 2
+}
 
 func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	highs, lows, closes, volumes := trendingSeries(160, 100, 0.8)

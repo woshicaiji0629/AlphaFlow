@@ -741,52 +741,41 @@ func supertrendSeriesWithATR(highs []float64, lows []float64, closes []float64, 
 	if start <= 0 || start >= len(closes) || len(atrValues) != len(closes) {
 		return nil, false
 	}
-	finalUpper := make([]float64, len(closes))
-	finalLower := make([]float64, len(closes))
-	direction := make([]string, len(closes))
-	for index := start; index < len(closes); index++ {
+	if atrValues[start] <= 0 {
+		return nil, false
+	}
+	points := make([]trendPoint, 0, len(closes)-start)
+	mid := (highs[start] + lows[start]) / 2
+	finalUpper := mid + multiplier*atrValues[start]
+	finalLower := mid - multiplier*atrValues[start]
+	direction := "down"
+	if closes[start] >= mid {
+		direction = "up"
+	}
+	points = append(points, supertrendPoint(finalUpper, finalLower, direction))
+	for index := start + 1; index < len(closes); index++ {
 		if atrValues[index] <= 0 {
 			return nil, false
 		}
-		mid := (highs[index] + lows[index]) / 2
+		mid = (highs[index] + lows[index]) / 2
 		basicUpper := mid + multiplier*atrValues[index]
 		basicLower := mid - multiplier*atrValues[index]
-		if index == start {
-			finalUpper[index] = basicUpper
-			finalLower[index] = basicLower
-			if closes[index] >= mid {
-				direction[index] = "up"
-			} else {
-				direction[index] = "down"
-			}
-			continue
+		nextUpper := finalUpper
+		if basicUpper < finalUpper || closes[index-1] > finalUpper {
+			nextUpper = basicUpper
 		}
-		if basicUpper < finalUpper[index-1] || closes[index-1] > finalUpper[index-1] {
-			finalUpper[index] = basicUpper
-		} else {
-			finalUpper[index] = finalUpper[index-1]
+		nextLower := finalLower
+		if basicLower > finalLower || closes[index-1] < finalLower {
+			nextLower = basicLower
 		}
-		if basicLower > finalLower[index-1] || closes[index-1] < finalLower[index-1] {
-			finalLower[index] = basicLower
-		} else {
-			finalLower[index] = finalLower[index-1]
+		nextDirection := direction
+		if direction == "down" && closes[index] > nextUpper {
+			nextDirection = "up"
+		} else if direction == "up" && closes[index] < nextLower {
+			nextDirection = "down"
 		}
-		switch {
-		case direction[index-1] == "down" && closes[index] > finalUpper[index]:
-			direction[index] = "up"
-		case direction[index-1] == "up" && closes[index] < finalLower[index]:
-			direction[index] = "down"
-		default:
-			direction[index] = direction[index-1]
-		}
-	}
-	points := make([]trendPoint, 0, len(closes)-start)
-	for index := start; index < len(closes); index++ {
-		if direction[index] == "down" {
-			points = append(points, trendPoint{value: finalUpper[index], direction: "down"})
-			continue
-		}
-		points = append(points, trendPoint{value: finalLower[index], direction: "up"})
+		finalUpper, finalLower, direction = nextUpper, nextLower, nextDirection
+		points = append(points, supertrendPoint(finalUpper, finalLower, direction))
 	}
 	if len(points) < 2 {
 		return nil, false
@@ -802,61 +791,49 @@ func supertrendSeries(highs []float64, lows []float64, closes []float64, period 
 	if len(trs) < period {
 		return nil, false
 	}
-	atrValues := make([]float64, len(closes))
-	firstATR, _ := sma(trs[:period], period)
-	atrValues[period] = firstATR
-	for index := period + 1; index < len(closes); index++ {
-		atrValues[index] = (atrValues[index-1]*float64(period-1) + trs[index-1]) / float64(period)
-	}
-
-	finalUpper := make([]float64, len(closes))
-	finalLower := make([]float64, len(closes))
-	direction := make([]string, len(closes))
-	for index := period; index < len(closes); index++ {
-		mid := (highs[index] + lows[index]) / 2
-		basicUpper := mid + multiplier*atrValues[index]
-		basicLower := mid - multiplier*atrValues[index]
-		if index == period {
-			finalUpper[index] = basicUpper
-			finalLower[index] = basicLower
-			if closes[index] >= mid {
-				direction[index] = "up"
-			} else {
-				direction[index] = "down"
-			}
-			continue
-		}
-		if basicUpper < finalUpper[index-1] || closes[index-1] > finalUpper[index-1] {
-			finalUpper[index] = basicUpper
-		} else {
-			finalUpper[index] = finalUpper[index-1]
-		}
-		if basicLower > finalLower[index-1] || closes[index-1] < finalLower[index-1] {
-			finalLower[index] = basicLower
-		} else {
-			finalLower[index] = finalLower[index-1]
-		}
-		switch {
-		case direction[index-1] == "down" && closes[index] > finalUpper[index]:
-			direction[index] = "up"
-		case direction[index-1] == "up" && closes[index] < finalLower[index]:
-			direction[index] = "down"
-		default:
-			direction[index] = direction[index-1]
-		}
-	}
 	points := make([]trendPoint, 0, len(closes)-period)
-	for index := period; index < len(closes); index++ {
-		if direction[index] == "down" {
-			points = append(points, trendPoint{value: finalUpper[index], direction: "down"})
-			continue
+	atrValue, _ := sma(trs[:period], period)
+	mid := (highs[period] + lows[period]) / 2
+	finalUpper := mid + multiplier*atrValue
+	finalLower := mid - multiplier*atrValue
+	direction := "down"
+	if closes[period] >= mid {
+		direction = "up"
+	}
+	points = append(points, supertrendPoint(finalUpper, finalLower, direction))
+	for index := period + 1; index < len(closes); index++ {
+		atrValue = (atrValue*float64(period-1) + trs[index-1]) / float64(period)
+		mid = (highs[index] + lows[index]) / 2
+		basicUpper := mid + multiplier*atrValue
+		basicLower := mid - multiplier*atrValue
+		nextUpper := finalUpper
+		if basicUpper < finalUpper || closes[index-1] > finalUpper {
+			nextUpper = basicUpper
 		}
-		points = append(points, trendPoint{value: finalLower[index], direction: "up"})
+		nextLower := finalLower
+		if basicLower > finalLower || closes[index-1] < finalLower {
+			nextLower = basicLower
+		}
+		nextDirection := direction
+		if direction == "down" && closes[index] > nextUpper {
+			nextDirection = "up"
+		} else if direction == "up" && closes[index] < nextLower {
+			nextDirection = "down"
+		}
+		finalUpper, finalLower, direction = nextUpper, nextLower, nextDirection
+		points = append(points, supertrendPoint(finalUpper, finalLower, direction))
 	}
 	if len(points) < 2 {
 		return nil, false
 	}
 	return points, true
+}
+
+func supertrendPoint(finalUpper float64, finalLower float64, direction string) trendPoint {
+	if direction == "down" {
+		return trendPoint{value: finalUpper, direction: direction}
+	}
+	return trendPoint{value: finalLower, direction: direction}
 }
 
 func alphaTrend(highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) (float64, float64, string, bool) {
