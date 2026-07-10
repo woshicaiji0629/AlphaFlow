@@ -171,8 +171,24 @@ func (a *Adapter) OpenOrders(ctx context.Context, symbol string) ([]execution.Ex
 	}
 	return orders, nil
 }
-func (a *Adapter) Capability(context.Context, string) (execution.SymbolCapability, error) {
-	return execution.SymbolCapability{}, fmt.Errorf("bitget capability is not implemented")
+func (a *Adapter) Capability(ctx context.Context, symbol string) (execution.SymbolCapability, error) {
+	body, err := a.get(ctx, "/api/v2/mix/market/contracts", map[string]string{"productType": "USDT-FUTURES", "symbol": symbol})
+	if err != nil {
+		return execution.SymbolCapability{}, err
+	}
+	var result response[[]struct{ Symbol, MinTradeNum, PriceEndStep, PricePlace, SizeMultiplier, MinTradeUSDT, MaxLever, MaxMarketOrderQty string }]
+	if err := json.Unmarshal(body, &result); err != nil {
+		return execution.SymbolCapability{}, fmt.Errorf("decode bitget contracts: %w", err)
+	}
+	if result.Code != "00000" {
+		return execution.SymbolCapability{}, fmt.Errorf("bitget contracts code %s: %s", result.Code, result.Msg)
+	}
+	for _, row := range result.Data {
+		if row.Symbol == symbol {
+			return execution.SymbolCapability{Exchange: "bitget", Market: a.account.Market, Symbol: symbol, MinQty: row.MinTradeNum, QtyStep: row.SizeMultiplier, PriceTick: decimalStep(row.PriceEndStep, row.PricePlace), MinNotional: row.MinTradeUSDT, MaxLeverage: row.MaxLever, MaxOrderQty: row.MaxMarketOrderQty, ContractSize: "1", UpdatedAt: result.RequestTime}, nil
+		}
+	}
+	return execution.SymbolCapability{}, fmt.Errorf("bitget symbol %s missing", symbol)
 }
 func (a *Adapter) get(ctx context.Context, path string, query map[string]string) ([]byte, error) {
 	values := url.Values{}
@@ -228,4 +244,19 @@ func scope(e executionaccount.Environment) strategy.PositionScope {
 		return strategy.PositionScopeLive
 	}
 	return strategy.PositionScopeTestnet
+}
+
+func decimalStep(step, places string) string {
+	digits, err := strconv.Atoi(places)
+	if err != nil || digits <= 0 {
+		return step
+	}
+	step = strings.TrimLeft(step, "0")
+	if step == "" {
+		step = "0"
+	}
+	if len(step) > digits {
+		return step[:len(step)-digits] + "." + step[len(step)-digits:]
+	}
+	return "0." + strings.Repeat("0", digits-len(step)) + step
 }
