@@ -452,7 +452,8 @@ backend/go-service/backtest-engine/cmd/backtest-engine/main.go
 ```text
 ClickHouse 历史 K 线
   -> backtest-engine/internal/reader.Dataset
-  -> backtest-engine/internal/simulator.PreparedSeries
+  -> 每个 symbol/interval 的 CalculationWindow
+  -> 已闭合 K 线流式指标状态 + 惰性窗口分析
   -> strategyframe.Context
   -> pkg/strategy.Engine
   -> backtest-engine/internal/simulator.Executor
@@ -475,8 +476,10 @@ backend/go-service/backtest-engine/internal/simulator/
 
 - 从 ClickHouse 或文件读取历史 K 线。
 - 按入场周期时间推进，并读取当时已经闭合的确认周期数据。
-- 每个 symbol/interval 使用 `CalculateWindows` 批量计算一次指标，并缓存窗口结果。
-- 按 `AsOf` 二分定位当前可见数据，避免逐 bar 重算历史前缀。
+- 每个 symbol/interval 使用与在线相同的 `CalculationWindow` 和 `CalculateWindow` 逐根推进指标。
+- 只推进 `CloseTime <= AsOf` 的已闭合 K 线，确认周期未收盘时保持上一份状态。
+- 固定保留计算窗口和最近的指标 snapshot；窗口分析只在策略读取时执行，并按最新 close time 缓存。
+- 长回测响应 context cancellation，并输出处理速率、elapsed 和 ETA。
 - 构造与在线服务一致的 `strategy.Snapshot`。
 - 调用同一套策略、仓位管理、paper broker 和 route dispatcher。
 - 用 `bt` scope 和 run id 隔离回测仓位。

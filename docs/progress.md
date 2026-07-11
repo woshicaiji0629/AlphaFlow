@@ -28,7 +28,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - ClickHouse 保存已闭合 K 线历史。
 - 指标计算和窗口分析已下沉到公共包，供实时服务、回测和未来重算复用。
 - 指标 runner 已按 K 线预热、指标计算、窗口分析三层拆分：启动先准备连续 K 线，再补齐底层指标 snapshot，最后窗口分析只读取 recent 指标缓存；闭合指标和窗口特征 Redis 写入合并为 pipeline，扫描型冷启动任务进入 NATS JetStream 内部队列并由 `market-data` 进程内 worker 消费。
-- 指标计算已开始流式化热点路径：`CalculationWindow` 复用 SMA、EMA、RSI、ATR、ADX/DI、MACD、OBV、VWAP、WaveTrend 和部分 MoneyFlow 状态；`CalculateWindows` 支持固定 warmup 后连续计算结果后缀，缓存对齐后稳态新收盘一根 K 线只补一根底层指标。
+- 指标计算已流式化主要热点路径：`CalculationWindow` 复用 SMA、EMA、RSI、ATR、ADX/DI、MACD、OBV、VWAP、WaveTrend、MoneyFlow、AI Source 和 Adaptive Supertrend 状态；在线和回测稳态都只为新收盘 K 线推进一次状态。
 - 指标计算局部热点已继续削减重复工作：`CalculateWindow` 正常路径避免重复解析，Nadaraya-Watson envelope 复用栈上权重缓存，MoneyFlow 区间最高/最低扫描抽成公共 helper。
 - 最近一次小样本本地指标负载验证使用 `symbols=2`、四个模拟交易所、服务当前周期集合、`lookback=300`、`warmup=250`、`window-lookback=50`、`runs=2` 和 `advance-each-run`，结果中 `tasks=56`、`calculate_window_calls=2856`，等于冷启动 `56 * 50` 加第二轮稳态 `56 * 1`；该结果只验证计算次数收敛，不是生产 SLA。
 
@@ -52,7 +52,9 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 已支持按入场周期滚动构造 `strategy.Snapshot`。
 - 已新增只读数据完整性检查命令，可检查重复 K 线、缺口、连续区间和可用 warmup。
 - 确认周期只使用当时已经闭合的数据，避免未来函数。
-- 指标计算已改为每个 symbol/interval 批量执行一次 `CalculateWindows`，窗口结果由 `PreparedSeries` 缓存，决策时按 `AsOf` 二分定位。
+- 每个 symbol/interval 维护独立 `CalculationWindow`，按 `CloseTime <= AsOf` 流式推进；大周期只在真正收盘后更新。
+- 只保留固定 K 线窗口和最近的指标 snapshot；窗口语义按策略读取惰性分析，并按最新 close time 缓存。
+- 长回测支持 context 取消、分批事件提取，以及最长 10 秒一次的速率、elapsed 和 ETA 日志。
 - 已复用公共策略、仓位管理、paper broker 和 route dispatcher 执行回测。
 - 回测仓位使用独立 `bt` scope 和 run id，不写在线 paper 仓位。
 - 已生成并持久化策略事件、回测交易明细和 run 级摘要。
@@ -63,7 +65,8 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 同一 K 线时间点的多 symbol 批次会先统一刷新价格和账户浮盈亏，再执行该批次信号和订单，并只生成一条账户快照。
 - 已新增静态 symbol capability，回测/paper 下单前会按 base/contract 单位、contract size、数量步长和最小名义金额做数量归一化。
 - 回测/paper broker 已支持固定 bps 滑点，买入按成交价上浮、卖出按成交价下浮，并可通过 backtest-engine 配置控制。
-- 2026-07-10 使用 ETHUSDT、3 小时历史数据和 268 根 warmup 完成真实回测：优化前运行超过 8 分钟未完成，批量指标复用后约 61 秒完成；共生成 60 次决策和 60 个事件，策略均返回 `hold`，无策略异常、无成交，说明执行和持久化链路正常，零成交来自当前样板策略过滤条件。
+- 2026-07-10 使用 ETHUSDT、3 小时历史数据和 268 根 warmup 完成真实回测：共生成 60 次决策和 60 个事件，策略均返回 `hold`，无策略异常、无成交，说明执行和持久化链路正常，零成交来自当前样板策略过滤条件。该短样本包含五个周期各自的 warmup，不能直接线性外推年度耗时。
+- 已准备并校验 ETHUSDT 2025-07-11 至 2026-07-11 的 3m/5m/10m/15m/30m 数据和年度配置；年度性能仍在继续优化，尚未形成最终策略报告。
 
 ### 仓位和执行路由
 
@@ -96,7 +99,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 在线策略引擎可以同时跑多个策略。
 - 在线策略引擎运行期主数据源是 NATS market snapshot 和内存市场态；Redis 特征 hash 是启动恢复、故障恢复、观测和兼容缓存。
 - 离线回测一般一次只回测一个策略；批量回测应显式生成多个 run。
-- 在线与回测共享指标公式、窗口语义和 `strategyframe` 上下文协议，但分别采用增量计算和批量预计算生命周期。
+- 在线与回测共享 `CalculationWindow`、连续指标状态、窗口语义和 `strategyframe` 上下文协议；生命周期不同，但不再维护回测专用批量指标公式。
 - 上线或下线策略优先通过策略 registry 和配置控制，不在多个服务里分别硬编码。
 - 策略算法由 Go 代码实现并注册；后台只维护参数、版本、可见范围和发布状态，不执行任意代码。
 - 已发布策略版本不可修改，新配置从已发布版本复制为独立草稿。
@@ -107,7 +110,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 - 回测还没有图表报告和结果查询 API。
 - 回测还没有参数化批量运行和策略参数配置入口。
-- 当前真实回测样本只有 3 小时，不足以评价策略有效性；当前 Supertrend 仍是链路验证用样板策略。
+- 当前完整年度回测尚未产出最终报告，仍不足以评价策略有效性；当前 Supertrend 仍是链路验证用样板策略。
 - 回测爆仓当前按账户权益归零处理，还没有接入交易所维持保证金、标记价格和阶梯强平公式。
 - 回测滑点当前是固定 bps 模型，还没有按盘口深度、成交量、波动率或订单大小动态估算。
 - position-engine 还没有独立 `backtest` / `notify` handler；testnet/live 已通过账户无关计划接入 execution-engine。
@@ -126,7 +129,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 ## 建议下一步
 
 1. 增强策略可观测性，按决策记录主要阻断条件和关键指标值，区分引擎问题与策略过滤结果。
-2. 扩大连续历史区间做真实回测，先验证样本覆盖和信号分布，再讨论策略阈值与参数校准。
+2. 完成优化后的一年期 ETHUSDT 回测，分析信号分布、阻断条件、成交和账户曲线，再讨论策略阈值与参数校准。
 3. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
 4. 补回测图表报告、结果查询入口和参数化批量运行。
 5. 实现 position-engine 的 notify handler。
@@ -143,4 +146,4 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 GOCACHE=/private/tmp/alphaflow-go-cache GO111MODULE=on go test ./...
 ```
 
-最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查和回测批量指标复用。最新一轮 `go test ./...` 已通过，真实数据回测已完成并落库。
+最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查和多周期流式回放。相关 Go 测试已通过，短区间真实数据回测已完成并落库；年度回测配置和数据已经就绪，但最终报告尚未产出。
