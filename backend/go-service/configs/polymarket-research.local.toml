@@ -1,0 +1,28 @@
+[gamma]
+base_url = "https://gamma-api.polymarket.com"
+poll_interval = "15s"
+page_size = 100
+
+[research]
+symbols = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]
+durations = ["5m", "15m"]
+
+[realtime]
+clob_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+rtds_url = "wss://ws-live-data.polymarket.com"
+reconnect_wait = "2s"
+
+[batch]
+max_size = 500
+flush_interval = "1s"
+channel_size = 10000
+health_interval = "30s"
+
+[clickhouse]
+enabled = true
+addr = "localhost:9000"
+database = "alphaflow"
+username = "alphaflow"
+password = "alphaflow"
+dial_timeout = "5s"
+read_timeout = "30s"
