@@ -68,7 +68,16 @@
 
 `pkg/indicatorcalc.CalculateWindows` 可在固定 warmup 后连续计算结果后缀。market-data runner 用它在 cold start 或缓存缺口时补齐 recent 指标 snapshot；缓存对齐后，窗口分析阶段只读取 recent 指标，不再回放 K 线补算历史指标。
 
-回测引擎复用同一个 `CalculateWindows` 计算口径，但生命周期不同：`SnapshotBuilder` 会为每个 symbol/interval 建立一份 `PreparedSeries`，一次性计算整段指标和窗口特征，后续每个决策时间点只按 `AsOf` 二分读取已经闭合的结果。这样在线路径保持增量低延迟，回测路径保持批量吞吐，两者不复制指标公式，也不会因逐 bar 重算历史前缀产生平方级开销。
+回测引擎和在线 runner 复用同一个 `CalculationWindow`、`EnableBasicState` 和 `CalculateWindow` 计算路径。`SnapshotBuilder` 为每个 symbol/interval 建立独立滚动状态，按 K 线 `CloseTime <= AsOf` 逐根推进；确认周期只有真正收盘后才更新，因此不会读取未来数据。回测不再预计算并常驻整段历史指标，也不会为每个决策点重新扫描完整历史前缀。
+
+滚动窗口只保留计算所需的固定 K 线数量；递归指标保留连续状态，不因窗口裁剪重新初始化。当前连续状态除基础指标外还包括：
+
+- AI Source 的 feature cursor、KNN bank、Fisher 权重、神经权重和自适应 Supertrend 状态。
+- Adaptive Supertrend 的 ATR(10)、最近 100 个 ATR 聚类窗口、上下轨和方向。
+
+这意味着 EMA、RSI、ATR、MACD、AI Source 和 Adaptive Supertrend 使用完整已见历史连续递推语义；SMA、区间最高最低等固定窗口指标仍按当前窗口计算。在线和回测必须使用相同入口，不能在回测侧单独实现一套“批量近似”公式。
+
+回测只保留最近 `indicatorwindow.DefaultLookback` 个底层指标 snapshot。窗口语义分析按策略读取惰性计算，并以最新指标 `CloseTime` 缓存；大周期收盘时仍计算底层指标，但只有策略决策需要该周期窗口时才运行窗口分析。
 
 `indicatorwindow.DefaultLookback` 是在线和回测共享的默认窗口长度。调整该值会同时影响窗口语义，应通过等价性测试和真实数据回放验证，不能只在某个入口单独硬编码。
 
@@ -87,6 +96,7 @@
 ```text
 go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTemporaryKlineRealtime -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench 'BenchmarkCalculate(250|300)Bars' -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowStreaming -benchmem
 ```
 
 它覆盖 realtime open kline 的临时窗口构造和 `CalculateWindow` 完整特征计算。一次本地基线结果为：
@@ -96,6 +106,8 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 ```
 
 早期 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+
+年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、每根 K 线重复分析未被策略读取的指标窗口，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。剩余热点主要是 QQE、Volume Flow、普通 Supertrend/ATR 序列和结果 map/字符串分配。
 
 ## 策略常用语义特征
 

@@ -42,6 +42,19 @@ type streamATRState struct {
 	series []float64
 }
 
+type streamAdaptiveSupertrendState struct {
+	atr            streamATRState
+	trainingPeriod int
+	multiplier     float64
+	finalUpper     float64
+	finalLower     float64
+	direction      string
+	previousPoint  trendPoint
+	currentPoint   trendPoint
+	cluster        volatilityCluster
+	pointCount     int
+}
+
 type streamADXState struct {
 	period          int
 	smoothedTR      float64
@@ -82,6 +95,7 @@ type basicIndicatorState struct {
 	volumeSMA     map[int]float64
 	rsi14         streamRSIState
 	atr14         streamATRState
+	adaptiveST    streamAdaptiveSupertrendState
 	adx14         streamADXState
 	waveTrend     streamWaveTrendState
 	moneyFlow     streamMoneyFlowState
@@ -89,6 +103,35 @@ type basicIndicatorState struct {
 	obv           float64
 	vwapWeighted  float64
 	vwapVolumeSum float64
+}
+
+func (s *basicIndicatorState) trimSeries(limit int) {
+	if s == nil || limit <= 0 {
+		return
+	}
+	s.rsi14.series = trimTail(s.rsi14.series, limit)
+	s.atr14.series = trimTail(s.atr14.series, limit)
+	s.adaptiveST.atr.series = trimTail(s.adaptiveST.atr.series, maxInt(s.adaptiveST.trainingPeriod, limit))
+	s.adx14.dxValues = trimTail(s.adx14.dxValues, maxInt(s.adx14.period, limit))
+	for _, state := range s.macd {
+		state.differences = trimTail(state.differences, limit)
+		state.series = trimTail(state.series, limit)
+	}
+}
+
+func trimTail[T any](values []T, limit int) []T {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	copy(values, values[len(values)-limit:])
+	return values[:limit]
+}
+
+func maxInt(left int, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func newBasicIndicatorState() *basicIndicatorState {
@@ -112,6 +155,7 @@ func newBasicIndicatorState() *basicIndicatorState {
 		volumeSMA:  map[int]float64{},
 		rsi14:      newStreamRSIState(14),
 		atr14:      newStreamATRState(14),
+		adaptiveST: newStreamAdaptiveSupertrendState(10, 3, 100),
 		adx14:      newStreamADXState(14),
 		waveTrend:  newStreamWaveTrendState(10, 21),
 		moneyFlow:  streamMoneyFlowState{},
@@ -142,6 +186,7 @@ func (s *basicIndicatorState) cloneWithExtraCapacity(extra int) *basicIndicatorS
 		volumeSMA:     make(map[int]float64, len(s.volumeSMA)),
 		rsi14:         s.rsi14.cloneWithExtraCapacity(extra),
 		atr14:         s.atr14.cloneWithExtraCapacity(extra),
+		adaptiveST:    s.adaptiveST.cloneWithExtraCapacity(extra),
 		adx14:         s.adx14.cloneWithExtraCapacity(extra),
 		waveTrend:     s.waveTrend.clone(),
 		moneyFlow:     s.moneyFlow,
@@ -195,6 +240,7 @@ func (s *basicIndicatorState) append(highs []float64, lows []float64, closes []f
 		}
 		s.rsi14.append(closes[last-1], closeValue)
 		s.atr14.append(highs[last], lows[last], closes[last-1])
+		s.adaptiveST.append(highs[last], lows[last], closes[last-1], closeValue)
 		s.adx14.append(highs[last], lows[last], highs[last-1], lows[last-1], closes[last-1])
 		s.moneyFlow.append(highs[last], lows[last], closeValue, volume, closes[last-1], true)
 	} else {
@@ -204,6 +250,69 @@ func (s *basicIndicatorState) append(highs []float64, lows []float64, closes []f
 	s.waveTrend.append(typical)
 	s.vwapWeighted += typical * volume
 	s.vwapVolumeSum += volume
+}
+
+func newStreamAdaptiveSupertrendState(period int, multiplier float64, trainingPeriod int) streamAdaptiveSupertrendState {
+	return streamAdaptiveSupertrendState{atr: newStreamATRState(period), multiplier: multiplier, trainingPeriod: trainingPeriod}
+}
+
+func (s streamAdaptiveSupertrendState) cloneWithExtraCapacity(extra int) streamAdaptiveSupertrendState {
+	s.atr = s.atr.cloneWithExtraCapacity(extra)
+	return s
+}
+
+func (s *streamAdaptiveSupertrendState) append(high float64, low float64, previousClose float64, closeValue float64) {
+	if s == nil {
+		return
+	}
+	s.atr.append(high, low, previousClose)
+	if len(s.atr.series) < s.trainingPeriod {
+		return
+	}
+	values := s.atr.series[len(s.atr.series)-s.trainingPeriod:]
+	cluster, ok := adaptiveVolatilityCluster(values, s.atr.value)
+	if !ok {
+		return
+	}
+	mid := (high + low) / 2
+	basicUpper := mid + s.multiplier*cluster.assignedATR
+	basicLower := mid - s.multiplier*cluster.assignedATR
+	if s.pointCount == 0 {
+		s.finalUpper = basicUpper
+		s.finalLower = basicLower
+		s.direction = "down"
+		if closeValue >= mid {
+			s.direction = "up"
+		}
+	} else {
+		if basicUpper < s.finalUpper || previousClose > s.finalUpper {
+			s.finalUpper = basicUpper
+		}
+		if basicLower > s.finalLower || previousClose < s.finalLower {
+			s.finalLower = basicLower
+		}
+		if s.direction == "down" && closeValue > s.finalUpper {
+			s.direction = "up"
+		} else if s.direction == "up" && closeValue < s.finalLower {
+			s.direction = "down"
+		}
+	}
+	s.previousPoint = s.currentPoint
+	s.currentPoint = supertrendPoint(s.finalUpper, s.finalLower, s.direction)
+	s.cluster = cluster
+	s.pointCount++
+}
+
+func (s *basicIndicatorState) adaptiveSupertrendValue() (adaptiveSupertrendState, bool) {
+	if s == nil || s.adaptiveST.pointCount < 2 {
+		return adaptiveSupertrendState{}, false
+	}
+	stream := s.adaptiveST
+	return adaptiveSupertrendState{
+		points: []trendPoint{stream.previousPoint, stream.currentPoint}, assignedATR: stream.cluster.assignedATR,
+		highCentroid: stream.cluster.highCentroid, midCentroid: stream.cluster.midCentroid,
+		lowCentroid: stream.cluster.lowCentroid, cluster: stream.cluster.cluster,
+	}, true
 }
 
 func (s *basicIndicatorState) sma(period int) (float64, bool) {

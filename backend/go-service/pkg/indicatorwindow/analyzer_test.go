@@ -1,12 +1,23 @@
 package indicatorwindow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 
 	model "alphaflow/go-service/pkg/marketmodel"
 )
+
+func TestCalculateWindowsContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := CalculateWindowsContext(ctx, benchmarkSnapshots(1), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
 
 func TestCalculateWindowsMatchesAnalyzePrefixes(t *testing.T) {
 	snapshots := benchmarkSnapshots(40)

@@ -207,6 +207,11 @@ backend/go-service/backtest-engine/internal/reader/reader.go
 - 复用公共策略、仓位、paper broker 和 route dispatcher 执行策略结果
 - 使用独立 `bt` scope 和 run id 隔离回测仓位
 - 从 `order_filled` 事件生成回测交易明细和 run 级摘要
+- 每个周期维护独立 `CalculationWindow`，按已闭合 K 线流式计算与在线一致的指标
+- 只在大周期 K 线 `CloseTime <= AsOf` 时推进，禁止使用未收盘确认周期
+- 指标窗口分析按策略读取惰性执行，并按最新 close time 缓存
+- 通过 context cancellation 响应 SIGINT/SIGTERM，长回测可安全停止
+- 回测进度同时按里程碑和最长 10 秒间隔输出，并包含处理速率、elapsed 和 ETA
 
 关键文件：
 
@@ -216,6 +221,16 @@ backend/go-service/backtest-engine/internal/simulator/executor.go
 backend/go-service/backtest-engine/internal/simulator/trades.go
 backend/go-service/backtest-engine/internal/simulator/summary.go
 ```
+
+回测仓位使用进程内 `MemoryStore` 和 `PositionScopeBacktest`，不会把当前仓位写入线上 Redis，也不会与 `paper` / `live` scope 冲突。命中的策略事件和成交结果批量持久化到 ClickHouse；`MemoryStore.EventsSince` 用于分批提取新增事件，避免每批复制全部历史事件。
+
+年度回测运行前应先使用 `backtest-dataset-check` 验证所有入场和确认周期的 warmup、缺口与时间边界。示例配置位于：
+
+```text
+backend/go-service/configs/backtest-engine.ethusdt-1y.toml
+```
+
+性能判断以预编译二进制、真实多周期数据和结构化进度日志为准；`go run` 包含编译时间，短样本还会被各周期 warmup 占比放大，不适合直接线性外推年度耗时。
 
 ### `pkg/positionhandler/paper`
 

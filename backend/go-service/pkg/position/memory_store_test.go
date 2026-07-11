@@ -160,6 +160,32 @@ func TestMemoryStoreListBacktestRequiresRunID(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreEventsSinceReturnsOnlyNewEvents(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	first := strategy.StrategyEvent{EventID: "first", Metadata: map[string]string{"key": "one"}}
+	second := strategy.StrategyEvent{EventID: "second", Metadata: map[string]string{"key": "two"}}
+	if err := store.AppendEvent(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	events, cursor := store.EventsSince(0)
+	if len(events) != 1 || events[0].EventID != "first" || cursor != 1 {
+		t.Fatalf("first read = %#v cursor=%d", events, cursor)
+	}
+	events[0].Metadata["key"] = "changed"
+	if err := store.AppendEvent(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	events, cursor = store.EventsSince(cursor)
+	if len(events) != 1 || events[0].EventID != "second" || cursor != 2 {
+		t.Fatalf("second read = %#v cursor=%d", events, cursor)
+	}
+	all := store.Events()
+	if all[0].Metadata["key"] != "one" {
+		t.Fatalf("stored metadata mutated: %#v", all[0].Metadata)
+	}
+}
+
 func TestMemoryStoreAppendsEventsAndSavesSummary(t *testing.T) {
 	store := NewMemoryStore()
 	event := strategy.StrategyEvent{

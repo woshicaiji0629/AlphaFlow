@@ -1,10 +1,21 @@
 package indicatorcalc
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	model "alphaflow/go-service/pkg/marketmodel"
 )
+
+func TestCalculateWindowsContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := CalculateWindowsContext(ctx, []model.Kline{testKline(0, 100, true)}, 0, 1, DefaultOptions(), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
 
 func TestCalculateCommonIndicators(t *testing.T) {
 	klines := make([]model.Kline, 0, 120)

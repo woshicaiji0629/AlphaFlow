@@ -22,6 +22,8 @@ type ExecutorOptions struct {
 	AccountConfig AccountConfig
 	SlippageBps   float64
 	Now           func() int64
+	Progress      func(processed int, total int, trades int)
+	ProgressTotal int
 }
 
 type ExecutionSummary struct {
@@ -52,11 +54,14 @@ func (e StrategyEvaluationError) Error() string {
 }
 
 type Executor struct {
-	engine     *strategy.Engine
-	store      *position.MemoryStore
-	dispatcher *strategyroute.Dispatcher
-	manager    *position.Manager
-	account    *SimulatedAccount
+	engine        *strategy.Engine
+	store         *position.MemoryStore
+	dispatcher    *strategyroute.Dispatcher
+	manager       *position.Manager
+	account       *SimulatedAccount
+	progress      func(processed int, total int, trades int)
+	processed     int
+	progressTotal int
 }
 
 func NewExecutor(options ExecutorOptions) (*Executor, error) {
@@ -103,11 +108,13 @@ func NewExecutor(options ExecutorOptions) (*Executor, error) {
 		account = NewSimulatedAccount(options.AccountConfig)
 	}
 	return &Executor{
-		engine:     options.Engine,
-		store:      options.Store,
-		dispatcher: dispatcher,
-		manager:    manager,
-		account:    account,
+		engine:        options.Engine,
+		store:         options.Store,
+		dispatcher:    dispatcher,
+		manager:       manager,
+		account:       account,
+		progress:      options.Progress,
+		progressTotal: options.ProgressTotal,
 	}, nil
 }
 
@@ -116,9 +123,13 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 		return ExecutionSummary{}, fmt.Errorf("executor is required")
 	}
 	summary := ExecutionSummary{Contexts: len(contexts)}
-	existingEvents := e.store.Events()
+	existingEvents, eventCursor := e.store.EventsSince(0)
+	for _, event := range existingEvents {
+		if event.EventType == strategy.EventTypeOrderFilled {
+			summary.OrderFills++
+		}
+	}
 	realizedPnL := realizedPnLFromEvents(existingEvents)
-	eventCursor := len(existingEvents)
 	for index := 0; index < len(contexts); {
 		batchEnd := nextContextBatch(contexts, index)
 		batch := contexts[index:batchEnd]
@@ -153,19 +164,31 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 			if err := e.dispatcher.Dispatch(ctx, input, decision); err != nil {
 				return ExecutionSummary{}, err
 			}
-			events := e.store.Events()
-			newEvents := events[eventCursor:]
+			newEvents, nextEventCursor := e.store.EventsSince(eventCursor)
 			realizedPnL += realizedPnLFromEvents(newEvents)
+			for _, event := range newEvents {
+				if event.EventType == strategy.EventTypeOrderFilled {
+					summary.OrderFills++
+				}
+			}
 			if e.account != nil {
 				e.account.ApplyEvents(newEvents)
 			}
-			eventCursor = len(events)
+			eventCursor = nextEventCursor
 			point, ok, err := e.barEquityPoint(ctx, item, realizedPnL)
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
 			if ok {
 				summary.BarEquityCurve = append(summary.BarEquityCurve, point)
+			}
+			if e.progress != nil {
+				e.processed++
+				total := e.progressTotal
+				if total <= 0 {
+					total = e.processed + len(contexts) - summary.Decisions
+				}
+				e.progress(e.processed, total, summary.OrderFills)
 			}
 		}
 		accountPoint, ok, err := e.accountEquityPoint(ctx, batch[0])
@@ -185,11 +208,6 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 	events := e.store.Events()
 	summary.Events = len(events)
 	summary.StrategyEvents = events
-	for _, event := range events {
-		if event.EventType == strategy.EventTypeOrderFilled {
-			summary.OrderFills++
-		}
-	}
 	runID := firstRunID(contexts)
 	if runID != "" {
 		positions, err := e.store.ListPositions(ctx, position.Filter{

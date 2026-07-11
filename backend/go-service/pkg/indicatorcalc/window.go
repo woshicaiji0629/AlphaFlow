@@ -123,6 +123,9 @@ func (w *CalculationWindow) prepareAISourcePrefix() bool {
 		state.append(input, index, appendAISourceState)
 	}
 	w.aiPrefix = state
+	if result, ok := state.result(closes); ok {
+		w.aiPreview = &result
+	}
 	return true
 }
 
@@ -176,6 +179,7 @@ func (w *CalculationWindow) previewAISource(kline model.Kline) (aiSourceResult, 
 
 func (w *CalculationWindow) Reset(klines []model.Kline) {
 	w.aiPrefix = nil
+	w.aiPreview = nil
 	w.klines = w.klines[:0]
 	for _, kline := range klines {
 		if !kline.IsClosed {
@@ -193,9 +197,6 @@ func (w *CalculationWindow) Append(klines []model.Kline) {
 }
 
 func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool) {
-	if len(klines) > 0 {
-		w.aiPrefix = nil
-	}
 	for _, kline := range klines {
 		if !kline.IsClosed {
 			continue
@@ -205,6 +206,9 @@ func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool
 			w.appendSeries(kline)
 			if maintainBasicState && w.parseErr == nil && w.basic != nil {
 				w.basic.append(w.highs, w.lows, w.closes, w.volumes)
+			}
+			if maintainBasicState && w.aiPrefix != nil {
+				w.appendAISourceState()
 			}
 		}
 	}
@@ -220,8 +224,30 @@ func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool
 		w.rebuildBasicState()
 		return
 	}
-	if trimmed || w.basic == nil {
+	if w.basic == nil {
 		w.rebuildBasicState()
+		return
+	}
+	if trimmed {
+		w.basic.trimSeries(w.limit)
+	}
+}
+
+func (w *CalculationWindow) appendAISourceState() {
+	if w == nil || w.aiPrefix == nil || len(w.closes) == 0 {
+		return
+	}
+	last := len(w.closes) - 1
+	atr14Value, ok14 := atr(w.highs, w.lows, w.closes, 14)
+	stATRValue, okST := atr(w.highs, w.lows, w.closes, defaultAISourceConfig().stLength)
+	if !ok14 || !okST {
+		w.aiPrefix = nil
+		w.aiPreview = nil
+		return
+	}
+	result, ok := w.aiPrefix.appendClosed(w.opens[last], w.highs[last], w.lows[last], w.closes[last], atr14Value, stATRValue)
+	if ok {
+		w.aiPreview = &result
 	}
 }
 

@@ -2,15 +2,12 @@ package simulator
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"alphaflow/go-service/backtest-engine/internal/reader"
 	"alphaflow/go-service/pkg/indicatorcalc"
-	"alphaflow/go-service/pkg/indicatorwindow"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
-	"alphaflow/go-service/pkg/strategyframe"
 )
 
 func TestSnapshotBuilderUsesLatestClosedConfirmInterval(t *testing.T) {
@@ -108,51 +105,17 @@ func TestSnapshotBuilderRejectsMissingSeries(t *testing.T) {
 	}
 }
 
-func TestPrepareIndicatorSeriesMatchesColdPrefixCalculation(t *testing.T) {
-	const minute = int64(60_000)
-	klines := testKlines("ETHUSDT", "1m", []int64{0, minute, 2 * minute, 3 * minute, 4 * minute, 5 * minute})
-	prepared, err := prepareIndicatorSeries(klines, indicatorcalc.Options{})
-	if err != nil {
-		t.Fatalf("prepareIndicatorSeries() error = %v", err)
-	}
-	for index := range klines {
-		result, err := indicatorcalc.CalculateWindow(
-			indicatorcalc.NewCalculationWindowFromKlines(klines[:index+1], 0),
-			indicatorcalc.Options{},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantIndicator := marketmodel.IndicatorSnapshot{
-			Exchange: klines[index].Exchange, Market: klines[index].Market,
-			Symbol: klines[index].Symbol, Interval: klines[index].Interval,
-			OpenTime: result.OpenTime, CloseTime: result.CloseTime,
-			Values: result.Values, Signals: result.Signals, UpdatedAt: result.CloseTime,
-		}
-		if !reflect.DeepEqual(prepared.indicators[index], wantIndicator) {
-			t.Fatalf("indicator[%d] mismatch", index)
-		}
-		windowResult, err := indicatorwindow.Analyze(prepared.indicators[:index+1])
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantWindow, err := strategyframe.WindowViewFromResult(windowResult, windowResult.CloseTime)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(prepared.windows[index], wantWindow) {
-			t.Fatalf("window[%d] mismatch", index)
-		}
-	}
-}
-
-func TestSnapshotBuilderPreparesEachSeriesOnce(t *testing.T) {
-	original := calculateIndicatorWindows
-	t.Cleanup(func() { calculateIndicatorWindows = original })
+func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
+	original := calculateIndicatorWindow
+	t.Cleanup(func() { calculateIndicatorWindow = original })
 	calls := 0
-	calculateIndicatorWindows = func(klines []marketmodel.Kline, start int, warmup int, options indicatorcalc.Options) ([]indicatorcalc.Result, error) {
+	maxWindow := 0
+	calculateIndicatorWindow = func(window *indicatorcalc.CalculationWindow, options indicatorcalc.Options) (indicatorcalc.Result, error) {
 		calls++
-		return original(klines, start, warmup, options)
+		if len(window.Klines()) > maxWindow {
+			maxWindow = len(window.Klines())
+		}
+		return original(window, options)
 	}
 	const minute = int64(60_000)
 	dataset := reader.Dataset{Series: []reader.SeriesResult{
@@ -166,19 +129,23 @@ func TestSnapshotBuilderPreparesEachSeriesOnce(t *testing.T) {
 	builder, err := NewSnapshotBuilder(SnapshotBuilderOptions{
 		Dataset:  dataset,
 		Target:   strategy.Target{Exchange: "binance", Market: "um", Symbol: "ETHUSDT"},
-		Interval: "1m", ConfirmIntervals: []string{"5m"},
+		Interval: "1m", ConfirmIntervals: []string{"5m"}, CalculationWindow: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Build(context.Background()); err != nil {
+	contexts, err := builder.Build(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Build(context.Background()); err != nil {
-		t.Fatal(err)
+	if len(contexts) != 2 {
+		t.Fatalf("contexts = %d, want 2", len(contexts))
 	}
-	if calls != 2 {
-		t.Fatalf("CalculateWindows calls = %d, want one per two series", calls)
+	if calls != 5 {
+		t.Fatalf("CalculateWindow calls = %d, want each of 5 klines closed by the final as-of once", calls)
+	}
+	if maxWindow != 3 {
+		t.Fatalf("maximum calculation window = %d, want 3", maxWindow)
 	}
 }
 

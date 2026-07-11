@@ -7,7 +7,7 @@ func addEnhanced(values map[string]string, signals map[string]string, opens []fl
 	addSupportResistance(values, signals, highs, lows, closes)
 	addFibonacciFeatures(values, signals, highs, lows, closes)
 	addPivotPointFeatures(values, signals, highs, lows, closes)
-	addSupertrend(values, signals, highs, lows, closes, 10, 3)
+	addSupertrendWithState(values, signals, highs, lows, closes, 10, 3, basic)
 	addAlphaTrend(values, signals, highs, lows, closes, volumes, 14, 1)
 	addPSARFeatures(values, signals, highs, lows, closes)
 	addChandelierExit(values, signals, highs, lows, closes, 22, 3)

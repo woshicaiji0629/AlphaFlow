@@ -50,6 +50,7 @@ type aiSourceNeuralState struct {
 }
 
 type aiSourceState struct {
+	input               aiSourceInput
 	featureCursors      [4]aiSourceFeatureCursor
 	banks               [4][]aiSourceRow
 	allBank             []aiSourceRow
@@ -98,7 +99,9 @@ func (s *aiSourceState) append(input aiSourceInput, index int, step aiSourceStep
 
 func newAISourceState(input aiSourceInput) *aiSourceState {
 	cfg := input.config
+	input = cloneAISourceInput(input)
 	state := &aiSourceState{
+		input:               input,
 		weights:             [6]float64{1, 1, 1, 1, 1, 1},
 		neural:              aiSourceNeuralState{weights: [6]float64{0.01, 0.01, 0.01, 0.01, 0.01, 0.01}},
 		stDirection:         "bull",
@@ -118,6 +121,39 @@ func newAISourceState(input aiSourceInput) *aiSourceState {
 	state.featureRing = make([][4][6]float64, ringSize)
 	state.validFeatureRing = make([][4]bool, ringSize)
 	return state
+}
+
+func cloneAISourceInput(input aiSourceInput) aiSourceInput {
+	for index := range input.sources {
+		input.sources[index] = append([]float64(nil), input.sources[index]...)
+	}
+	input.highs = append([]float64(nil), input.highs...)
+	input.lows = append([]float64(nil), input.lows...)
+	input.closes = append([]float64(nil), input.closes...)
+	input.atr14 = append([]float64(nil), input.atr14...)
+	input.stATR = append([]float64(nil), input.stATR...)
+	return input
+}
+
+func (s *aiSourceState) appendClosed(open float64, high float64, low float64, closeValue float64, atr14Value float64, stATRValue float64) (aiSourceResult, bool) {
+	if s == nil {
+		return aiSourceResult{}, false
+	}
+	s.input.sources[aiSourceOpen] = append(s.input.sources[aiSourceOpen], open)
+	s.input.sources[aiSourceHigh] = append(s.input.sources[aiSourceHigh], high)
+	s.input.sources[aiSourceLow] = append(s.input.sources[aiSourceLow], low)
+	s.input.sources[aiSourceClose] = append(s.input.sources[aiSourceClose], closeValue)
+	s.input.highs = append(s.input.highs, high)
+	s.input.lows = append(s.input.lows, low)
+	s.input.closes = append(s.input.closes, closeValue)
+	s.input.atr14 = append(s.input.atr14, atr14Value)
+	s.input.stATR = append(s.input.stATR, stATRValue)
+	for index := range s.featureCursors {
+		s.featureCursors[index].source = s.input.sources[index]
+	}
+	index := len(s.input.closes) - 1
+	s.append(s.input, index, appendAISourceState)
+	return s.result(s.input.closes)
 }
 
 func (s *aiSourceState) result(closes []float64) (aiSourceResult, bool) {
@@ -142,8 +178,13 @@ func (s *aiSourceState) clone() *aiSourceState {
 		return nil
 	}
 	cloned := *s
+	cloned.input = cloneAISourceInput(s.input)
 	for index := range s.featureCursors {
-		cloned.featureCursors[index].source = append([]float64(nil), s.featureCursors[index].source...)
+		if len(cloned.input.sources[index]) > 0 {
+			cloned.featureCursors[index].source = cloned.input.sources[index]
+		} else {
+			cloned.featureCursors[index].source = append([]float64(nil), s.featureCursors[index].source...)
+		}
 	}
 	for index := range s.banks {
 		cloned.banks[index] = append([]aiSourceRow(nil), s.banks[index]...)

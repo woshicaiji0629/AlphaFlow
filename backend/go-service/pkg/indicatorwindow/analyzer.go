@@ -1,6 +1,7 @@
 package indicatorwindow
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -38,6 +39,16 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 // CalculateWindows analyzes every ordered suffix once while reusing the
 // snapshot ordering and point conversion work across results.
 func CalculateWindows(snapshots []model.IndicatorSnapshot) ([]Result, error) {
+	return CalculateWindowsContext(context.Background(), snapshots, nil)
+}
+
+// CalculateWindowsContext analyzes every ordered suffix while allowing long
+// backtest preparations to be cancelled and observed.
+func CalculateWindowsContext(
+	ctx context.Context,
+	snapshots []model.IndicatorSnapshot,
+	progress func(processed int, total int),
+) ([]Result, error) {
 	if len(snapshots) == 0 {
 		return nil, nil
 	}
@@ -51,6 +62,9 @@ func CalculateWindows(snapshots []model.IndicatorSnapshot) ([]Result, error) {
 	}
 	results := make([]Result, 0, len(points))
 	for index := range points {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		start := index + 1 - DefaultLookback
 		if start < 0 {
 			start = 0
@@ -60,6 +74,9 @@ func CalculateWindows(snapshots []model.IndicatorSnapshot) ([]Result, error) {
 			return nil, err
 		}
 		results = append(results, result)
+		if progress != nil {
+			progress(len(results), len(points))
+		}
 	}
 	return results, nil
 }

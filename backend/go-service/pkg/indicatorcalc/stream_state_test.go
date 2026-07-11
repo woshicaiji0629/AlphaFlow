@@ -10,13 +10,18 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	window := NewCalculationWindowFromKlines(klines[:100], 200)
 	window.EnableBasicState()
 	window.Append(klines[100:])
-	_, highs, lows, closes, volumes, err := window.Series()
+	_, _, _, closes, volumes, err := window.Series()
 	if err != nil {
 		t.Fatalf("Series: %v", err)
 	}
 	state := window.basic
 	if state == nil {
 		t.Fatal("missing basic indicator state")
+	}
+	fullWindow := NewCalculationWindowFromKlines(klines, 0)
+	_, fullHighs, fullLows, fullCloses, fullVolumes, err := fullWindow.Series()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	for _, period := range []int{7, 20, 25, 99} {
@@ -35,17 +40,17 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing stream ema%d", period)
 		}
-		want, ok := ema(closes, period)
+		want, ok := ema(fullCloses, period)
 		if !ok {
 			t.Fatalf("missing batch ema%d", period)
 		}
 		assertFloatClose(t, "ema", got, want)
-		if len(closes) > period {
+		if len(fullCloses) > period {
 			gotPrevious, ok := state.previousEMAValue(period)
 			if !ok {
 				t.Fatalf("missing stream previous ema%d", period)
 			}
-			wantPrevious, ok := ema(closes[:len(closes)-1], period)
+			wantPrevious, ok := ema(fullCloses[:len(fullCloses)-1], period)
 			if !ok {
 				t.Fatalf("missing batch previous ema%d", period)
 			}
@@ -57,27 +62,27 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	if !ok {
 		t.Fatal("missing stream rsi14 series")
 	}
-	wantRSI, ok := rsiSeries(closes, 14)
+	wantRSI, ok := rsiSeries(fullCloses, 14)
 	if !ok {
 		t.Fatal("missing batch rsi14 series")
 	}
-	assertFloatSeriesClose(t, "rsi14", gotRSI, wantRSI)
+	assertFloatSeriesClose(t, "rsi14", gotRSI, wantRSI[len(wantRSI)-len(gotRSI):])
 
 	gotATR, ok := state.atrSeries14()
 	if !ok {
 		t.Fatal("missing stream atr14 series")
 	}
-	wantATR, ok := atrSeries(highs, lows, closes, 14)
+	wantATR, ok := atrSeries(fullHighs, fullLows, fullCloses, 14)
 	if !ok {
 		t.Fatal("missing batch atr14 series")
 	}
-	assertFloatSeriesClose(t, "atr14", gotATR, wantATR)
+	assertFloatSeriesClose(t, "atr14", gotATR, wantATR[len(wantATR)-len(gotATR):])
 
 	gotADX, gotPlusDI, gotMinusDI, ok := state.adx14Value()
 	if !ok {
 		t.Fatal("missing stream adx14")
 	}
-	wantADX, wantPlusDI, wantMinusDI, ok := adx(highs, lows, closes, 14)
+	wantADX, wantPlusDI, wantMinusDI, ok := adx(fullHighs, fullLows, fullCloses, 14)
 	if !ok {
 		t.Fatal("missing batch adx14")
 	}
@@ -89,7 +94,7 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	if !ok {
 		t.Fatal("missing stream wavetrend")
 	}
-	wantWT1, wantWT2, wantPreviousWT1, wantPreviousWT2, wantPreviousDelta, ok := waveTrend(highs, lows, closes, 10, 21)
+	wantWT1, wantWT2, wantPreviousWT1, wantPreviousWT2, wantPreviousDelta, ok := waveTrend(fullHighs, fullLows, fullCloses, 10, 21)
 	if !ok {
 		t.Fatal("missing batch wavetrend")
 	}
@@ -104,13 +109,11 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing stream macd %#v", config)
 		}
-		wantMACD, ok := macdSeries(closes, config.fast, config.slow, config.signal)
+		wantMACD, ok := macdSeries(fullCloses, config.fast, config.slow, config.signal)
 		if !ok {
 			t.Fatalf("missing batch macd %#v", config)
 		}
-		if len(gotMACD) != len(wantMACD) {
-			t.Fatalf("macd len = %d, want %d", len(gotMACD), len(wantMACD))
-		}
+		wantMACD = wantMACD[len(wantMACD)-len(gotMACD):]
 		for index := range gotMACD {
 			assertFloatClose(t, "macd value", gotMACD[index].value, wantMACD[index].value)
 			assertFloatClose(t, "macd signal", gotMACD[index].signal, wantMACD[index].signal)
@@ -122,15 +125,15 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	if !ok {
 		t.Fatal("missing stream obv")
 	}
-	assertFloatClose(t, "obv", gotOBV, obv(closes, volumes))
+	assertFloatClose(t, "obv", gotOBV, obv(fullCloses, fullVolumes))
 
 	_, gotOBVSlope, gotPVT, gotPVTSlope, gotADLine, gotADLineSlope, ok := state.moneyFlowValues()
 	if !ok {
 		t.Fatal("missing stream money flow")
 	}
-	wantOBVSeries := obvSeries(closes, volumes)
-	wantPVTSeries := priceVolumeTrendSeries(closes, volumes)
-	wantADSeries := accumulationDistributionSeries(highs, lows, closes, volumes)
+	wantOBVSeries := obvSeries(fullCloses, fullVolumes)
+	wantPVTSeries := priceVolumeTrendSeries(fullCloses, fullVolumes)
+	wantADSeries := accumulationDistributionSeries(fullHighs, fullLows, fullCloses, fullVolumes)
 	assertFloatClose(t, "money flow obv slope", gotOBVSlope, slope(wantOBVSeries, 5))
 	assertFloatClose(t, "money flow pvt", gotPVT, wantPVTSeries[len(wantPVTSeries)-1])
 	assertFloatClose(t, "money flow pvt slope", gotPVTSlope, slope(wantPVTSeries, 5))
@@ -141,7 +144,7 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	if !ok {
 		t.Fatal("missing stream vwap")
 	}
-	assertFloatClose(t, "vwap", gotVWAP, vwap(highs, lows, closes, volumes))
+	assertFloatClose(t, "vwap", gotVWAP, vwap(fullHighs, fullLows, fullCloses, fullVolumes))
 
 	gotVolumeMA, ok := state.volumeSMAValue(20)
 	if !ok {
@@ -152,6 +155,22 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		t.Fatal("missing batch volume sma20")
 	}
 	assertFloatClose(t, "volume sma20", gotVolumeMA, wantVolumeMA)
+
+	gotAdaptive, ok := state.adaptiveSupertrendValue()
+	if !ok {
+		t.Fatal("missing stream adaptive supertrend")
+	}
+	wantAdaptive, ok := adaptiveSupertrend(fullHighs, fullLows, fullCloses, 10, 3, 100)
+	if !ok {
+		t.Fatal("missing batch adaptive supertrend")
+	}
+	gotLast := gotAdaptive.points[len(gotAdaptive.points)-1]
+	wantLast := wantAdaptive.points[len(wantAdaptive.points)-1]
+	assertFloatClose(t, "adaptive supertrend", gotLast.value, wantLast.value)
+	assertFloatClose(t, "adaptive assigned atr", gotAdaptive.assignedATR, wantAdaptive.assignedATR)
+	if gotLast.direction != wantLast.direction || gotAdaptive.cluster != wantAdaptive.cluster {
+		t.Fatalf("adaptive state = %s/%s, want %s/%s", gotLast.direction, gotAdaptive.cluster, wantLast.direction, wantAdaptive.cluster)
+	}
 }
 
 func assertFloatSeriesClose(t *testing.T, name string, got []float64, want []float64) {

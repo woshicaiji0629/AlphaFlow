@@ -48,6 +48,10 @@ func addTrendFeaturesWithContext(values map[string]string, signals map[string]st
 }
 
 func addSupertrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
+	addSupertrendWithState(values, signals, highs, lows, closes, period, multiplier, nil)
+}
+
+func addSupertrendWithState(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, basic *basicIndicatorState) {
 	points, ok := supertrendSeries(highs, lows, closes, period, multiplier)
 	if !ok {
 		return
@@ -79,7 +83,7 @@ func addSupertrend(values map[string]string, signals map[string]string, highs []
 		signals[preset.name+"_direction"] = presetDirection
 	}
 
-	addAdaptiveSupertrend(values, signals, highs, lows, closes, 10, 3, 100)
+	addAdaptiveSupertrendWithState(values, signals, highs, lows, closes, 10, 3, 100, basic)
 	addAISupertrend(values, signals, highs, lows, closes, 10, 1, 5, 0.5, 10)
 
 	zone, zoneOK := supertrendZone(highs, lows, closes, points, period, 14, 1.5)
@@ -328,7 +332,17 @@ type aiPerformanceCluster struct {
 }
 
 func addAdaptiveSupertrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int) {
-	state, ok := adaptiveSupertrend(highs, lows, closes, period, multiplier, trainingPeriod)
+	addAdaptiveSupertrendWithState(values, signals, highs, lows, closes, period, multiplier, trainingPeriod, nil)
+}
+
+func addAdaptiveSupertrendWithState(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int, basic *basicIndicatorState) {
+	state, ok := adaptiveSupertrendState{}, false
+	if basic != nil && period == 10 && multiplier == 3 && trainingPeriod == 100 {
+		state, ok = basic.adaptiveSupertrendValue()
+	}
+	if !ok {
+		state, ok = adaptiveSupertrend(highs, lows, closes, period, multiplier, trainingPeriod)
+	}
 	if !ok {
 		return
 	}

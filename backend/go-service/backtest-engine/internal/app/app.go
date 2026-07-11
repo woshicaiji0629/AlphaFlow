@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"alphaflow/go-service/backtest-engine/internal/config"
 	"alphaflow/go-service/backtest-engine/internal/reader"
@@ -260,6 +261,8 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		return simulator.ExecutionSummary{}, err
 	}
 	store := position.NewMemoryStore()
+	preparationProgress := newPreparationProgressLogger(cfg.Runtime.RunID)
+	simulationProgress := newSimulationProgressLogger(cfg.Runtime.RunID)
 	executor, err := simulator.NewExecutor(simulator.ExecutorOptions{
 		Engine: engine,
 		Store:  store,
@@ -286,7 +289,9 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 			FeeRate:       cfg.Fee.FeeRate,
 			RebatePct:     cfg.Fee.RebatePct,
 		},
-		SlippageBps: cfg.Execution.SlippageBps,
+		SlippageBps:   cfg.Execution.SlippageBps,
+		Progress:      simulationProgress,
+		ProgressTotal: backtestContextCount(dataset, cfg.Data.Interval),
 	})
 	if err != nil {
 		return simulator.ExecutionSummary{}, err
@@ -300,7 +305,7 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		return simulator.ExecutionSummary{}, err
 	}
 	summary := simulator.ExecutionSummary{}
-	contexts := []strategy.Context{}
+	iteratorStates := []contextIteratorState{}
 	for _, symbol := range cfg.Data.Symbols {
 		target := strategy.Target{
 			Exchange: cfg.Data.Exchange,
@@ -311,22 +316,27 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 			RunID:    cfg.Runtime.RunID,
 		}
 		builder, err := simulator.NewSnapshotBuilder(simulator.SnapshotBuilderOptions{
-			Dataset:          dataset,
-			Target:           target,
-			Interval:         cfg.Data.Interval,
-			ConfirmIntervals: confirmIntervals,
+			Dataset:           dataset,
+			Target:            target,
+			Interval:          cfg.Data.Interval,
+			ConfirmIntervals:  confirmIntervals,
+			CalculationWindow: int(cfg.Data.WarmupBars),
+			Progress:          preparationProgress,
 		})
 		if err != nil {
 			return simulator.ExecutionSummary{}, err
 		}
-		symbolContexts, err := builder.Build(ctx)
+		iterator, err := builder.Iterator(ctx)
 		if err != nil {
 			return simulator.ExecutionSummary{}, err
 		}
-		contexts = append(contexts, symbolContexts...)
+		item, ok, err := iterator.Next(ctx)
+		if err != nil {
+			return simulator.ExecutionSummary{}, err
+		}
+		iteratorStates = append(iteratorStates, contextIteratorState{iterator: iterator, current: item, ok: ok})
 	}
-	sortBacktestContexts(contexts)
-	summary, executionErr := executor.Execute(ctx, contexts)
+	summary, executionErr := executeContextBatches(ctx, executor, iteratorStates, 5000)
 	events := store.Events()
 	summary.StrategyEvents = events
 	summary.Events = len(events)
@@ -375,6 +385,168 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		return summary, fmt.Errorf("execute backtest: %w", executionErr)
 	}
 	return summary, nil
+}
+
+type contextIteratorState struct {
+	iterator *simulator.ContextIterator
+	current  strategy.Context
+	ok       bool
+}
+
+func executeContextBatches(
+	ctx context.Context,
+	executor *simulator.Executor,
+	states []contextIteratorState,
+	batchSize int,
+) (simulator.ExecutionSummary, error) {
+	if batchSize <= 0 {
+		return simulator.ExecutionSummary{}, fmt.Errorf("context batch size must be positive")
+	}
+	summary := simulator.ExecutionSummary{}
+	for {
+		batch, err := nextContextIteratorBatch(ctx, states, batchSize)
+		if err != nil {
+			return summary, err
+		}
+		if len(batch) == 0 {
+			return summary, nil
+		}
+		partial, executionErr := executor.Execute(ctx, batch)
+		mergeExecutionSummary(&summary, partial)
+		if executionErr != nil {
+			return summary, executionErr
+		}
+	}
+}
+
+func nextContextIteratorBatch(ctx context.Context, states []contextIteratorState, batchSize int) ([]strategy.Context, error) {
+	batch := make([]strategy.Context, 0, batchSize)
+	lastOpenTime := int64(0)
+	for {
+		selected := earliestContextIterator(states)
+		if selected < 0 {
+			return batch, nil
+		}
+		nextOpenTime := contextOpenTime(states[selected].current)
+		if len(batch) >= batchSize && nextOpenTime != lastOpenTime {
+			return batch, nil
+		}
+		batch = append(batch, states[selected].current)
+		lastOpenTime = nextOpenTime
+		item, ok, err := states[selected].iterator.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		states[selected].current = item
+		states[selected].ok = ok
+	}
+}
+
+func earliestContextIterator(states []contextIteratorState) int {
+	selected := -1
+	for index := range states {
+		if !states[index].ok {
+			continue
+		}
+		if selected < 0 || contextOpenTime(states[index].current) < contextOpenTime(states[selected].current) {
+			selected = index
+		}
+	}
+	return selected
+}
+
+func mergeExecutionSummary(target *simulator.ExecutionSummary, partial simulator.ExecutionSummary) {
+	target.Contexts += partial.Contexts
+	target.Decisions += partial.Decisions
+	target.Results += partial.Results
+	target.Events = partial.Events
+	target.OpenPositions = partial.OpenPositions
+	target.OrderFills = partial.OrderFills
+	target.StrategyEvents = partial.StrategyEvents
+	target.BarEquityCurve = append(target.BarEquityCurve, partial.BarEquityCurve...)
+	target.AccountCurve = append(target.AccountCurve, partial.AccountCurve...)
+	target.Failures = append(target.Failures, partial.Failures...)
+}
+
+func backtestContextCount(dataset reader.Dataset, interval string) int {
+	total := 0
+	for _, series := range dataset.Series {
+		if series.Key.Interval == interval {
+			total += series.Result.TradingCount
+		}
+	}
+	return total
+}
+
+func newPreparationProgressLogger(runID string) simulator.PreparationProgress {
+	lastReported := map[string]int{}
+	startedAt := map[string]time.Time{}
+	lastReportedAt := map[string]time.Time{}
+	return func(stage string, interval string, processed int, total int) {
+		key := stage + ":" + interval
+		now := time.Now()
+		if startedAt[key].IsZero() {
+			startedAt[key] = now
+		}
+		step := total / 20
+		if step < 1 {
+			step = 1
+		}
+		if processed != 1 && processed != total && processed-lastReported[key] < step && now.Sub(lastReportedAt[key]) < 10*time.Second {
+			return
+		}
+		lastReported[key] = processed
+		lastReportedAt[key] = now
+		logBacktestProgress(runID, stage, interval, processed, total, 0, startedAt[key])
+	}
+}
+
+func newSimulationProgressLogger(runID string) func(processed int, total int, trades int) {
+	startedAt := time.Now()
+	lastReported := 0
+	lastReportedAt := time.Time{}
+	return func(processed int, total int, trades int) {
+		now := time.Now()
+		step := total / 100
+		if step < 1 {
+			step = 1
+		}
+		if processed != 1 && processed != total && processed-lastReported < step && now.Sub(lastReportedAt) < 10*time.Second {
+			return
+		}
+		lastReported = processed
+		lastReportedAt = now
+		logBacktestProgress(runID, "simulation", "", processed, total, trades, startedAt)
+	}
+}
+
+func logBacktestProgress(runID string, stage string, interval string, processed int, total int, trades int, startedAt time.Time) {
+	elapsed := time.Since(startedAt)
+	percent := 0.0
+	rate := 0.0
+	eta := time.Duration(0)
+	if total > 0 {
+		percent = float64(processed) * 100 / float64(total)
+	}
+	if elapsed > 0 {
+		rate = float64(processed) / elapsed.Seconds()
+		if rate > 0 && total > processed {
+			eta = time.Duration(float64(total-processed) / rate * float64(time.Second))
+		}
+	}
+	slog.Info(
+		"backtest progress",
+		"run_id", runID,
+		"stage", stage,
+		"interval", interval,
+		"processed", processed,
+		"total", total,
+		"percent", percent,
+		"rate_per_second", rate,
+		"trades", trades,
+		"elapsed", elapsed.String(),
+		"eta", eta.String(),
+	)
 }
 
 func buildConfiguredStrategy(cfg config.Config) (strategy.Strategy, error) {

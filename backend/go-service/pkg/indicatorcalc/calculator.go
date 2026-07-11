@@ -1,6 +1,7 @@
 package indicatorcalc
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -46,6 +47,20 @@ func Calculate(klines []model.Kline, options Options) (Result, error) {
 }
 
 func CalculateWindows(klines []model.Kline, start int, warmup int, options Options) ([]Result, error) {
+	return CalculateWindowsContext(context.Background(), klines, start, warmup, options, nil)
+}
+
+// CalculateWindowsContext calculates a result for every kline from start while
+// keeping only warmup bars in the rolling calculation window. progress is
+// called after each completed result when it is not nil.
+func CalculateWindowsContext(
+	ctx context.Context,
+	klines []model.Kline,
+	start int,
+	warmup int,
+	options Options,
+	progress func(processed int, total int),
+) ([]Result, error) {
 	if start < 0 || start > len(klines) {
 		return nil, fmt.Errorf("invalid calculation start: %d", start)
 	}
@@ -62,13 +77,20 @@ func CalculateWindows(klines []model.Kline, start int, warmup int, options Optio
 	window := NewCalculationWindowFromKlines(klines[seedStart:start], warmup)
 	window.EnableBasicState()
 	results := make([]Result, 0, len(klines)-start)
+	total := len(klines) - start
 	for index := start; index < len(klines); index++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		window.Append([]model.Kline{klines[index]})
 		result, err := CalculateWindow(window, options)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, result)
+		if progress != nil {
+			progress(len(results), total)
+		}
 	}
 	return results, nil
 }
@@ -123,6 +145,9 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		}, nil
 	}
 	basic := window.basic
+	if window.aiPreview == nil {
+		window.prepareAISourcePrefix()
+	}
 	features := newFeatureContext(highs, lows, closes, basic)
 
 	for _, period := range options.SMAPeriods {

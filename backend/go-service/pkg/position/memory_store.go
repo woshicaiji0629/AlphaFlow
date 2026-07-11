@@ -160,13 +160,26 @@ func (s *MemoryStore) CleanupTempKeys(ctx context.Context, runID string) error {
 }
 
 func (s *MemoryStore) Events() []strategy.StrategyEvent {
+	events, _ := s.EventsSince(0)
+	return events
+}
+
+// EventsSince returns a copy of events appended at or after cursor and the
+// cursor to use for the next incremental read.
+func (s *MemoryStore) EventsSince(cursor int) ([]strategy.StrategyEvent, int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	events := make([]strategy.StrategyEvent, 0, len(s.events))
-	for _, event := range s.events {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(s.events) {
+		cursor = len(s.events)
+	}
+	events := make([]strategy.StrategyEvent, 0, len(s.events)-cursor)
+	for _, event := range s.events[cursor:] {
 		events = append(events, copyStrategyEvent(event))
 	}
-	return events
+	return events, len(s.events)
 }
 
 func (s *MemoryStore) BacktestRunSummary(runID string) (strategy.BacktestRunSummary, bool) {

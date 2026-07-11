@@ -68,8 +68,34 @@ func TestCalculationWindowCloneSharesImmutableAISourcePrefix(t *testing.T) {
 		t.Fatal("clone did not share immutable AI prefix")
 	}
 	window.Append(testWindowKlines(1))
-	if window.aiPrefix != nil {
-		t.Fatal("append did not invalidate AI prefix")
+	if window.aiPrefix == nil {
+		t.Fatal("non-stream append unexpectedly invalidated AI prefix")
+	}
+}
+
+func TestCalculationWindowAdvancesAISourceState(t *testing.T) {
+	opens, highs, lows, closes := aiSourceTestOHLC(280)
+	klines := make([]model.Kline, 0, len(closes))
+	for index := range closes {
+		klines = append(klines, model.Kline{OpenTime: int64(index), Open: format(opens[index]), High: format(highs[index]), Low: format(lows[index]), Close: format(closes[index]), Volume: "10", IsClosed: true})
+	}
+	window := NewCalculationWindowFromKlines(klines[:250], 250)
+	window.EnableBasicState()
+	if !window.prepareAISourcePrefix() {
+		t.Fatal("AI source prefix was not prepared")
+	}
+	prefix := window.aiPrefix
+	for _, kline := range klines[250:] {
+		window.Append([]model.Kline{kline})
+	}
+	if window.aiPrefix != prefix {
+		t.Fatal("stream append rebuilt AI source state")
+	}
+	if got := window.aiPrefix.lineCount; got != len(klines)-1 {
+		t.Fatalf("AI source lines = %d, want %d", got, len(klines)-1)
+	}
+	if window.aiPreview == nil {
+		t.Fatal("stream append did not publish AI source result")
 	}
 }
 
