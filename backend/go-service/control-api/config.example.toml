@@ -1,0 +1,36 @@
+[http]
+addr = "127.0.0.1:8080"
+mode = "debug"
+read_timeout = "10s"
+write_timeout = "30s"
+shutdown_timeout = "10s"
+allowed_origins = ["http://localhost:3000"]
+max_body_bytes = 1048576
+
+[postgres]
+dsn = "postgresql://alphaflow:alphaflow@localhost:5432/alphaflow?sslmode=disable"
+max_conns = 10
+min_conns = 1
+connect_timeout = "5s"
+auto_migrate = false
+migration_timeout = "30s"
+
+[session]
+cookie_name = "alphaflow_session"
+csrf_cookie_name = "alphaflow_csrf"
+secure_cookie = false # local HTTP only; production must use true
+idle_timeout = "12h"
+absolute_timeout = "168h"
+refresh_interval = "5m"
+
+[redis]
+addr = "localhost:6380"
+password = ""
+db = 0
+pool_size = 10
+min_idle_conns = 2
+
+[login_limit]
+window = "15m"
+max_email_attempts = 5
+max_ip_attempts = 50

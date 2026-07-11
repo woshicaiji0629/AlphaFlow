@@ -19,6 +19,16 @@ func TestBuildSupertrend(t *testing.T) {
 	}
 }
 
+func TestSupportedMatchesBuildableStrategies(t *testing.T) {
+	items := Supported()
+	if len(items) != 1 || items[0].Code != "supertrend" {
+		t.Fatalf("Supported()=%#v", items)
+	}
+	if !IsSupported(" SUPERTrend ") || IsSupported("unknown") {
+		t.Fatal("IsSupported returned unexpected result")
+	}
+}
+
 func TestBuildSet(t *testing.T) {
 	strategies, err := BuildSet([]string{"supertrend"})
 	if err != nil {

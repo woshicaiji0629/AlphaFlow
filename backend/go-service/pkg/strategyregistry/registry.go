@@ -2,6 +2,7 @@ package strategyregistry
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -9,6 +10,31 @@ import (
 	"alphaflow/go-service/pkg/strategy"
 	"alphaflow/go-service/pkg/strategyspec"
 )
+
+type Definition struct {
+	Code       string                         `json:"code"`
+	Parameters map[string]ParameterDefinition `json:"parameters"`
+}
+
+type ParameterDefinition struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+}
+
+func Supported() []Definition {
+	items := []Definition{{Code: StrategySupertrend, Parameters: map[string]ParameterDefinition{
+		"entry_threshold":         {Type: "number", Description: "开仓置信度阈值，范围(0,1]"},
+		"max_blocking_timeframes": {Type: "integer", Description: "允许阻塞的确认周期数量，必须为正整数"},
+	}}}
+	sort.Slice(items, func(i, j int) bool { return items[i].Code < items[j].Code })
+	return items
+}
+
+func IsSupported(code string) bool {
+	_, ok := factories[strings.ToLower(strings.TrimSpace(code))]
+	return ok
+}
 
 const (
 	StrategySupertrend = supertrend.Name

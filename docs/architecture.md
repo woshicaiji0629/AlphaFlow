@@ -13,6 +13,8 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 - Redis 缓存和当前状态层。
 - NATS JetStream 队列层。
 - ClickHouse 历史存储，用于已闭合 K 线。
+- Gin `control-api` 控制面服务和 PostgreSQL 认证、权限、策略目录及审计存储。
+- React + TypeScript + Vite 量化控制台。
 - 派生 K 线聚合，用于补齐交易所未直接提供的周期，例如 `10m`。
 - 基于已闭合 K 线的技术指标计算。
 - 基于底层指标序列的 Go 指标窗口聚合。
@@ -28,16 +30,16 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 
 尚未作为生产模块实现：
 
-- 管理 API。
+- Control API 已实现基础认证、个人 Dashboard 和策略管理；账户、订单和用户管理继续补齐。
 - 真实交易所凭证端到端联调和小额实盘验收。
 - 账户级实时风控服务。
-- 前端。
+- 前端已实现登录、总览、策略目录、官方表现和管理员策略管理。
 
 ## 仓库结构
 
 ```text
 AlphaFlow/
-  frontend/                         # 预留给未来 React + TypeScript 前端
+  frontend/                         # React + TypeScript + Vite 量化控制台
   backend/
     python-service/                 # Python 服务，每个服务维护自己的依赖
       alphaflow-core/               # 当前 Python 策略框架，使用 uv 管理

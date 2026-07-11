@@ -98,6 +98,8 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 离线回测一般一次只回测一个策略；批量回测应显式生成多个 run。
 - 在线与回测共享指标公式、窗口语义和 `strategyframe` 上下文协议，但分别采用增量计算和批量预计算生命周期。
 - 上线或下线策略优先通过策略 registry 和配置控制，不在多个服务里分别硬编码。
+- 策略算法由 Go 代码实现并注册；后台只维护参数、版本、可见范围和发布状态，不执行任意代码。
+- 已发布策略版本不可修改，新配置从已发布版本复制为独立草稿。
 - 回测仓位应独立于在线 paper 仓位，使用 `bt` scope 和 run id 隔离。
 - `paper` / `bt` 是本地策略仓位；`testnet` / `live` 后续应按交易所账户级仓位处理，并通过内部账本做策略归因。
 
@@ -114,7 +116,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 订单服务级幂等落库和重复订单意图拦截尚未实现。
 - 账户级实时风控尚未实现。
 - HTTP 健康检查接口尚未实现。
-- 管理 API 和前端尚未实现。
+- Control API 和前端基础链路已实现；账户挂载、订阅、订单、用户管理和审计查询页面仍待补齐。
 - ClickHouse 表当前通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
 - top500 场景下的 Redis ops、NATS market snapshot 积压、NATS strategy decision 积压、ClickHouse 写入和实时采集延迟仍需要长时间全链路压测确认；不能把最近一次小样本压测结果当作生产 SLA。
 - 冷启动会为最近窗口写入底层指标 snapshot 和窗口快照，Redis 写入次数会随 `tasks * window-lookback` 增长；top500 长跑后再判断是否需要异步刷 Redis、批量压缩或降低写入频率。
