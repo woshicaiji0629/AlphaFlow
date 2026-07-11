@@ -79,6 +79,10 @@ func (r *Runner) indicatorWindowSnapshot(
 	if err != nil {
 		return model.IndicatorWindowSnapshot{}, err
 	}
+	feature := featureMetadata(r.options.CalculateOptions)
+	if len(snapshots) > 0 && snapshots[len(snapshots)-1].Feature.SchemaVersion != "" {
+		feature = snapshots[len(snapshots)-1].Feature
+	}
 	return model.IndicatorWindowSnapshot{
 		Exchange:  rule.Exchange,
 		Market:    rule.Market,
@@ -89,6 +93,7 @@ func (r *Runner) indicatorWindowSnapshot(
 		Version:   result.Version,
 		Values:    result.Values,
 		Signals:   result.Signals,
+		Feature:   feature,
 		UpdatedAt: updatedAt,
 	}, nil
 }
@@ -146,7 +151,7 @@ func (r *Runner) calculateRealtimeIndicators(
 	if err != nil {
 		return calculatedIndicators{}, err
 	}
-	snapshot := indicatorSnapshotFromResult(kline, result, r.now().UnixMilli())
+	snapshot := indicatorSnapshotFromResult(kline, result, featureMetadata(r.options.CalculateOptions), r.now().UnixMilli())
 	snapshots := r.cachedIndicatorSnapshotsWithCurrent(key, snapshot)
 	if len(snapshots) == 0 {
 		snapshots = []model.IndicatorSnapshot{snapshot}
@@ -157,7 +162,7 @@ func (r *Runner) calculateRealtimeIndicators(
 	}, nil
 }
 
-func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result, updatedAt int64) model.IndicatorSnapshot {
+func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result, feature model.FeatureMetadata, updatedAt int64) model.IndicatorSnapshot {
 	return model.IndicatorSnapshot{
 		Exchange:  kline.Exchange,
 		Market:    kline.Market,
@@ -167,6 +172,7 @@ func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result,
 		CloseTime: result.CloseTime,
 		Values:    result.Values,
 		Signals:   result.Signals,
+		Feature:   feature,
 		UpdatedAt: updatedAt,
 	}
 }
@@ -182,6 +188,7 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 	if len(closed) == 0 {
 		return nil, fmt.Errorf("no closed klines")
 	}
+	cached = snapshotsMatchingFeature(cached, featureMetadata(r.options.CalculateOptions))
 	lookback := r.options.WindowLookback
 	if lookback > len(closed) {
 		lookback = len(closed)
@@ -232,10 +239,30 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 			CloseTime: result.CloseTime,
 			Values:    result.Values,
 			Signals:   result.Signals,
+			Feature:   featureMetadata(r.options.CalculateOptions),
 			UpdatedAt: r.now().UnixMilli(),
 		})
 	}
 	return snapshots, nil
+}
+
+func snapshotsMatchingFeature(snapshots []model.IndicatorSnapshot, expected model.FeatureMetadata) []model.IndicatorSnapshot {
+	matched := make([]model.IndicatorSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.Feature == expected {
+			matched = append(matched, snapshot)
+		}
+	}
+	return matched
+}
+
+func featureMetadata(options indicatorcalc.Options) model.FeatureMetadata {
+	metadata := indicatorcalc.Metadata(options)
+	return model.FeatureMetadata{
+		SchemaVersion:     metadata.SchemaVersion,
+		CalculatorVersion: metadata.CalculatorVersion,
+		ParameterHash:     metadata.ParameterHash,
+	}
 }
 
 func (r *Runner) calculateWindows(
@@ -264,6 +291,7 @@ func (r *Runner) cachedIndicatorSnapshotsWithCurrent(
 	snapshot model.IndicatorSnapshot,
 ) []model.IndicatorSnapshot {
 	cached := r.cachedIndicatorSnapshotsForKey(key)
+	cached = snapshotsMatchingFeature(cached, snapshot.Feature)
 
 	return appendIndicatorSnapshot(cached, snapshot, r.options.SnapshotCacheLimit)
 }

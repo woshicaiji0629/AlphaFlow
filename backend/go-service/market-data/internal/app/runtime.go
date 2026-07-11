@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/market-data/internal/aggregator"
+	"alphaflow/go-service/market-data/internal/backfillqueue"
 	"alphaflow/go-service/market-data/internal/collector"
 	"alphaflow/go-service/market-data/internal/config"
 	"alphaflow/go-service/market-data/internal/health"
@@ -42,8 +43,19 @@ func buildRuntime(
 		_ = marketStore.Close()
 		return nil, nil, nil, nil, nil, closePublisher, 0, err
 	}
+	gapPublisher, closeGapPublisher, err := buildGapPublisher(cfg)
+	if err != nil {
+		_ = marketStore.Close()
+		closePublisher()
+		return nil, nil, nil, nil, nil, closePublisher, 0, err
+	}
+	closeMarketPublisher := closePublisher
+	closePublisher = func() {
+		closeGapPublisher()
+		closeMarketPublisher()
+	}
 
-	collectors := buildCollectors(cfg, marketStore, reconnectDelay)
+	collectors := buildCollectors(cfg, marketStore, reconnectDelay, gapPublisher)
 	if len(collectors) == 0 {
 		_ = marketStore.Close()
 		closePublisher()
@@ -122,6 +134,21 @@ func buildRuntime(
 		GapLookback:  config.HealthGapLookback(),
 	})
 	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, closePublisher, reconnectDelay, nil
+}
+
+func buildGapPublisher(cfg config.Config) (collector.GapPublisher, func(), error) {
+	if !cfg.Backfill.WorkerEnabled {
+		return nil, func() {}, nil
+	}
+	publisher, err := backfillqueue.NewNATSPublisher(backfillqueue.NATSOptions{URL: cfg.NATS.URL, MaxPending: cfg.Backfill.MaxPending, MaxDeliveries: cfg.Backfill.MaxDeliveries})
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect nats gap backfill publisher: %w", err)
+	}
+	return publisher, func() {
+		if err := publisher.Close(); err != nil {
+			slog.Error("close gap backfill publisher failed", "error", err)
+		}
+	}, nil
 }
 
 func buildMarketSnapshotPublisher(cfg config.Config) (indicator.SnapshotPublisher, func(), error) {

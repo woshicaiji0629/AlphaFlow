@@ -19,6 +19,7 @@ func buildCollectors(
 	cfg config.Config,
 	marketStore *store.MarketStore,
 	reconnectDelay time.Duration,
+	gapPublisher collector.GapPublisher,
 ) []*collector.Collector {
 	httpClient := httpclient.New()
 	collectors := []*collector.Collector{}
@@ -36,6 +37,7 @@ func buildCollectors(
 				WebSocketConnections: cfg.Binance.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
 				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "binance"),
+				GapPublisher:         gapPublisher,
 			},
 			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
 			binance.NewWSClient(config.BinanceWSBase()),
@@ -57,6 +59,7 @@ func buildCollectors(
 				WebSocketConnections: cfg.Gate.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
 				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "gate"),
+				GapPublisher:         gapPublisher,
 			},
 			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
 			gate.NewWSClient(config.GateWSBase(), config.GateSettle(), gateIntervals[0]),
@@ -79,6 +82,7 @@ func buildCollectors(
 				StartupLookback:      config.KlineLimit(),
 				BackfillIntervals:    bitgetBackfillIntervals,
 				StartupDerivedRules:  rulesExceptTarget(aggregationRules(cfg), "bitget", "3m"),
+				GapPublisher:         gapPublisher,
 			},
 			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
 			bitget.NewWSClient(config.BitgetWSBase(), config.BitgetProductType()),
@@ -99,6 +103,7 @@ func buildCollectors(
 				WebSocketConnections: cfg.Bybit.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
 				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "bybit"),
+				GapPublisher:         gapPublisher,
 			},
 			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),
 			bybit.NewWSClient(config.BybitWSBase(), config.BybitCategory()),

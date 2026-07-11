@@ -49,6 +49,8 @@ func (r *Runner) windowForKline(
 		if isContiguous(cachedLast, kline, intervalMillis) {
 			if kline.IsClosed {
 				cached.Append([]model.Kline{kline})
+			} else {
+				cached.PrepareAISourcePrefix()
 			}
 			window := cached.Clone()
 			r.mu.Unlock()
@@ -217,9 +219,7 @@ func windowWithTemporaryKline(window *indicatorcalc.CalculationWindow, kline mod
 		klines[len(klines)-1] = temporary
 		return newCalculationWindowFromKlines(klines, limit)
 	}
-	window = window.CloneForAppend()
-	window.Append([]model.Kline{temporary})
-	return window
+	return window.RealtimePreview(temporary)
 }
 
 func newCalculationWindowFromKlines(klines []model.Kline, limit int) *indicatorcalc.CalculationWindow {

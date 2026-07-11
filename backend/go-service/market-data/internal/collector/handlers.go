@@ -12,8 +12,9 @@ func (c *Collector) HandleKline(ctx context.Context, kline model.Kline) error {
 		return errors.New("invalid empty kline identity")
 	}
 	return c.enqueueEvent(ctx, collectorEvent{
-		eventType: collectorEventKline,
-		kline:     kline,
+		eventType:   collectorEventKline,
+		kline:       kline,
+		klineSource: klineSourceWebSocket,
 	})
 }
 

@@ -54,6 +54,7 @@ func (c *Collector) Backfill(ctx context.Context) error {
 				}
 				if complete {
 					fetched[backfillCacheKey(symbol, interval)] = cached
+					c.rememberStoredKlines(cached, klineSourceStartupREST, false)
 					continue
 				}
 			}
@@ -79,19 +80,21 @@ func (c *Collector) Backfill(ctx context.Context) error {
 				slog.Warn("store backfill klines failed", "symbol", symbol, "interval", interval, "count", len(klines), "error", err)
 				continue
 			}
+			c.rememberStoredKlines(stored, klineSourceStartupREST, true)
 			slog.Info("backfilled recent klines", "symbol", symbol, "interval", interval, "count", len(stored))
 		}
 		for _, rule := range c.options.StartupDerivedRules {
 			if !ruleContainsSymbol(rule, symbol) {
 				continue
 			}
-			_, complete, err := c.recentStoredKlines(ctx, symbol, rule.TargetInterval, lookback)
+			cachedDerived, complete, err := c.recentStoredKlines(ctx, symbol, rule.TargetInterval, lookback)
 			if err != nil {
 				symbolErrs = append(symbolErrs, fmt.Errorf("read derived cache %s: %w", rule.TargetInterval, err))
 				slog.Warn("read derived kline cache failed", "symbol", symbol, "interval", rule.TargetInterval, "error", err)
 				continue
 			}
 			if complete {
+				c.rememberStoredKlines(cachedDerived, klineSourceDerived, false)
 				continue
 			}
 			klines, err := aggregateRecentKlines(rule, symbol, fetched[backfillCacheKey(symbol, rule.SourceInterval)], lookback, c.now().UnixMilli())
@@ -105,6 +108,7 @@ func (c *Collector) Backfill(ctx context.Context) error {
 				slog.Warn("store startup aggregate failed", "symbol", symbol, "interval", rule.TargetInterval, "error", err)
 				continue
 			}
+			c.rememberStoredKlines(klines, klineSourceDerived, true)
 			slog.Info("backfilled recent derived klines", "symbol", symbol, "interval", rule.TargetInterval, "count", len(klines))
 		}
 		symbolErr := errors.Join(symbolErrs...)

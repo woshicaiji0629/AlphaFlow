@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/market-data/internal/aggregator"
+	"alphaflow/go-service/market-data/internal/backfillqueue"
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
 )
@@ -26,6 +27,17 @@ type fakeStore struct {
 	lastPriceBySymbol map[string]model.LastPrice
 	bookTickers       int64
 	rangeKlines       []model.Kline
+	upsertKlineErrors []error
+}
+
+type fakeGapPublisher struct {
+	tasks []backfillqueue.Task
+	err   error
+}
+
+func (p *fakeGapPublisher) Publish(ctx context.Context, task backfillqueue.Task) (string, error) {
+	p.tasks = append(p.tasks, task)
+	return "gap-1", p.err
 }
 
 type fakeREST struct {
@@ -130,6 +142,14 @@ func (s *fakeStore) RangeKlines(context.Context, string, string, string, string,
 }
 
 func (s *fakeStore) UpsertKline(context.Context, model.Kline) error {
+	s.mu.Lock()
+	if len(s.upsertKlineErrors) > 0 {
+		err := s.upsertKlineErrors[0]
+		s.upsertKlineErrors = s.upsertKlineErrors[1:]
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
 	atomic.AddInt64(&s.klines, 1)
 	return nil
 }
@@ -168,11 +188,15 @@ func (s *fakeStore) AddLiquidation(context.Context, model.Liquidation, int64) er
 }
 
 func (s *fakeStore) SetMarketStatus(_ context.Context, status model.MarketStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.statuses = append(s.statuses, status)
 	return nil
 }
 
 func (s *fakeStore) SetWebSocketStatus(_ context.Context, status model.WebSocketStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.wsStatuses = append(s.wsStatuses, status)
 	return nil
 }
@@ -836,6 +860,217 @@ func TestStatsTracksProcessedAndCoalescedEvents(t *testing.T) {
 	defer store.mu.Unlock()
 	if got := store.lastPriceBySymbol["ETHUSDT"].Price; got != "101" {
 		t.Fatalf("ETHUSDT price = %q, want 101", got)
+	}
+}
+
+func TestStatsTracksEventLatencyAndOutOfOrderEvents(t *testing.T) {
+	store := &fakeStore{}
+	c := New(testOptions(), &fakeREST{}, nil, store)
+	now := time.UnixMilli(10_000)
+	c.now = func() time.Time { return now }
+
+	for _, eventTime := range []int64{9_900, 9_800} {
+		if err := c.HandleKline(context.Background(), model.Kline{
+			Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m",
+			EventTime: eventTime, IsClosed: true,
+		}); err != nil {
+			t.Fatalf("HandleKline: %v", err)
+		}
+	}
+	now = time.UnixMilli(10_025)
+	if err := c.processEvent(context.Background(), <-c.eventQueue); err != nil {
+		t.Fatalf("processEvent: %v", err)
+	}
+
+	stats := c.Stats()
+	if stats.LastEventReceivedAt != 10_000 || stats.LastEventProcessedAt != 10_025 {
+		t.Fatalf("event times = received %d processed %d", stats.LastEventReceivedAt, stats.LastEventProcessedAt)
+	}
+	if stats.SourceDelayMaxMillis != 200 {
+		t.Fatalf("SourceDelayMaxMillis = %d, want 200", stats.SourceDelayMaxMillis)
+	}
+	if stats.QueueDelayMaxMillis != 25 {
+		t.Fatalf("QueueDelayMaxMillis = %d, want 25", stats.QueueDelayMaxMillis)
+	}
+	if stats.OutOfOrderEvents != 1 {
+		t.Fatalf("OutOfOrderEvents = %d, want 1", stats.OutOfOrderEvents)
+	}
+}
+
+func TestCollectorEnforcesKlineVersionTransitions(t *testing.T) {
+	store := &fakeStore{}
+	c := New(testOptions(), &fakeREST{}, nil, store)
+	base := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 1_000}
+	cases := []struct {
+		eventTime int64
+		closed    bool
+	}{
+		{eventTime: 100, closed: false},
+		{eventTime: 110, closed: true},
+		{eventTime: 120, closed: false},
+		{eventTime: 105, closed: true},
+		{eventTime: 110, closed: true},
+		{eventTime: 120, closed: true},
+	}
+	for _, item := range cases {
+		kline := base
+		kline.EventTime = item.eventTime
+		kline.IsClosed = item.closed
+		if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: kline}); err != nil {
+			t.Fatalf("processEvent(%d, %t): %v", item.eventTime, item.closed, err)
+		}
+	}
+	if got := atomic.LoadInt64(&store.klines); got != 3 {
+		t.Fatalf("stored klines = %d, want open, closed and corrected closed", got)
+	}
+	stats := c.Stats()
+	if stats.OpenAfterClosedEvents != 1 || stats.StaleKlineEvents != 1 || stats.DuplicateKlineEvents != 1 {
+		t.Fatalf("kline decisions = open_after_closed %d stale %d duplicate %d", stats.OpenAfterClosedEvents, stats.StaleKlineEvents, stats.DuplicateKlineEvents)
+	}
+}
+
+func TestCollectorAllowsReplayAfterConcurrentKlineWriteFailures(t *testing.T) {
+	store := &fakeStore{upsertKlineErrors: []error{errors.New("first write failed"), errors.New("second write failed")}}
+	c := New(testOptions(), &fakeREST{}, nil, store)
+	base := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 1_000, IsClosed: true}
+
+	var wg sync.WaitGroup
+	for _, eventTime := range []int64{100, 110} {
+		wg.Add(1)
+		go func(eventTime int64) {
+			defer wg.Done()
+			kline := base
+			kline.EventTime = eventTime
+			_ = c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: kline})
+		}(eventTime)
+	}
+	wg.Wait()
+
+	replay := base
+	replay.EventTime = 110
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: replay}); err != nil {
+		t.Fatalf("replay after failed writes: %v", err)
+	}
+	if got := atomic.LoadInt64(&store.klines); got != 1 {
+		t.Fatalf("successful stored klines = %d, want replay to persist once", got)
+	}
+}
+
+func TestCollectorRetainsBoundedKlineVersions(t *testing.T) {
+	c := New(testOptions(), &fakeREST{}, nil, &fakeStore{})
+	for index := int64(0); index < klineVersionRetention+3; index++ {
+		kline := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: index, EventTime: index + 1, IsClosed: true}
+		if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: kline}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.klineVersionMu.Lock()
+	got := len(c.klineVersions["binance:um:ETHUSDT:1m"])
+	c.klineVersionMu.Unlock()
+	if got != klineVersionRetention {
+		t.Fatalf("retained versions = %d, want %d", got, klineVersionRetention)
+	}
+}
+
+func TestStartupRESTVersionProtectsClosedKlineFromWebSocketOpen(t *testing.T) {
+	store := &fakeStore{}
+	c := New(testOptions(), &fakeREST{}, nil, store)
+	restKline := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 1_000, IsClosed: true}
+	c.rememberStoredKlines([]model.Kline{restKline}, klineSourceStartupREST, true)
+
+	open := restKline
+	open.IsClosed = false
+	open.EventTime = 200
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: open, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatal(err)
+	}
+	corrected := restKline
+	corrected.EventTime = 300
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: corrected, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := atomic.LoadInt64(&store.klines); got != 1 {
+		t.Fatalf("websocket store writes = %d, want corrected closed only", got)
+	}
+	stats := c.Stats()
+	if stats.StartupRESTKlines != 1 || stats.WebSocketKlineEvents != 1 || stats.OpenAfterClosedEvents != 1 || stats.KlineCorrections != 1 {
+		t.Fatalf("source stats = %#v", stats)
+	}
+}
+
+func TestCollectorDetectsClosedKlineGapFromStartupCursor(t *testing.T) {
+	const minute = int64(time.Minute / time.Millisecond)
+	options := testOptions()
+	publisher := &fakeGapPublisher{}
+	options.GapPublisher = publisher
+	c := New(options, &fakeREST{}, nil, &fakeStore{})
+	startup := []model.Kline{
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: minute, IsClosed: true},
+		{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 2 * minute, IsClosed: true},
+	}
+	c.rememberStoredKlines(startup, klineSourceStartupREST, false)
+	next := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 5 * minute, EventTime: 6 * minute, IsClosed: true}
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: next, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatal(err)
+	}
+	stats := c.Stats()
+	if stats.KlineGapsDetected != 1 || stats.KlineGapBars != 2 || stats.KlineGapRequests != 1 {
+		t.Fatalf("gap stats = detected %d bars %d, want 1 and 2", stats.KlineGapsDetected, stats.KlineGapBars)
+	}
+	if len(publisher.tasks) != 1 {
+		t.Fatalf("published tasks = %d, want 1", len(publisher.tasks))
+	}
+	task := publisher.tasks[0]
+	if task.Source != "collector_gap" || task.Reason != "closed_kline_gap" || task.Start != "197001010003" || task.End != "197001010005" || task.Timezone != "UTC" || !reflect.DeepEqual(task.Intervals, []string{"1m"}) {
+		t.Fatalf("gap task = %#v", task)
+	}
+
+	correction := next
+	correction.OpenTime = 4 * minute
+	correction.EventTime = 7 * minute
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: correction, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatal(err)
+	}
+	stats = c.Stats()
+	if stats.KlineGapsDetected != 1 || stats.KlineGapBars != 2 {
+		t.Fatalf("late correction changed gap stats: %#v", stats)
+	}
+}
+
+func TestCollectorGapPublishFailureDoesNotFailKlineStore(t *testing.T) {
+	const minute = int64(time.Minute / time.Millisecond)
+	options := testOptions()
+	publisher := &fakeGapPublisher{err: errors.New("nats unavailable")}
+	options.GapPublisher = publisher
+	store := &fakeStore{}
+	c := New(options, &fakeREST{}, nil, store)
+	c.rememberStoredKlines([]model.Kline{{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: minute, IsClosed: true}}, klineSourceStartupREST, false)
+	next := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", OpenTime: 3 * minute, EventTime: 4 * minute, IsClosed: true}
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: next, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatalf("processEvent: %v", err)
+	}
+	if got := atomic.LoadInt64(&store.klines); got != 1 {
+		t.Fatalf("stored klines = %d, want 1", got)
+	}
+	if stats := c.Stats(); stats.KlineGapRequestErrors != 1 || stats.KlineGapRequests != 0 {
+		t.Fatalf("gap request stats = %#v", stats)
+	}
+	publisher.err = nil
+	following := next
+	following.OpenTime = 4 * minute
+	following.EventTime = 5 * minute
+	if err := c.processEvent(context.Background(), collectorEvent{eventType: collectorEventKline, kline: following, klineSource: klineSourceWebSocket}); err != nil {
+		t.Fatalf("process following event: %v", err)
+	}
+	if len(publisher.tasks) != 2 {
+		t.Fatalf("published attempts = %d, want initial failure and retry", len(publisher.tasks))
+	}
+	if publisher.tasks[0].Start != publisher.tasks[1].Start || publisher.tasks[0].End != publisher.tasks[1].End {
+		t.Fatalf("retry changed gap range: first %#v retry %#v", publisher.tasks[0], publisher.tasks[1])
+	}
+	if stats := c.Stats(); stats.KlineGapRequestErrors != 1 || stats.KlineGapRequests != 1 {
+		t.Fatalf("gap retry stats = %#v", stats)
 	}
 }
 

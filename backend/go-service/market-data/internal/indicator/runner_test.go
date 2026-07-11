@@ -739,6 +739,35 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowUsesCompleteCache(t *testing
 	}
 }
 
+func TestRunnerCalculatedIndicatorSnapshotsForWindowRejectsDifferentFeatureMetadata(t *testing.T) {
+	klines := minuteKlines(25)
+	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
+	cached := make([]model.IndicatorSnapshot, 0, 20)
+	for _, kline := range klines[5:] {
+		snapshot := testIndicatorSnapshot(kline, "stale")
+		snapshot.Feature.ParameterHash = "old-parameters"
+		cached = append(cached, snapshot)
+	}
+	var calculateCalls atomic.Uint64
+	runner := NewRunner(&fakeStore{}, RunnerOptions{OnCalculateWindow: func() { calculateCalls.Add(1) }})
+
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	if err != nil {
+		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
+	}
+	if got := calculateCalls.Load(); got != 20 {
+		t.Fatalf("calculate calls = %d, want full 20-snapshot window recalculation", got)
+	}
+	for _, snapshot := range snapshots {
+		if snapshot.Values["source"] == "stale" {
+			t.Fatal("reused snapshot with stale feature metadata")
+		}
+		if snapshot.Feature != featureMetadata(runner.options.CalculateOptions) {
+			t.Fatalf("feature metadata = %#v, want current %#v", snapshot.Feature, featureMetadata(runner.options.CalculateOptions))
+		}
+	}
+}
+
 func TestRunnerCalculatedIndicatorSnapshotsForWindowCalculatesOnlyMissingLatest(t *testing.T) {
 	klines := minuteKlines(25)
 	window := indicatorcalc.NewCalculationWindowFromKlines(klines, 25)
@@ -884,6 +913,7 @@ func testIndicatorSnapshot(kline model.Kline, source string) model.IndicatorSnap
 			"source": source,
 		},
 		Signals: map[string]string{},
+		Feature: featureMetadata(indicatorcalc.DefaultOptions()),
 	}
 }
 

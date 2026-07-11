@@ -12,13 +12,13 @@ import (
 )
 
 const (
-	DefaultNATSURL             = "nats://localhost:4222"
-	DefaultSnapshotStreamName  = "ALPHAFLOW_MARKET"
-	DefaultClosedSubject       = "market.snapshot.closed"
-	DefaultRealtimeSubject     = "market.snapshot.realtime"
-	DefaultDeadLetterSubject   = "market.snapshot.dead"
-	SnapshotTypeClosed         = "closed"
-	SnapshotTypeRealtime       = "realtime"
+	DefaultNATSURL            = "nats://localhost:4222"
+	DefaultSnapshotStreamName = "ALPHAFLOW_MARKET"
+	DefaultClosedSubject      = "market.snapshot.closed"
+	DefaultRealtimeSubject    = "market.snapshot.realtime"
+	DefaultDeadLetterSubject  = "market.snapshot.dead"
+	SnapshotTypeClosed        = "closed"
+	SnapshotTypeRealtime      = "realtime"
 )
 
 type SnapshotTarget struct {
@@ -35,7 +35,7 @@ type Health struct {
 }
 
 type SnapshotEnvelope struct {
-	Type      string                                `json:"type"`
+	Type      string                               `json:"type"`
 	Target    SnapshotTarget                       `json:"target"`
 	Kline     *marketmodel.Kline                   `json:"kline,omitempty"`
 	Indicator *marketmodel.IndicatorSnapshot       `json:"indicator,omitempty"`
@@ -97,6 +97,7 @@ func NewRealtimeEnvelope(
 		CloseTime: snapshot.CloseTime,
 		Values:    snapshot.Values,
 		Signals:   snapshot.Signals,
+		Feature:   snapshot.Feature,
 		UpdatedAt: snapshot.UpdatedAt,
 	}
 	envelope := SnapshotEnvelope{

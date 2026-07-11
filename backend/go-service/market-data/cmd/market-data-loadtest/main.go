@@ -180,6 +180,25 @@ func main() {
 		stats.FlushedLatestEvents,
 	)
 	fmt.Printf("queue_len=%d queue_cap=%d queue_peak=%d\n", stats.QueueLen, stats.QueueCap, stats.QueuePeak)
+	fmt.Printf("last_received_at=%d last_processed_at=%d source_delay_max_ms=%d queue_delay_max_ms=%d process_max_ms=%d out_of_order_events=%d duplicate_kline_events=%d stale_kline_events=%d open_after_closed_events=%d websocket_kline_events=%d startup_rest_klines=%d derived_klines=%d kline_corrections=%d kline_gaps_detected=%d kline_gap_bars=%d kline_gap_requests=%d kline_gap_request_errors=%d\n",
+		stats.LastEventReceivedAt,
+		stats.LastEventProcessedAt,
+		stats.SourceDelayMaxMillis,
+		stats.QueueDelayMaxMillis,
+		stats.ProcessMaxMillis,
+		stats.OutOfOrderEvents,
+		stats.DuplicateKlineEvents,
+		stats.StaleKlineEvents,
+		stats.OpenAfterClosedEvents,
+		stats.WebSocketKlineEvents,
+		stats.StartupRESTKlines,
+		stats.DerivedKlines,
+		stats.KlineCorrections,
+		stats.KlineGapsDetected,
+		stats.KlineGapBars,
+		stats.KlineGapRequests,
+		stats.KlineGapRequestErrors,
+	)
 }
 
 func setupLogger() {

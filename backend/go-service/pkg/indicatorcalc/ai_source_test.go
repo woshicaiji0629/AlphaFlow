@@ -1,6 +1,11 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+var benchmarkAISourceState *aiSourceState
 
 func TestAISourceSwitchingSkipsShortSamples(t *testing.T) {
 	opens, highs, lows, closes := aiSourceTestOHLC(60)
@@ -53,6 +58,136 @@ func TestAISourceSwitchingOutputsFields(t *testing.T) {
 	}
 	if !signalIsAISourceName(signals["ai_source_selected"]) {
 		t.Fatalf("unexpected selected source: %#v", signals)
+	}
+}
+
+func TestAISourceBatchReferenceWindowsAreDeterministic(t *testing.T) {
+	cfg := defaultAISourceConfig()
+	for _, length := range []int{140, 250, 300} {
+		opens, highs, lows, closes := aiSourceTestOHLC(length)
+		first, firstOK := aiSourceSwitching(opens, highs, lows, closes, cfg)
+		second, secondOK := aiSourceSwitching(opens, highs, lows, closes, cfg)
+		if firstOK != secondOK || !reflect.DeepEqual(first, second) {
+			t.Fatalf("length %d batch result is not deterministic: first=%#v/%v second=%#v/%v", length, first, firstOK, second, secondOK)
+		}
+		if !firstOK {
+			t.Fatalf("length %d batch result was not available", length)
+		}
+	}
+}
+
+func TestAISourceBatchReferenceMatchesRepeatedRealtimeUpdates(t *testing.T) {
+	cfg := defaultAISourceConfig()
+	opens, highs, lows, closes := aiSourceTestOHLC(250)
+	prefixOpens := append([]float64(nil), opens[:249]...)
+	prefixHighs := append([]float64(nil), highs[:249]...)
+	prefixLows := append([]float64(nil), lows[:249]...)
+	prefixCloses := append([]float64(nil), closes[:249]...)
+
+	for update := 0; update < 5; update++ {
+		delta := float64(update) * 0.05
+		previewOpens := append(append([]float64(nil), prefixOpens...), opens[249])
+		previewHighs := append(append([]float64(nil), prefixHighs...), highs[249]+delta)
+		previewLows := append(append([]float64(nil), prefixLows...), lows[249]-delta)
+		previewCloses := append(append([]float64(nil), prefixCloses...), closes[249]+delta)
+		first, firstOK := aiSourceSwitching(previewOpens, previewHighs, previewLows, previewCloses, cfg)
+		second, secondOK := aiSourceSwitching(previewOpens, previewHighs, previewLows, previewCloses, cfg)
+		if firstOK != secondOK || !reflect.DeepEqual(first, second) {
+			t.Fatalf("update %d batch reference changed between runs: first=%#v/%v second=%#v/%v", update, first, firstOK, second, secondOK)
+		}
+		if !reflect.DeepEqual(prefixCloses, closes[:249]) {
+			t.Fatalf("update %d mutated closed prefix", update)
+		}
+	}
+}
+
+func TestAISourceStateCloneIsIndependent(t *testing.T) {
+	state := &aiSourceState{
+		featureCursors:   [4]aiSourceFeatureCursor{newAISourceFeatureCursor([]float64{1, 2, 3})},
+		banks:            [4][]aiSourceRow{{{outcome: 1}}, {{outcome: 2}}},
+		allBank:          []aiSourceRow{{outcome: 3}},
+		featureRing:      [][4][6]float64{{}},
+		validFeatureRing: [][4]bool{{true}},
+		sourceEMA:        newAISourceEMAState(3),
+		maEMA:            newAISourceEMAState(5),
+	}
+	state.featureRing[0][0][0] = 1
+	state.sourceEMA.append(10)
+	state.maEMA.append(20)
+	clone := state.clone()
+
+	clone.featureCursors[0].source[0] = 99
+	clone.banks[0][0].outcome = 9
+	clone.allBank[0].outcome = 8
+	clone.featureRing[0][0][0] = 7
+	clone.validFeatureRing[0][0] = false
+	clone.sourceEMA.append(30)
+	clone.maEMA.append(40)
+
+	if state.banks[0][0].outcome != 1 || state.allBank[0].outcome != 3 {
+		t.Fatal("clone mutated source sample banks")
+	}
+	if state.featureCursors[0].source[0] != 1 {
+		t.Fatal("clone mutated source feature cursor input")
+	}
+	if state.featureRing[0][0][0] != 1 || !state.validFeatureRing[0][0] {
+		t.Fatal("clone mutated source feature ring")
+	}
+	if reflect.DeepEqual(state.sourceEMA, clone.sourceEMA) || reflect.DeepEqual(state.maEMA, clone.maEMA) {
+		t.Fatal("clone shared or failed to advance independent EMA state")
+	}
+}
+
+func TestAISourceStateAppendValidatesInputIndex(t *testing.T) {
+	state := &aiSourceState{}
+	input := aiSourceInput{closes: []float64{100}}
+	calls := 0
+	step := aiSourceStep(func(gotState *aiSourceState, gotInput aiSourceInput, index int) {
+		calls++
+		if gotState != state || index != 0 || gotInput.closes[0] != 100 {
+			t.Fatalf("unexpected append arguments: state=%p input=%#v index=%d", gotState, gotInput, index)
+		}
+	})
+	state.append(input, -1, step)
+	state.append(input, 1, step)
+	state.append(input, 0, nil)
+	state.append(input, 0, step)
+	if calls != 1 {
+		t.Fatalf("step calls = %d, want 1 valid append", calls)
+	}
+}
+
+func TestAISourceStatePrefixClonePlusOneMatchesFullBatchState(t *testing.T) {
+	opens, highs, lows, closes := aiSourceTestOHLC(250)
+	cfg := defaultAISourceConfig()
+	atr14, ok := atrSeries(highs, lows, closes, 14)
+	if !ok {
+		t.Fatal("atr14 unavailable")
+	}
+	stATR, ok := atrSeries(highs, lows, closes, cfg.stLength)
+	if !ok {
+		t.Fatal("supertrend ATR unavailable")
+	}
+	input := aiSourceInput{
+		sources: [4][]float64{opens, highs, lows, closes}, highs: highs, lows: lows, closes: closes,
+		atr14: atr14, atr14Offset: len(closes) - len(atr14),
+		stATR: stATR, stATROffset: len(closes) - len(stATR), config: cfg,
+	}
+	full := newAISourceState(input)
+	for index := range closes {
+		full.append(input, index, appendAISourceState)
+	}
+	prefix := newAISourceState(input)
+	for index := 0; index < len(closes)-1; index++ {
+		prefix.append(input, index, appendAISourceState)
+	}
+	preview := prefix.clone()
+	preview.append(input, len(closes)-1, appendAISourceState)
+	if !reflect.DeepEqual(preview, full) {
+		t.Fatal("249-prefix clone plus one state differs from full 250-bar state")
+	}
+	if prefix.lineCount != len(closes)-1 {
+		t.Fatalf("preview append mutated prefix line count: %d", prefix.lineCount)
 	}
 }
 
@@ -271,4 +406,27 @@ func aiSourceTestOHLC(length int) ([]float64, []float64, []float64, []float64) {
 		closes = append(closes, closeValue)
 	}
 	return opens, highs, lows, closes
+}
+
+func BenchmarkAISourcePrefixClonePlusOne(b *testing.B) {
+	opens, highs, lows, closes := aiSourceTestOHLC(250)
+	cfg := defaultAISourceConfig()
+	atr14, _ := atrSeries(highs, lows, closes, 14)
+	stATR, _ := atrSeries(highs, lows, closes, cfg.stLength)
+	input := aiSourceInput{
+		sources: [4][]float64{opens, highs, lows, closes}, highs: highs, lows: lows, closes: closes,
+		atr14: atr14, atr14Offset: len(closes) - len(atr14),
+		stATR: stATR, stATROffset: len(closes) - len(stATR), config: cfg,
+	}
+	prefix := newAISourceState(input)
+	for index := 0; index < len(closes)-1; index++ {
+		prefix.append(input, index, appendAISourceState)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		preview := prefix.clone()
+		preview.append(input, len(closes)-1, appendAISourceState)
+		benchmarkAISourceState = preview
+	}
 }

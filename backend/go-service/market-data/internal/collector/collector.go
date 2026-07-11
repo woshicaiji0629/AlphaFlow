@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/market-data/internal/aggregator"
+	"alphaflow/go-service/market-data/internal/backfillqueue"
 	"alphaflow/go-service/market-data/internal/exchange"
 	"alphaflow/go-service/market-data/internal/model"
 )
@@ -29,6 +30,10 @@ type Store interface {
 	AddLiquidation(ctx context.Context, liquidation model.Liquidation, limit int64) error
 	SetMarketStatus(ctx context.Context, status model.MarketStatus) error
 	SetWebSocketStatus(ctx context.Context, status model.WebSocketStatus) error
+}
+
+type GapPublisher interface {
+	Publish(context.Context, backfillqueue.Task) (string, error)
 }
 
 const (
@@ -61,6 +66,14 @@ type Collector struct {
 	stats               collectorStats
 	now                 func() time.Time
 	lastBackfillRequest time.Time
+	eventTimingMu       sync.Mutex
+	lastExchangeTimes   map[string]int64
+	klineVersionMu      sync.Mutex
+	klineVersions       map[string]map[int64]klineVersion
+	klineWriteLocks     [256]sync.Mutex
+	klineContinuityMu   sync.Mutex
+	lastClosedOpenTimes map[string]int64
+	pendingKlineGaps    map[string]map[string]klineGap
 }
 
 type Stats struct {
@@ -72,6 +85,23 @@ type Stats struct {
 	QueueLen              int
 	QueueCap              int
 	QueuePeak             int64
+	LastEventReceivedAt   int64
+	LastEventProcessedAt  int64
+	SourceDelayMaxMillis  int64
+	QueueDelayMaxMillis   int64
+	ProcessMaxMillis      int64
+	OutOfOrderEvents      uint64
+	DuplicateKlineEvents  uint64
+	StaleKlineEvents      uint64
+	OpenAfterClosedEvents uint64
+	WebSocketKlineEvents  uint64
+	StartupRESTKlines     uint64
+	DerivedKlines         uint64
+	KlineCorrections      uint64
+	KlineGapsDetected     uint64
+	KlineGapBars          uint64
+	KlineGapRequests      uint64
+	KlineGapRequestErrors uint64
 }
 
 type collectorStats struct {
@@ -81,6 +111,23 @@ type collectorStats struct {
 	flushedLatestEvents   atomic.Uint64
 	processEventErrors    atomic.Uint64
 	queuePeak             atomic.Int64
+	lastEventReceivedAt   atomic.Int64
+	lastEventProcessedAt  atomic.Int64
+	sourceDelayMaxMillis  atomic.Int64
+	queueDelayMaxMillis   atomic.Int64
+	processMaxMillis      atomic.Int64
+	outOfOrderEvents      atomic.Uint64
+	duplicateKlineEvents  atomic.Uint64
+	staleKlineEvents      atomic.Uint64
+	openAfterClosedEvents atomic.Uint64
+	webSocketKlineEvents  atomic.Uint64
+	startupRESTKlines     atomic.Uint64
+	derivedKlines         atomic.Uint64
+	klineCorrections      atomic.Uint64
+	klineGapsDetected     atomic.Uint64
+	klineGapBars          atomic.Uint64
+	klineGapRequests      atomic.Uint64
+	klineGapRequestErrors atomic.Uint64
 }
 
 type Options struct {
@@ -96,6 +143,7 @@ type Options struct {
 	StartupLookback      int64
 	BackfillIntervals    []string
 	StartupDerivedRules  []aggregator.Rule
+	GapPublisher         GapPublisher
 }
 
 func New(
@@ -107,14 +155,18 @@ func New(
 	eventQueueSize := adaptiveEventQueueSize(options)
 	eventWorkers := adaptiveEventWorkers(options)
 	return &Collector{
-		options:      options,
-		rest:         rest,
-		ws:           ws,
-		store:        store,
-		eventQueue:   make(chan collectorEvent, eventQueueSize),
-		eventWorkers: eventWorkers,
-		latestEvents: make(map[string]collectorEvent),
-		now:          time.Now,
+		options:             options,
+		rest:                rest,
+		ws:                  ws,
+		store:               store,
+		eventQueue:          make(chan collectorEvent, eventQueueSize),
+		eventWorkers:        eventWorkers,
+		latestEvents:        make(map[string]collectorEvent),
+		lastExchangeTimes:   make(map[string]int64),
+		klineVersions:       make(map[string]map[int64]klineVersion),
+		lastClosedOpenTimes: make(map[string]int64),
+		pendingKlineGaps:    make(map[string]map[string]klineGap),
+		now:                 time.Now,
 	}
 }
 
@@ -132,6 +184,23 @@ func (c *Collector) Stats() Stats {
 		QueueLen:              len(c.eventQueue),
 		QueueCap:              cap(c.eventQueue),
 		QueuePeak:             c.stats.queuePeak.Load(),
+		LastEventReceivedAt:   c.stats.lastEventReceivedAt.Load(),
+		LastEventProcessedAt:  c.stats.lastEventProcessedAt.Load(),
+		SourceDelayMaxMillis:  c.stats.sourceDelayMaxMillis.Load(),
+		QueueDelayMaxMillis:   c.stats.queueDelayMaxMillis.Load(),
+		ProcessMaxMillis:      c.stats.processMaxMillis.Load(),
+		OutOfOrderEvents:      c.stats.outOfOrderEvents.Load(),
+		DuplicateKlineEvents:  c.stats.duplicateKlineEvents.Load(),
+		StaleKlineEvents:      c.stats.staleKlineEvents.Load(),
+		OpenAfterClosedEvents: c.stats.openAfterClosedEvents.Load(),
+		WebSocketKlineEvents:  c.stats.webSocketKlineEvents.Load(),
+		StartupRESTKlines:     c.stats.startupRESTKlines.Load(),
+		DerivedKlines:         c.stats.derivedKlines.Load(),
+		KlineCorrections:      c.stats.klineCorrections.Load(),
+		KlineGapsDetected:     c.stats.klineGapsDetected.Load(),
+		KlineGapBars:          c.stats.klineGapBars.Load(),
+		KlineGapRequests:      c.stats.klineGapRequests.Load(),
+		KlineGapRequestErrors: c.stats.klineGapRequestErrors.Load(),
 	}
 }
 
@@ -171,12 +240,17 @@ func (c *Collector) RunRealtime(ctx context.Context) error {
 func (c *Collector) run(ctx context.Context, backfill bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if backfill {
+		if err := c.Backfill(ctx); err != nil {
+			return err
+		}
+	}
 
 	var eventWorkerWG sync.WaitGroup
 	c.startEventWorkers(ctx, &eventWorkerWG)
 	c.startLatestEventFlusher(ctx, &eventWorkerWG)
 
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 
 	go func() {
 		errCh <- c.runWebSocketLoop(ctx)
@@ -186,24 +260,15 @@ func (c *Collector) run(ctx context.Context, backfill bool) error {
 		errCh <- c.runPollingLoop(ctx)
 	}()
 
-	if backfill {
-		go func() {
-			errCh <- c.runBackfillLoop(ctx)
-		}()
-	}
-
-	err := <-errCh
-	if err != nil && ctx.Err() == nil {
-		c.setMarketUnavailable(ctx, err.Error())
+	firstErr := <-errCh
+	if firstErr != nil && ctx.Err() == nil {
+		c.setMarketUnavailable(ctx, firstErr.Error())
 	}
 	cancel()
+	secondErr := <-errCh
 	eventWorkerWG.Wait()
-	if err != nil {
-		return err
+	if firstErr != nil {
+		return firstErr
 	}
-
-	err = <-errCh
-	cancel()
-	eventWorkerWG.Wait()
-	return err
+	return secondErr
 }

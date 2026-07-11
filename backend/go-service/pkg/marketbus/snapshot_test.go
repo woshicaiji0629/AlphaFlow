@@ -75,7 +75,12 @@ func TestRealtimeEnvelopeRoundTrip(t *testing.T) {
 				Interval: "3m",
 				Close:    "101",
 			},
-			Values:    map[string]string{"last_price": "101"},
+			Values: map[string]string{"last_price": "101"},
+			Feature: marketmodel.FeatureMetadata{
+				SchemaVersion:     "indicators.v1",
+				CalculatorVersion: "go-indicator.v1",
+				ParameterHash:     "params",
+			},
 			UpdatedAt: 3500,
 		},
 		4000,
@@ -98,6 +103,9 @@ func TestRealtimeEnvelopeRoundTrip(t *testing.T) {
 	}
 	if got.Indicator == nil || got.Indicator.Values["last_price"] != "101" {
 		t.Fatalf("indicator not decoded: %#v", got.Indicator)
+	}
+	if got.Indicator.Feature.SchemaVersion != "indicators.v1" {
+		t.Fatalf("feature schema version = %q, want indicators.v1", got.Indicator.Feature.SchemaVersion)
 	}
 }
 

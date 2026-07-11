@@ -239,7 +239,7 @@ func TestBackfillTaskRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeBackfillTask() error = %v", err)
 	}
-	decodedOptions, err := decoded.options()
+	decodedOptions, err := backfillTaskOptions(decoded)
 	if err != nil {
 		t.Fatalf("decoded options error = %v", err)
 	}
@@ -319,6 +319,26 @@ func TestProcessBackfillTaskMessageDeadLettersDecodeError(t *testing.T) {
 	}
 	if len(queue.acked) != 1 || queue.acked[0].ID != "bad-json" {
 		t.Fatalf("acked = %#v, want message bad-json", queue.acked)
+	}
+}
+
+func TestBackfillTaskLogAttrsIncludeGapAuditFields(t *testing.T) {
+	message := backfillTaskMessage{ID: "42", DeliveryCount: 2, Task: backfillTask{
+		Exchange: "binance", Symbol: "ETHUSDT", Intervals: []string{"1m"},
+		Start: "202607110100", End: "202607110105", Source: "collector_gap", Reason: "closed_kline_gap",
+	}}
+	attrs := backfillTaskLogAttrs(message, "task-1")
+	values := make(map[string]any, len(attrs)/2)
+	for index := 0; index+1 < len(attrs); index += 2 {
+		values[attrs[index].(string)] = attrs[index+1]
+	}
+	for key, want := range map[string]any{
+		"message_id": "42", "task_id": "task-1", "source": "collector_gap", "reason": "closed_kline_gap",
+		"exchange": "binance", "symbol": "ETHUSDT", "start": "202607110100", "end": "202607110105", "delivery_count": int64(2),
+	} {
+		if got := values[key]; got != want {
+			t.Fatalf("%s = %#v, want %#v", key, got, want)
+		}
 	}
 }
 

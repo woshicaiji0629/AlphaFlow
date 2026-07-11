@@ -200,6 +200,9 @@ func indicatorWindowHashFields(
 		"meta:age_limit_ms", strconv.FormatInt(windowAgeLimitMillis(intervalMillis), 10),
 		"meta:ttl_seconds", strconv.FormatInt(int64(ttl/time.Second), 10),
 		"meta:version", snapshot.Version,
+		"meta:feature_schema_version", snapshot.Feature.SchemaVersion,
+		"meta:calculator_version", snapshot.Feature.CalculatorVersion,
+		"meta:parameter_hash", snapshot.Feature.ParameterHash,
 		"meta:updated_at", strconv.FormatInt(snapshot.UpdatedAt, 10),
 	}
 	appendPrefixedFields(&fields, "value:", snapshot.Values)
@@ -229,6 +232,9 @@ func indicatorRealtimeHashFields(
 		"meta:bar_seq", strconv.FormatInt(barSeq(snapshot.Kline.OpenTime, intervalMillis), 10),
 		"meta:age_limit_ms", strconv.FormatInt(realtimeAgeLimitMillis(intervalMillis), 10),
 		"meta:ttl_seconds", strconv.FormatInt(int64(ttl/time.Second), 10),
+		"meta:feature_schema_version", snapshot.Feature.SchemaVersion,
+		"meta:calculator_version", snapshot.Feature.CalculatorVersion,
+		"meta:parameter_hash", snapshot.Feature.ParameterHash,
 		"meta:updated_at", strconv.FormatInt(snapshot.UpdatedAt, 10),
 		"kline:open_time", strconv.FormatInt(snapshot.Kline.OpenTime, 10),
 		"kline:close_time", strconv.FormatInt(snapshot.Kline.CloseTime, 10),

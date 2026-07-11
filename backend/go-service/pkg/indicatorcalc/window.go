@@ -3,16 +3,18 @@ package indicatorcalc
 import model "alphaflow/go-service/pkg/marketmodel"
 
 type CalculationWindow struct {
-	limit    int
-	klines   []model.Kline
-	opens    []float64
-	highs    []float64
-	lows     []float64
-	closes   []float64
-	volumes  []float64
-	parseErr error
-	basic    *basicIndicatorState
-	stream   bool
+	limit     int
+	klines    []model.Kline
+	opens     []float64
+	highs     []float64
+	lows      []float64
+	closes    []float64
+	volumes   []float64
+	parseErr  error
+	basic     *basicIndicatorState
+	aiPrefix  *aiSourceState
+	aiPreview *aiSourceResult
+	stream    bool
 }
 
 func NewCalculationWindow(limit int) *CalculationWindow {
@@ -26,32 +28,48 @@ func NewCalculationWindowFromKlines(klines []model.Kline, limit int) *Calculatio
 }
 
 func (w *CalculationWindow) Clone() *CalculationWindow {
-	return w.cloneWithExtraCapacity(0)
+	return w.cloneWithExtraCapacity(0, true)
 }
 
 // CloneForAppend returns an isolated clone with room for one additional kline.
 // It avoids a second allocation when realtime preview immediately appends a
 // temporary closed kline.
 func (w *CalculationWindow) CloneForAppend() *CalculationWindow {
-	return w.cloneWithExtraCapacity(1)
+	return w.cloneWithExtraCapacity(1, false)
 }
 
-func (w *CalculationWindow) cloneWithExtraCapacity(extra int) *CalculationWindow {
+func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool) *CalculationWindow {
 	if w == nil {
 		return nil
 	}
-	return &CalculationWindow{
-		limit:    w.limit,
-		klines:   cloneSliceWithExtra(w.klines, extra),
-		opens:    cloneSliceWithExtra(w.opens, extra),
-		highs:    cloneSliceWithExtra(w.highs, extra),
-		lows:     cloneSliceWithExtra(w.lows, extra),
-		closes:   cloneSliceWithExtra(w.closes, extra),
-		volumes:  cloneSliceWithExtra(w.volumes, extra),
-		parseErr: w.parseErr,
-		basic:    w.basic.cloneWithExtraCapacity(extra),
-		stream:   w.stream,
+	cloned := &CalculationWindow{
+		limit:     w.limit,
+		klines:    cloneSliceWithExtra(w.klines, extra),
+		opens:     cloneSliceWithExtra(w.opens, extra),
+		highs:     cloneSliceWithExtra(w.highs, extra),
+		lows:      cloneSliceWithExtra(w.lows, extra),
+		closes:    cloneSliceWithExtra(w.closes, extra),
+		volumes:   cloneSliceWithExtra(w.volumes, extra),
+		parseErr:  w.parseErr,
+		basic:     w.basic.cloneWithExtraCapacity(extra),
+		aiPreview: w.aiPreview,
+		stream:    w.stream,
 	}
+	if cloneAIPrefix {
+		cloned.aiPrefix = w.aiPrefix
+	}
+	return cloned
+}
+
+func (w *CalculationWindow) RealtimePreview(kline model.Kline) *CalculationWindow {
+	result, ok := w.previewAISource(kline)
+	preview := w.CloneForAppend()
+	kline.IsClosed = true
+	preview.Append([]model.Kline{kline})
+	if ok {
+		preview.aiPreview = &result
+	}
+	return preview
 }
 
 func cloneSliceWithExtra[T any](values []T, extra int) []T {
@@ -74,7 +92,90 @@ func (w *CalculationWindow) EnableBasicState() {
 	w.rebuildBasicState()
 }
 
+func (w *CalculationWindow) prepareAISourcePrefix() bool {
+	if w == nil || len(w.closes) < 140 {
+		return false
+	}
+	if w.aiPrefix != nil {
+		return true
+	}
+	start := 0
+	if w.limit > 0 && len(w.closes) >= w.limit {
+		start = len(w.closes) - w.limit + 1
+	}
+	opens := w.opens[start:]
+	highs := w.highs[start:]
+	lows := w.lows[start:]
+	closes := w.closes[start:]
+	cfg := defaultAISourceConfig()
+	atr14, ok14 := atrSeries(highs, lows, closes, 14)
+	stATR, okST := atrSeries(highs, lows, closes, cfg.stLength)
+	if !ok14 || !okST {
+		return false
+	}
+	input := aiSourceInput{
+		sources: [4][]float64{opens, highs, lows, closes}, highs: highs, lows: lows, closes: closes,
+		atr14: atr14, atr14Offset: len(closes) - len(atr14),
+		stATR: stATR, stATROffset: len(closes) - len(stATR), config: cfg,
+	}
+	state := newAISourceState(input)
+	for index := range closes {
+		state.append(input, index, appendAISourceState)
+	}
+	w.aiPrefix = state
+	return true
+}
+
+func (w *CalculationWindow) PrepareAISourcePrefix() bool {
+	return w.prepareAISourcePrefix()
+}
+
+func (w *CalculationWindow) previewAISource(kline model.Kline) (aiSourceResult, bool) {
+	if !w.prepareAISourcePrefix() {
+		return aiSourceResult{}, false
+	}
+	open, err := parse(kline.Open)
+	if err != nil {
+		return aiSourceResult{}, false
+	}
+	high, err := parse(kline.High)
+	if err != nil {
+		return aiSourceResult{}, false
+	}
+	low, err := parse(kline.Low)
+	if err != nil {
+		return aiSourceResult{}, false
+	}
+	closeValue, err := parse(kline.Close)
+	if err != nil {
+		return aiSourceResult{}, false
+	}
+	start := 0
+	if w.limit > 0 && len(w.closes) >= w.limit {
+		start = len(w.closes) - w.limit + 1
+	}
+	opens := append(append([]float64(nil), w.opens[start:]...), open)
+	highs := append(append([]float64(nil), w.highs[start:]...), high)
+	lows := append(append([]float64(nil), w.lows[start:]...), low)
+	closes := append(append([]float64(nil), w.closes[start:]...), closeValue)
+	cfg := defaultAISourceConfig()
+	atr14, ok14 := atrSeries(highs, lows, closes, 14)
+	stATR, okST := atrSeries(highs, lows, closes, cfg.stLength)
+	if !ok14 || !okST {
+		return aiSourceResult{}, false
+	}
+	input := aiSourceInput{sources: [4][]float64{opens, highs, lows, closes}, highs: highs, lows: lows, closes: closes,
+		atr14: atr14, atr14Offset: len(closes) - len(atr14), stATR: stATR, stATROffset: len(closes) - len(stATR), config: cfg}
+	state := w.aiPrefix.clone()
+	for index := range state.featureCursors {
+		state.featureCursors[index].source = input.sources[index]
+	}
+	state.append(input, len(closes)-1, appendAISourceState)
+	return state.result(closes)
+}
+
 func (w *CalculationWindow) Reset(klines []model.Kline) {
+	w.aiPrefix = nil
 	w.klines = w.klines[:0]
 	for _, kline := range klines {
 		if !kline.IsClosed {
@@ -92,6 +193,9 @@ func (w *CalculationWindow) Append(klines []model.Kline) {
 }
 
 func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool) {
+	if len(klines) > 0 {
+		w.aiPrefix = nil
+	}
 	for _, kline := range klines {
 		if !kline.IsClosed {
 			continue

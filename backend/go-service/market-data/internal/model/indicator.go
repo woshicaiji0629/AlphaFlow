@@ -8,6 +8,7 @@ import (
 type IndicatorSnapshot = marketmodel.IndicatorSnapshot
 type IndicatorWindowSnapshot = marketmodel.IndicatorWindowSnapshot
 type IndicatorRealtimeSnapshot = marketmodel.IndicatorRealtimeSnapshot
+type FeatureMetadata = marketmodel.FeatureMetadata
 
 func IndicatorKey(exchange string, market string, symbol string, interval string) string {
 	return marketkeys.IndicatorKey(exchange, market, symbol, interval)

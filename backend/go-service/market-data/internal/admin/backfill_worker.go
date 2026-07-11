@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"alphaflow/go-service/market-data/internal/backfillqueue"
 	"github.com/spf13/cobra"
 )
 
@@ -99,20 +100,27 @@ func processBackfillTaskMessage(
 	message backfillTaskMessage,
 	maxDeliveries int,
 ) error {
+	startedAt := time.Now()
 	if message.DecodeError != "" {
+		slog.Warn("backfill task invalid", "event", "backfill_task_dead_lettered", "message_id", message.ID, "failure_type", "decode", "delivery_count", message.DeliveryCount, "duration_ms", time.Since(startedAt).Milliseconds(), "error", message.DecodeError)
 		if deadErr := queue.DeadLetter(ctx, message, message.DecodeError); deadErr != nil {
 			return deadErr
 		}
 		return queue.Ack(ctx, []backfillTaskMessage{message})
 	}
-	opts, err := message.Task.options()
+	taskID := backfillqueue.TaskID(message.Task)
+	attrs := backfillTaskLogAttrs(message, taskID)
+	slog.Info("backfill task started", append([]any{"event", "backfill_task_started", "duration_ms", int64(0)}, attrs...)...)
+	opts, err := backfillTaskOptions(message.Task)
 	if err != nil {
+		slog.Warn("backfill task invalid", append([]any{"event", "backfill_task_dead_lettered", "failure_type", "validation", "duration_ms", time.Since(startedAt).Milliseconds(), "error", err}, attrs...)...)
 		if deadErr := queue.DeadLetter(ctx, message, err.Error()); deadErr != nil {
 			return deadErr
 		}
 		return queue.Ack(ctx, []backfillTaskMessage{message})
 	}
 	if err := validateBackfillOptions(opts); err != nil {
+		slog.Warn("backfill task invalid", append([]any{"event", "backfill_task_dead_lettered", "failure_type", "validation", "duration_ms", time.Since(startedAt).Milliseconds(), "error", err}, attrs...)...)
 		if deadErr := queue.DeadLetter(ctx, message, err.Error()); deadErr != nil {
 			return deadErr
 		}
@@ -120,20 +128,36 @@ func processBackfillTaskMessage(
 	}
 	if err := runBackfill(ctx, configPath, opts); err != nil {
 		if shouldDeadLetterBackfillTask(message, maxDeliveries) {
+			slog.Warn("backfill task dead-lettered", append([]any{"event", "backfill_task_dead_lettered", "failure_type", "execution", "duration_ms", time.Since(startedAt).Milliseconds(), "max_deliveries", maxDeliveries, "error", err}, attrs...)...)
 			if deadErr := queue.DeadLetter(ctx, message, err.Error()); deadErr != nil {
 				return deadErr
 			}
 			if ackErr := queue.Ack(ctx, []backfillTaskMessage{message}); ackErr != nil {
 				return ackErr
 			}
-			slog.Warn("backfill task dead-lettered", "message_id", message.ID, "delivery_count", message.DeliveryCount, "error", err)
 			return nil
 		}
-		slog.Warn("backfill task failed", "message_id", message.ID, "delivery_count", message.DeliveryCount, "error", err)
+		slog.Warn("backfill task retrying", append([]any{"event", "backfill_task_retrying", "failure_type", "execution", "duration_ms", time.Since(startedAt).Milliseconds(), "max_deliveries", maxDeliveries, "error", err}, attrs...)...)
 		return nil
 	}
-	slog.Info("backfill task completed", "message_id", message.ID)
+	slog.Info("backfill task completed", append([]any{"event", "backfill_task_completed", "duration_ms", time.Since(startedAt).Milliseconds()}, attrs...)...)
 	return queue.Ack(ctx, []backfillTaskMessage{message})
+}
+
+func backfillTaskLogAttrs(message backfillTaskMessage, taskID string) []any {
+	task := message.Task
+	return []any{
+		"message_id", message.ID,
+		"task_id", taskID,
+		"source", task.Source,
+		"reason", task.Reason,
+		"exchange", task.Exchange,
+		"symbol", task.Symbol,
+		"intervals", task.Intervals,
+		"start", task.Start,
+		"end", task.End,
+		"delivery_count", message.DeliveryCount,
+	}
 }
 
 func shouldDeadLetterBackfillTask(message backfillTaskMessage, maxDeliveries int) bool {

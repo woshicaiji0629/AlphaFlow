@@ -193,7 +193,7 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
 	}
 	addDerived(values, opens, highs, lows, closes, volumes)
-	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic, features)
+	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic, features, window.aiPreview)
 
 	return Result{
 		OpenTime:  last.OpenTime,
