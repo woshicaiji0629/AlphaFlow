@@ -71,7 +71,9 @@
 
 `pkg/indicatorcalc.CalculateWindows` 可在固定 warmup 后连续计算结果后缀。market-data runner 用它在 cold start 或缓存缺口时补齐 recent 指标 snapshot；缓存对齐后，窗口分析阶段只读取 recent 指标，不再回放 K 线补算历史指标。
 
-回测引擎和在线 runner 复用同一个 `CalculationWindow`、`EnableBasicState` 和 `CalculateWindow` 计算路径。`SnapshotBuilder` 为每个 symbol/interval 建立独立滚动状态，按 K 线 `CloseTime <= AsOf` 逐根推进；确认周期只有真正收盘后才更新，因此不会读取未来数据。回测不再预计算并常驻整段历史指标，也不会为每个决策点重新扫描完整历史前缀。
+回测引擎和在线 runner 复用同一个 `CalculationWindow`、`EnableBasicState` 和 `CalculateWindow` 计算路径。`SnapshotBuilder` 为每个 symbol/interval 建立独立滚动状态；同一周期内部仍按 K 线时间顺序递推，不同 symbol/interval 则通过共享并发限制分批计算。消费端只推进 `CloseTime <= AsOf` 的结果，确认周期只有真正收盘后才更新，因此不会读取未来数据。回测不会预计算并常驻整段历史指标，也不会为每个决策点重新扫描完整历史前缀。
+
+周期预计算使用无缓冲批次通道提供背压：producer 完成一批后必须等待消费端接收，不能继续堆积未来批次。`[data].indicator_batch_size` 默认是 `30`；`[data].indicator_concurrency = 0` 表示按 `GOMAXPROCS` 自动设置，并由一次回测内的所有 symbol/interval 共享。批次只改变调度和常驻结果数量，不改变指标集合、连续状态或策略语义。
 
 滚动窗口只保留计算所需的固定 K 线数量；递归指标保留连续状态，不因窗口裁剪重新初始化。当前连续状态除基础指标外还包括：
 
@@ -114,7 +116,9 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 
 早期 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
 
-2026-07 的纯数值 streaming 优化基线从约 `255KB/op`、`488 allocs/op` 降至约 `76KB/op`、`146–147 allocs/op`，约 278 个数值字段和 145 个信号保持输出。该数据来自 Intel i7 本地 benchmark，主要用于比较分配趋势；墙钟耗时会受机器负载影响。年度五周期回测仍按时间顺序推进，下一阶段若优化墙钟时间，应优先考虑策略指标依赖裁剪，以及有界内存下各周期独立分批预计算。
+2026-07 的纯数值 streaming 优化基线从约 `255KB/op`、`488 allocs/op` 降至约 `76KB/op`、`146–147 allocs/op`，约 278 个数值字段和 145 个信号保持输出。该数据来自 Intel i7 本地 benchmark，主要用于比较分配趋势；墙钟耗时会受机器负载影响。年度五周期回测保持每个周期内部的时间顺序，并在周期间做有界并发。
+
+本地年度真实路径试验表明，完整指标结果包含大量 map，过大的批次会显著放大常驻内存和 GC 压力。`512` 批次曾出现约 `5GB` 物理内存、约 `8.2GB` 峰值；在同一环境的短时对比中，无缓冲 `30` 批次优于 `20`、`40`、`50` 和 `512`。这些数据用于选择安全默认值，不是生产 SLA；机器负载、指标集合或结果结构变化后应重新 profile。
 
 年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、每根 K 线重复分析未被策略读取的指标窗口，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。剩余热点主要是 QQE、Volume Flow、普通 Supertrend/ATR 序列和结果 map/字符串分配。
 

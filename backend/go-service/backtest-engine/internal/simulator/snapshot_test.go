@@ -2,7 +2,9 @@ package simulator
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"alphaflow/go-service/backtest-engine/internal/reader"
 	"alphaflow/go-service/pkg/indicatorcalc"
@@ -108,12 +110,19 @@ func TestSnapshotBuilderRejectsMissingSeries(t *testing.T) {
 func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 	original := calculateIndicatorWindow
 	t.Cleanup(func() { calculateIndicatorWindow = original })
-	calls := 0
-	maxWindow := 0
+	var calls atomic.Int64
+	var maxWindow atomic.Int64
+	var active atomic.Int64
+	var maxActive atomic.Int64
 	calculateIndicatorWindow = func(window *indicatorcalc.CalculationWindow, options indicatorcalc.Options) (indicatorcalc.Result, error) {
-		calls++
-		if len(window.Klines()) > maxWindow {
-			maxWindow = len(window.Klines())
+		calls.Add(1)
+		currentActive := active.Add(1)
+		defer active.Add(-1)
+		for currentActive > maxActive.Load() && !maxActive.CompareAndSwap(maxActive.Load(), currentActive) {
+		}
+		time.Sleep(time.Millisecond)
+		currentWindow := int64(len(window.Klines()))
+		for currentWindow > maxWindow.Load() && !maxWindow.CompareAndSwap(maxWindow.Load(), currentWindow) {
 		}
 		return original(window, options)
 	}
@@ -129,7 +138,7 @@ func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 	builder, err := NewSnapshotBuilder(SnapshotBuilderOptions{
 		Dataset:  dataset,
 		Target:   strategy.Target{Exchange: "binance", Market: "um", Symbol: "ETHUSDT"},
-		Interval: "1m", ConfirmIntervals: []string{"5m"}, CalculationWindow: 3,
+		Interval: "1m", ConfirmIntervals: []string{"5m"}, CalculationWindow: 3, IndicatorBatchSize: 1, IndicatorConcurrency: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -141,11 +150,14 @@ func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 	if len(contexts) != 2 {
 		t.Fatalf("contexts = %d, want 2", len(contexts))
 	}
-	if calls != 5 {
-		t.Fatalf("CalculateWindow calls = %d, want each of 5 klines closed by the final as-of once", calls)
+	if calls.Load() != 6 {
+		t.Fatalf("CalculateWindow calls = %d, want each of 6 source klines once", calls.Load())
 	}
-	if maxWindow != 3 {
-		t.Fatalf("maximum calculation window = %d, want 3", maxWindow)
+	if maxWindow.Load() != 3 {
+		t.Fatalf("maximum calculation window = %d, want 3", maxWindow.Load())
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("maximum concurrent calculations = %d, want at least 2 periods", maxActive.Load())
 	}
 }
 

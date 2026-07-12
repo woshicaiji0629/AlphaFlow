@@ -477,6 +477,8 @@ backend/go-service/backtest-engine/internal/simulator/
 - 从 ClickHouse 或文件读取历史 K 线。
 - 按入场周期时间推进，并读取当时已经闭合的确认周期数据。
 - 每个 symbol/interval 使用与在线相同的 `CalculationWindow` 和 `CalculateWindow` 逐根推进指标。
+- 每个周期内部按时间串行递推，不同 symbol/interval 使用一次回测任务共享的并发限制分批计算。
+- 指标批次通过无缓冲通道交付，避免 producer 提前堆积完整指标 map；默认每批 `30` 根。
 - 只推进 `CloseTime <= AsOf` 的已闭合 K 线，确认周期未收盘时保持上一份状态。
 - 固定保留计算窗口和最近的指标 snapshot；窗口分析只在策略读取时执行，并按最新 close time 缓存。
 - 长回测响应 context cancellation，并输出处理速率、elapsed 和 ETA。
@@ -499,6 +501,15 @@ backend/go-service/backtest-engine/internal/simulator/
 ```sh
 go run ./backtest-engine/cmd/backtest-dataset-check -config configs/backtest-engine.local.toml
 ```
+
+回测配置 `[data]` 还支持：
+
+```toml
+indicator_batch_size = 30
+indicator_concurrency = 0
+```
+
+`indicator_batch_size` 控制每个周期一次计算并交付的完整指标结果数量；值过大会增加常驻 map 和 GC 压力，值过小会增加批次同步成本。`indicator_concurrency = 0` 表示自动使用 `GOMAXPROCS`，正数表示显式限制一次回测内所有 symbol/interval 的并发计算批次数。调整这些值不应改变指标或策略结果，需通过 SnapshotBuilder 等价性测试和真实回放验证。
 
 ### 仓位/执行路由服务
 

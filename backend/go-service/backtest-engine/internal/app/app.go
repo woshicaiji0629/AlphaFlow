@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -306,6 +307,11 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 	}
 	summary := simulator.ExecutionSummary{}
 	iteratorStates := []contextIteratorState{}
+	indicatorConcurrency := cfg.Data.IndicatorConcurrency
+	if indicatorConcurrency <= 0 {
+		indicatorConcurrency = runtime.GOMAXPROCS(0)
+	}
+	indicatorLimiter := make(chan struct{}, indicatorConcurrency)
 	for _, symbol := range cfg.Data.Symbols {
 		target := strategy.Target{
 			Exchange: cfg.Data.Exchange,
@@ -316,12 +322,15 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 			RunID:    cfg.Runtime.RunID,
 		}
 		builder, err := simulator.NewSnapshotBuilder(simulator.SnapshotBuilderOptions{
-			Dataset:           dataset,
-			Target:            target,
-			Interval:          cfg.Data.Interval,
-			ConfirmIntervals:  confirmIntervals,
-			CalculationWindow: int(cfg.Data.WarmupBars),
-			Progress:          preparationProgress,
+			Dataset:              dataset,
+			Target:               target,
+			Interval:             cfg.Data.Interval,
+			ConfirmIntervals:     confirmIntervals,
+			CalculationWindow:    int(cfg.Data.WarmupBars),
+			IndicatorBatchSize:   cfg.Data.IndicatorBatchSize,
+			IndicatorConcurrency: cfg.Data.IndicatorConcurrency,
+			IndicatorLimiter:     indicatorLimiter,
+			Progress:             preparationProgress,
 		})
 		if err != nil {
 			return simulator.ExecutionSummary{}, err

@@ -30,14 +30,16 @@ type RuntimeConfig struct {
 }
 
 type DataConfig struct {
-	Exchange         string   `toml:"exchange"`
-	Market           string   `toml:"market"`
-	Symbols          []string `toml:"symbols"`
-	Interval         string   `toml:"interval"`
-	ConfirmIntervals []string `toml:"confirm_intervals"`
-	WarmupBars       int64    `toml:"warmup_bars"`
-	StartTime        string   `toml:"start_time"`
-	EndTime          string   `toml:"end_time"`
+	Exchange             string   `toml:"exchange"`
+	Market               string   `toml:"market"`
+	Symbols              []string `toml:"symbols"`
+	Interval             string   `toml:"interval"`
+	ConfirmIntervals     []string `toml:"confirm_intervals"`
+	WarmupBars           int64    `toml:"warmup_bars"`
+	IndicatorBatchSize   int      `toml:"indicator_batch_size"`
+	IndicatorConcurrency int      `toml:"indicator_concurrency"`
+	StartTime            string   `toml:"start_time"`
+	EndTime              string   `toml:"end_time"`
 }
 
 type SizingConfig struct {
@@ -119,12 +121,13 @@ func defaultConfig() Config {
 			StrategySet: "supertrend",
 		},
 		Data: DataConfig{
-			Exchange:         "binance",
-			Market:           "um",
-			Symbols:          []string{"ETHUSDT"},
-			Interval:         "3m",
-			ConfirmIntervals: []string{"5m", "10m", "15m", "30m"},
-			WarmupBars:       300,
+			Exchange:           "binance",
+			Market:             "um",
+			Symbols:            []string{"ETHUSDT"},
+			Interval:           "3m",
+			ConfirmIntervals:   []string{"5m", "10m", "15m", "30m"},
+			WarmupBars:         300,
+			IndicatorBatchSize: 30,
 		},
 		Sizing: SizingConfig{
 			InitialEquity:     10000,
@@ -291,6 +294,12 @@ func validateData(cfg Config) error {
 	}
 	if cfg.Data.WarmupBars < 0 {
 		return fmt.Errorf("data.warmup_bars cannot be negative")
+	}
+	if cfg.Data.IndicatorBatchSize <= 0 {
+		return fmt.Errorf("data.indicator_batch_size must be positive")
+	}
+	if cfg.Data.IndicatorConcurrency < 0 {
+		return fmt.Errorf("data.indicator_concurrency cannot be negative")
 	}
 	if cfg.Data.StartTime == "" {
 		return fmt.Errorf("data.start_time cannot be empty")

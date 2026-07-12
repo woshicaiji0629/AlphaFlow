@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 
 	"alphaflow/go-service/backtest-engine/internal/reader"
 	"alphaflow/go-service/pkg/indicatorcalc"
@@ -18,46 +19,67 @@ var calculateIndicatorWindow = indicatorcalc.CalculateWindowNumeric
 var analyzeIndicatorWindow = indicatorwindow.Analyze
 
 const defaultReplayCalculationWindow = 268
+const defaultIndicatorBatchSize = 30
 
 type PreparationProgress func(stage string, interval string, processed int, total int)
 
 type replaySeriesState struct {
 	series          reader.SeriesResult
 	cursor          int
-	klineWindow     *indicatorcalc.CalculationWindow
 	indicators      []marketmodel.IndicatorSnapshot
 	latestIndicator marketmodel.IndicatorSnapshot
 	latestWindow    strategy.IndicatorWindowView
 	windowCloseTime int64
 	ready           bool
+	batches         <-chan indicatorBatch
+	batch           []preparedIndicator
+	batchIndex      int
+	next            *preparedIndicator
+}
+
+type preparedIndicator struct {
+	kline  marketmodel.Kline
+	result indicatorcalc.Result
+}
+
+type indicatorBatch struct {
+	items []preparedIndicator
+	err   error
 }
 
 type SnapshotBuilderOptions struct {
-	Dataset           reader.Dataset
-	Target            strategy.Target
-	Interval          string
-	ConfirmIntervals  []string
-	IndicatorOptions  indicatorcalc.Options
-	CalculationWindow int
-	Progress          PreparationProgress
+	Dataset              reader.Dataset
+	Target               strategy.Target
+	Interval             string
+	ConfirmIntervals     []string
+	IndicatorOptions     indicatorcalc.Options
+	CalculationWindow    int
+	IndicatorBatchSize   int
+	IndicatorConcurrency int
+	IndicatorLimiter     chan struct{}
+	Progress             PreparationProgress
 }
 
 type SnapshotBuilder struct {
-	dataset           reader.Dataset
-	target            strategy.Target
-	interval          string
-	confirmIntervals  []string
-	indicatorOptions  indicatorcalc.Options
-	calculationWindow int
-	progress          PreparationProgress
-	seriesByKey       map[reader.SeriesKey]reader.SeriesResult
-	stateByKey        map[reader.SeriesKey]*replaySeriesState
+	dataset              reader.Dataset
+	target               strategy.Target
+	interval             string
+	confirmIntervals     []string
+	indicatorOptions     indicatorcalc.Options
+	calculationWindow    int
+	indicatorBatchSize   int
+	indicatorConcurrency int
+	indicatorLimiter     chan struct{}
+	progress             PreparationProgress
+	seriesByKey          map[reader.SeriesKey]reader.SeriesResult
+	stateByKey           map[reader.SeriesKey]*replaySeriesState
 }
 
 type ContextIterator struct {
 	builder *SnapshotBuilder
 	entry   reader.SeriesResult
 	index   int
+	cancel  context.CancelFunc
 }
 
 func NewSnapshotBuilder(options SnapshotBuilderOptions) (*SnapshotBuilder, error) {
@@ -81,20 +103,26 @@ func NewSnapshotBuilder(options SnapshotBuilderOptions) (*SnapshotBuilder, error
 			return nil, err
 		}
 	}
+	if options.IndicatorLimiter != nil && cap(options.IndicatorLimiter) == 0 {
+		return nil, fmt.Errorf("indicator limiter must have positive capacity")
+	}
 	seriesByKey := make(map[reader.SeriesKey]reader.SeriesResult, len(options.Dataset.Series))
 	for _, series := range options.Dataset.Series {
 		seriesByKey[series.Key] = series
 	}
 	return &SnapshotBuilder{
-		dataset:           options.Dataset,
-		target:            options.Target,
-		interval:          options.Interval,
-		confirmIntervals:  options.ConfirmIntervals,
-		indicatorOptions:  options.IndicatorOptions,
-		calculationWindow: options.CalculationWindow,
-		progress:          options.Progress,
-		seriesByKey:       seriesByKey,
-		stateByKey:        make(map[reader.SeriesKey]*replaySeriesState),
+		dataset:              options.Dataset,
+		target:               options.Target,
+		interval:             options.Interval,
+		confirmIntervals:     options.ConfirmIntervals,
+		indicatorOptions:     options.IndicatorOptions,
+		calculationWindow:    options.CalculationWindow,
+		indicatorBatchSize:   options.IndicatorBatchSize,
+		indicatorConcurrency: options.IndicatorConcurrency,
+		indicatorLimiter:     options.IndicatorLimiter,
+		progress:             options.Progress,
+		seriesByKey:          seriesByKey,
+		stateByKey:           make(map[reader.SeriesKey]*replaySeriesState),
 	}, nil
 }
 
@@ -118,20 +146,27 @@ func (b *SnapshotBuilder) Build(ctx context.Context) ([]strategy.Context, error)
 }
 
 func (b *SnapshotBuilder) Iterator(ctx context.Context) (*ContextIterator, error) {
-	if err := b.prepare(ctx); err != nil {
+	workerCtx, cancel := context.WithCancel(ctx)
+	if err := b.prepare(workerCtx); err != nil {
+		cancel()
 		return nil, err
 	}
 	entry, err := b.series(b.target.Symbol, b.interval)
 	if err != nil {
 		return nil, err
 	}
-	return &ContextIterator{builder: b, entry: entry}, nil
+	return &ContextIterator{builder: b, entry: entry, cancel: cancel}, nil
 }
 
-func (i *ContextIterator) Next(ctx context.Context) (strategy.Context, bool, error) {
+func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok bool, err error) {
 	if i == nil || i.builder == nil {
 		return strategy.Context{}, false, fmt.Errorf("context iterator is required")
 	}
+	defer func() {
+		if err != nil {
+			i.cancel()
+		}
+	}()
 	for i.index < len(i.entry.Result.Klines) {
 		if err := ctx.Err(); err != nil {
 			return strategy.Context{}, false, err
@@ -151,6 +186,7 @@ func (i *ContextIterator) Next(ctx context.Context) (strategy.Context, bool, err
 			continue
 		}
 		if current.OpenTime >= i.entry.Result.End {
+			i.cancel()
 			return strategy.Context{}, false, nil
 		}
 		item, err := i.builder.buildAt(current)
@@ -162,12 +198,29 @@ func (i *ContextIterator) Next(ctx context.Context) (strategy.Context, bool, err
 		}
 		return item, true, nil
 	}
+	i.cancel()
 	return strategy.Context{}, false, nil
 }
 
 func (b *SnapshotBuilder) prepare(ctx context.Context) error {
 	b.stateByKey = make(map[reader.SeriesKey]*replaySeriesState, len(b.seriesByKey))
-	for _, interval := range snapshotIntervals(b.interval, b.confirmIntervals) {
+	intervals := snapshotIntervals(b.interval, b.confirmIntervals)
+	concurrency := b.indicatorConcurrency
+	if concurrency <= 0 {
+		concurrency = runtime.GOMAXPROCS(0)
+	}
+	if concurrency > len(intervals) {
+		concurrency = len(intervals)
+	}
+	batchSize := b.indicatorBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultIndicatorBatchSize
+	}
+	semaphore := b.indicatorLimiter
+	if semaphore == nil {
+		semaphore = make(chan struct{}, concurrency)
+	}
+	for _, interval := range intervals {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -180,15 +233,55 @@ func (b *SnapshotBuilder) prepare(ctx context.Context) error {
 		if calculationWindow <= 0 {
 			calculationWindow = defaultReplayCalculationWindow
 		}
-		klineWindow := indicatorcalc.NewCalculationWindow(calculationWindow)
-		klineWindow.EnableBasicState()
+		batches := make(chan indicatorBatch)
 		b.stateByKey[key] = &replaySeriesState{
-			series:      series,
-			klineWindow: klineWindow,
-			indicators:  make([]marketmodel.IndicatorSnapshot, 0, indicatorwindow.DefaultLookback),
+			series:     series,
+			indicators: make([]marketmodel.IndicatorSnapshot, 0, indicatorwindow.DefaultLookback),
+			batches:    batches,
 		}
+		go b.calculateSeries(ctx, interval, series, calculationWindow, batchSize, semaphore, batches)
 	}
 	return nil
+}
+
+func (b *SnapshotBuilder) calculateSeries(ctx context.Context, interval string, series reader.SeriesResult, calculationWindow, batchSize int, semaphore chan struct{}, batches chan<- indicatorBatch) {
+	defer close(batches)
+	window := indicatorcalc.NewCalculationWindow(calculationWindow)
+	window.EnableBasicState()
+	for start := 0; start < len(series.Result.Klines); start += batchSize {
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		end := start + batchSize
+		if end > len(series.Result.Klines) {
+			end = len(series.Result.Klines)
+		}
+		batch := indicatorBatch{items: make([]preparedIndicator, 0, end-start)}
+		for _, kline := range series.Result.Klines[start:end] {
+			if !kline.IsClosed {
+				batch.err = fmt.Errorf("%s kline open_time=%d is not closed", interval, kline.OpenTime)
+				break
+			}
+			window.Append([]marketmodel.Kline{kline})
+			result, err := calculateIndicatorWindow(window, b.indicatorOptions)
+			if err != nil {
+				batch.err = fmt.Errorf("calculate indicator %s open_time=%d: %w", interval, kline.OpenTime, err)
+				break
+			}
+			batch.items = append(batch.items, preparedIndicator{kline: kline, result: result})
+		}
+		<-semaphore
+		select {
+		case batches <- batch:
+		case <-ctx.Done():
+			return
+		}
+		if batch.err != nil {
+			return
+		}
+	}
 }
 
 func (b *SnapshotBuilder) advanceTo(ctx context.Context, asOf int64) error {
@@ -202,13 +295,17 @@ func (b *SnapshotBuilder) advanceTo(ctx context.Context, asOf int64) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			kline := state.series.Result.Klines[state.cursor]
-			if kline.CloseTime > asOf {
-				break
-			}
-			if err := b.advanceSeries(interval, state, kline); err != nil {
+			prepared, err := state.peekPrepared(ctx)
+			if err != nil {
 				return err
 			}
+			if prepared.kline.CloseTime > asOf {
+				break
+			}
+			if err := b.advanceSeries(interval, state, *prepared); err != nil {
+				return err
+			}
+			state.next = nil
 			state.cursor++
 			if b.progress != nil {
 				b.progress("replay", interval, state.cursor, len(state.series.Result.Klines))
@@ -218,15 +315,9 @@ func (b *SnapshotBuilder) advanceTo(ctx context.Context, asOf int64) error {
 	return nil
 }
 
-func (b *SnapshotBuilder) advanceSeries(interval string, state *replaySeriesState, kline marketmodel.Kline) error {
-	if !kline.IsClosed {
-		return fmt.Errorf("%s kline open_time=%d is not closed", interval, kline.OpenTime)
-	}
-	state.klineWindow.Append([]marketmodel.Kline{kline})
-	result, err := calculateIndicatorWindow(state.klineWindow, b.indicatorOptions)
-	if err != nil {
-		return fmt.Errorf("calculate indicator %s open_time=%d: %w", interval, kline.OpenTime, err)
-	}
+func (b *SnapshotBuilder) advanceSeries(interval string, state *replaySeriesState, prepared preparedIndicator) error {
+	kline := prepared.kline
+	result := prepared.result
 	indicator := marketmodel.IndicatorSnapshot{
 		Exchange: kline.Exchange, Market: kline.Market, Symbol: kline.Symbol, Interval: kline.Interval,
 		OpenTime: result.OpenTime, CloseTime: result.CloseTime, Values: result.Values, NumericValues: result.NumericValues, Signals: result.Signals, UpdatedAt: result.CloseTime,
@@ -239,6 +330,30 @@ func (b *SnapshotBuilder) advanceSeries(interval string, state *replaySeriesStat
 	state.latestIndicator = indicator
 	state.ready = true
 	return nil
+}
+
+func (s *replaySeriesState) peekPrepared(ctx context.Context) (*preparedIndicator, error) {
+	if s.next != nil {
+		return s.next, nil
+	}
+	for s.batchIndex >= len(s.batch) {
+		select {
+		case batch, ok := <-s.batches:
+			if !ok {
+				return nil, fmt.Errorf("indicator preparation ended at %d of %d", s.cursor, len(s.series.Result.Klines))
+			}
+			if batch.err != nil {
+				return nil, batch.err
+			}
+			s.batch = batch.items
+			s.batchIndex = 0
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	s.next = &s.batch[s.batchIndex]
+	s.batchIndex++
+	return s.next, nil
 }
 
 func (b *SnapshotBuilder) ensureIndicatorWindow(interval string, state *replaySeriesState) error {
