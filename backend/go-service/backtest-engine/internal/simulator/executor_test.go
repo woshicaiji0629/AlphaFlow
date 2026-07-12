@@ -84,6 +84,50 @@ func TestExecutorOpensBacktestPosition(t *testing.T) {
 	}
 }
 
+func TestExecutorIncrementalRetainsEventStateWithoutMaterializingHistory(t *testing.T) {
+	store := position.NewMemoryStore()
+	engine := strategy.NewEngine([]strategy.Strategy{fixedStrategy{
+		name:       "fixed",
+		signalSide: strategy.SignalSideBuy,
+		confidence: 0.9,
+	}})
+	executor, err := NewExecutor(ExecutorOptions{
+		Engine: engine,
+		Store:  store,
+		ManagerConfig: position.ManagerConfig{
+			MarginQuote:       100,
+			Leverage:          1,
+			MaxPositionSize:   10,
+			MinOpenConfidence: 0.5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+
+	first, err := executor.ExecuteIncremental(context.Background(), []strategy.Context{
+		executorTestContext("ETHUSDT", 1000, "100"),
+	})
+	if err != nil {
+		t.Fatalf("first ExecuteIncremental() error = %v", err)
+	}
+	second, err := executor.ExecuteIncremental(context.Background(), []strategy.Context{
+		executorTestContext("ETHUSDT", 2000, "101"),
+	})
+	if err != nil {
+		t.Fatalf("second ExecuteIncremental() error = %v", err)
+	}
+	if first.OrderFills != 1 || second.OrderFills != 1 {
+		t.Fatalf("order fills = %d then %d, want cumulative 1", first.OrderFills, second.OrderFills)
+	}
+	if first.Events == 0 || second.Events < first.Events {
+		t.Fatalf("events = %d then %d, want cumulative non-decreasing counts", first.Events, second.Events)
+	}
+	if first.StrategyEvents != nil || second.StrategyEvents != nil {
+		t.Fatal("incremental execution materialized full event history")
+	}
+}
+
 func TestExecutorAppliesConfiguredSlippage(t *testing.T) {
 	store := position.NewMemoryStore()
 	engine := strategy.NewEngine([]strategy.Strategy{fixedStrategy{

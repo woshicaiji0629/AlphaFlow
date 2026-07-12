@@ -55,6 +55,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 每个 symbol/interval 维护独立 `CalculationWindow`，按 `CloseTime <= AsOf` 流式推进；大周期只在真正收盘后更新。
 - 只保留固定 K 线窗口和最近的指标 snapshot；窗口语义按策略读取惰性分析，并按最新 close time 缓存。
 - 长回测支持 context 取消、分批事件提取，以及最长 10 秒一次的速率、elapsed 和 ETA 日志。
+- 单 symbol 回测按 Context 即时消费；同一时间戳的多 symbol 仍保持原子批次。模拟执行器保留事件 cursor、累计已实现盈亏和成交计数，避免每个 Context 从头扫描并物化完整策略事件历史。
 - 已复用公共策略、仓位管理、paper broker 和 route dispatcher 执行回测。
 - 回测仓位使用独立 `bt` scope 和 run id，不写在线 paper 仓位。
 - 已生成并持久化策略事件、回测交易明细和 run 级摘要。
@@ -67,6 +68,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 回测/paper broker 已支持固定 bps 滑点，买入按成交价上浮、卖出按成交价下浮，并可通过 backtest-engine 配置控制。
 - 2026-07-10 使用 ETHUSDT、3 小时历史数据和 268 根 warmup 完成真实回测：共生成 60 次决策和 60 个事件，策略均返回 `hold`，无策略异常、无成交，说明执行和持久化链路正常，零成交来自当前样板策略过滤条件。该短样本包含五个周期各自的 warmup，不能直接线性外推年度耗时。
 - 已准备并校验 ETHUSDT 2025-07-11 至 2026-07-11 的 3m/5m/10m/15m/30m 数据和年度配置；年度性能仍在继续优化，尚未形成最终策略报告。
+- 2026-07-12 使用 ETHUSDT、7 天、3m 入场周期和 5m/10m/15m/30m 确认周期完成性能回放：共读取 8732 根 K 线并生成 3360 个 Context。Context 即时消费和增量模拟执行版本在一次同机对比中由约 132.6 秒降至约 104.6 秒；后续单次运行受机器负载影响可波动到约 133 秒，因此墙钟数据仅作趋势参考，优化判断以 benchmark、CPU profile 和回测结果一致性共同确认。
 
 ### 仓位和执行路由
 

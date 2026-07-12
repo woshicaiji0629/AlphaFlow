@@ -345,7 +345,7 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		}
 		iteratorStates = append(iteratorStates, contextIteratorState{iterator: iterator, current: item, ok: ok})
 	}
-	summary, executionErr := executeContextBatches(ctx, executor, iteratorStates, 5000)
+	summary, executionErr := executeContextBatches(ctx, executor, iteratorStates, 1)
 	events := store.Events()
 	summary.StrategyEvents = events
 	summary.Events = len(events)
@@ -420,7 +420,7 @@ func executeContextBatches(
 		if len(batch) == 0 {
 			return summary, nil
 		}
-		partial, executionErr := executor.Execute(ctx, batch)
+		partial, executionErr := executor.ExecuteIncremental(ctx, batch)
 		mergeExecutionSummary(&summary, partial)
 		if executionErr != nil {
 			return summary, executionErr

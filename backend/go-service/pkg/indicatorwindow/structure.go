@@ -166,18 +166,16 @@ func addSMCSemanticAnalysis(ctx *analysisContext) {
 }
 
 func recentSignalContains(ctx *analysisContext, key string, part string) bool {
-	series := signalSeries(ctx.points, key)
-	if len(series) == 0 {
-		return false
-	}
-	start := len(series) - 3
-	if start < 0 {
-		start = 0
-	}
-	for _, value := range series[start:] {
+	seen := 0
+	for index := len(ctx.points) - 1; index >= 0 && seen < 3; index-- {
+		value, ok := ctx.points[index].signals[key]
+		if !ok {
+			continue
+		}
 		if signalContains(value, part) {
 			return true
 		}
+		seen++
 	}
 	return false
 }
@@ -204,11 +202,16 @@ func latestSMCEventAge(ctx *analysisContext) int {
 }
 
 func latestSignalContainsAge(ctx *analysisContext, key string, part string) int {
-	series := signalSeries(ctx.points, key)
-	for index := len(series) - 1; index >= 0; index-- {
-		if signalContains(series[index], part) {
-			return len(series) - 1 - index
+	age := 0
+	for index := len(ctx.points) - 1; index >= 0; index-- {
+		value, ok := ctx.points[index].signals[key]
+		if !ok {
+			continue
 		}
+		if signalContains(value, part) {
+			return age
+		}
+		age++
 	}
 	return -1
 }

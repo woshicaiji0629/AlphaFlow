@@ -16,7 +16,7 @@ import (
 
 var errSnapshotNotReady = errors.New("strategy snapshot not ready")
 var calculateIndicatorWindow = indicatorcalc.CalculateWindowNumeric
-var analyzeIndicatorWindow = indicatorwindow.Analyze
+var analyzeIndicatorWindow = indicatorwindow.AnalyzeOrdered
 
 const defaultReplayCalculationWindow = 268
 const defaultIndicatorBatchSize = 30

@@ -130,6 +130,8 @@ func volumeFlowIndicatorCompact(
 	var vcpSum float64
 	invalidCount := 1
 	interWindow := make([]float64, 30)
+	var interSum float64
+	var interSumSq float64
 	vcpWindow := make([]float64, length)
 	validWindow := make([]bool, length)
 	previousTypical := (highs[0] + lows[0] + closes[0]) / 3
@@ -150,14 +152,25 @@ func volumeFlowIndicatorCompact(
 		if typical > 0 && previousTypical > 0 {
 			interValue = math.Log(typical) - math.Log(previousTypical)
 		}
-		interWindow[index%len(interWindow)] = interValue
+		interSlot := index % len(interWindow)
+		previousInter := interWindow[interSlot]
+		interSum -= previousInter
+		interSumSq -= previousInter * previousInter
+		interWindow[interSlot] = interValue
+		interSum += interValue
+		interSumSq += interValue * interValue
 
 		vcpValue := 0.0
 		validVCP := false
 		priceCutoff := 0.0
 		volumeCutoff := 0.0
 		if index >= length && index >= len(interWindow) && volumeSum != 0 {
-			volatility := standardDeviationRing(interWindow, index, len(interWindow))
+			mean := interSum / float64(len(interWindow))
+			variance := interSumSq/float64(len(interWindow)) - mean*mean
+			if variance < 0 {
+				variance = 0
+			}
+			volatility := math.Sqrt(variance)
 			volumeAverage := volumeSum / float64(length)
 			priceCutoff = coef * volatility * closes[index]
 			volumeCutoff = volumeAverage * volumeCoef

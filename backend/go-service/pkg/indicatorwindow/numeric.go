@@ -6,6 +6,7 @@ import (
 )
 
 type numericStats struct {
+	count            int
 	latest           float64
 	previous         float64
 	change           float64
@@ -27,12 +28,21 @@ func addNumericSeriesAnalysis(
 	series []float64,
 ) {
 	stats := analyzeNumericSeries(series)
+	addNumericStatsAnalysis(values, signals, key, stats)
+}
+
+func addNumericStatsAnalysis(
+	values map[string]string,
+	signals map[string]string,
+	key string,
+	stats numericStats,
+) {
 	prefix := key + "_win_"
 	setValue(values, prefix+"latest", stats.latest, true)
-	setValue(values, prefix+"previous", stats.previous, len(series) > 1)
-	setValue(values, prefix+"change", stats.change, len(series) > 1)
-	setValue(values, prefix+"change_pct", stats.changePct, len(series) > 1)
-	setValue(values, prefix+"slope", stats.slope, len(series) > 1)
+	setValue(values, prefix+"previous", stats.previous, stats.count > 1)
+	setValue(values, prefix+"change", stats.change, stats.count > 1)
+	setValue(values, prefix+"change_pct", stats.changePct, stats.count > 1)
+	setValue(values, prefix+"slope", stats.slope, stats.count > 1)
 	setValue(values, prefix+"min", stats.minimum, true)
 	setValue(values, prefix+"max", stats.maximum, true)
 	setValue(values, prefix+"range_pos_pct", stats.rangePositionPct, stats.maximum != stats.minimum)
@@ -88,6 +98,7 @@ func analyzeNumericSeries(series []float64) numericStats {
 		rangePosition = (latest - minimum) / (maximum - minimum) * 100
 	}
 	return numericStats{
+		count:            len(series),
 		latest:           latest,
 		previous:         previous,
 		change:           change,
@@ -101,6 +112,73 @@ func analyzeNumericSeries(series []float64) numericStats {
 		maximum:          maximum,
 		rangePositionPct: rangePosition,
 	}
+}
+
+func numericStatsFromPoints(points []point, key string) (numericStats, bool) {
+	stats := numericStats{}
+	first := 0.0
+	for _, point := range points {
+		value, ok := numericPointValue(point, key)
+		if !ok {
+			continue
+		}
+		if stats.count == 0 {
+			first = value
+			stats.minimum = value
+			stats.maximum = value
+		} else {
+			stats.previous = stats.latest
+			stats.minimum = math.Min(stats.minimum, value)
+			stats.maximum = math.Max(stats.maximum, value)
+			direction := numericDirection(value - stats.latest)
+			switch direction {
+			case "rising":
+				stats.risingCount++
+				stats.fallingCount = 0
+				stats.stableCount = 0
+			case "falling":
+				stats.risingCount = 0
+				stats.fallingCount++
+				stats.stableCount = 0
+			default:
+				stats.risingCount = 0
+				stats.fallingCount = 0
+				stats.stableCount++
+			}
+		}
+		stats.latest = value
+		stats.count++
+	}
+	if stats.count == 0 {
+		return numericStats{}, false
+	}
+	if stats.count == 1 {
+		stats.previous = stats.latest
+	}
+	stats.change = stats.latest - stats.previous
+	if stats.previous != 0 {
+		stats.changePct = stats.change / math.Abs(stats.previous) * 100
+	}
+	if stats.count > 1 {
+		stats.slope = (stats.latest - first) / float64(stats.count-1)
+	}
+	if stats.maximum != stats.minimum {
+		stats.rangePositionPct = (stats.latest - stats.minimum) / (stats.maximum - stats.minimum) * 100
+	}
+	stats.direction = numericDirection(stats.change)
+	return stats, true
+}
+
+func numericPointValue(point point, key string) (float64, bool) {
+	if value, ok := point.numericValues[key]; ok {
+		return value, true
+	}
+	value, ok := point.values[key]
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	return parsed, err == nil
 }
 
 func numericDirection(change float64) string {

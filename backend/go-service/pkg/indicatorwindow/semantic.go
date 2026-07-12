@@ -7,47 +7,58 @@ import (
 )
 
 func latestSignal(ctx *analysisContext, key string) (string, bool) {
-	series := signalSeries(ctx.points, key)
-	if len(series) == 0 {
-		return "", false
+	for index := len(ctx.points) - 1; index >= 0; index-- {
+		if value, ok := ctx.points[index].signals[key]; ok {
+			return value, true
+		}
 	}
-	return series[len(series)-1], true
+	return "", false
 }
 
 func latestNumeric(ctx *analysisContext, key string) (float64, bool) {
-	series := numericSeries(ctx.points, key)
-	if len(series) == 0 {
-		return 0, false
+	for index := len(ctx.points) - 1; index >= 0; index-- {
+		point := ctx.points[index]
+		if value, ok := point.numericValues[key]; ok {
+			return value, true
+		}
+		value, ok := point.values[key]
+		if !ok {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return parsed, true
+		}
 	}
-	return series[len(series)-1], true
+	return 0, false
 }
 
 func numericStatsFor(ctx *analysisContext, key string) (numericStats, bool) {
-	series := numericSeries(ctx.points, key)
-	if len(series) == 0 {
-		return numericStats{}, false
-	}
-	return analyzeNumericSeries(series), true
+	return numericStatsFromPoints(ctx.points, key)
 }
 
 func signalStableCountFor(ctx *analysisContext, key string) int {
-	series := signalSeries(ctx.points, key)
-	if len(series) == 0 {
+	stats, ok := signalStatsFromPoints(ctx.points, key)
+	if !ok {
 		return 0
 	}
-	return stableSignalCount(series)
+	return stats.stableCount
 }
 
 func signalChangeCount(ctx *analysisContext, key string) int {
-	series := signalSeries(ctx.points, key)
-	if len(series) < 2 {
-		return 0
-	}
 	count := 0
-	for index := 1; index < len(series); index++ {
-		if series[index] != series[index-1] {
+	previous := ""
+	hasPrevious := false
+	for _, point := range ctx.points {
+		value, ok := point.signals[key]
+		if !ok {
+			continue
+		}
+		if hasPrevious && value != previous {
 			count++
 		}
+		previous = value
+		hasPrevious = true
 	}
 	return count
 }
@@ -57,12 +68,17 @@ func latestEventAge(ctx *analysisContext, key string, events ...string) (string,
 	for _, event := range events {
 		wanted[normalizeSignal(event)] = struct{}{}
 	}
-	series := signalSeries(ctx.points, key)
-	for index := len(series) - 1; index >= 0; index-- {
-		value := normalizeSignal(series[index])
-		if _, ok := wanted[value]; ok {
-			return value, len(series) - 1 - index, true
+	age := 0
+	for index := len(ctx.points) - 1; index >= 0; index-- {
+		raw, exists := ctx.points[index].signals[key]
+		if !exists {
+			continue
 		}
+		value := normalizeSignal(raw)
+		if _, ok := wanted[value]; ok {
+			return value, age, true
+		}
+		age++
 	}
 	return "", 0, false
 }

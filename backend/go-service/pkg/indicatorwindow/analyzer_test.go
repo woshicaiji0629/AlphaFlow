@@ -39,6 +39,77 @@ func TestCalculateWindowsMatchesAnalyzePrefixes(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOrderedMatchesAnalyze(t *testing.T) {
+	snapshots := benchmarkSnapshots(40)
+	want, err := Analyze(snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := AnalyzeOrdered(snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("AnalyzeOrdered result does not match Analyze")
+	}
+}
+
+func TestAnalyzeStillSortsUnorderedInput(t *testing.T) {
+	ordered := benchmarkSnapshots(3)
+	want, err := Analyze(ordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unordered := append([]model.IndicatorSnapshot(nil), ordered...)
+	unordered[0], unordered[2] = unordered[2], unordered[0]
+	got, err := Analyze(unordered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("Analyze result changed for unordered input")
+	}
+}
+
+func TestNumericStatsFromPointsMatchesSeriesAnalysis(t *testing.T) {
+	points := []point{
+		{numericValues: map[string]float64{"value": 10}},
+		{numericValues: map[string]float64{}},
+		{values: map[string]string{"value": "12"}},
+		{values: map[string]string{"value": "invalid"}},
+		{numericValues: map[string]float64{"value": 12}},
+		{numericValues: map[string]float64{"value": 15}},
+	}
+	series := numericSeries(points, "value")
+	want := analyzeNumericSeries(series)
+	got, ok := numericStatsFromPoints(points, "value")
+	if !ok {
+		t.Fatal("numericStatsFromPoints returned no values")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("numeric stats mismatch: got %#v, want %#v", got, want)
+	}
+}
+
+func TestSignalStatsFromPointsMatchesSeriesAnalysis(t *testing.T) {
+	points := []point{
+		{signals: map[string]string{"value": "down"}},
+		{signals: map[string]string{}},
+		{signals: map[string]string{"value": "up"}},
+		{signals: map[string]string{}},
+		{signals: map[string]string{"value": "up"}},
+	}
+	series := signalSeries(points, "value")
+	want := analyzeSignalSeries(series)
+	got, ok := signalStatsFromPoints(points, "value")
+	if !ok {
+		t.Fatal("signalStatsFromPoints returned no values")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("signal stats mismatch: got %#v, want %#v", got, want)
+	}
+}
+
 func BenchmarkCalculateWindows300(b *testing.B) {
 	snapshots := benchmarkSnapshots(300)
 	b.ReportAllocs()
@@ -57,6 +128,28 @@ func BenchmarkAnalyzePrefixes300(b *testing.B) {
 			if _, err := Analyze(snapshots[:index+1]); err != nil {
 				b.Fatal(err)
 			}
+		}
+	}
+}
+
+func BenchmarkAnalyzeOrderedWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := AnalyzeOrdered(snapshots); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkAnalyzeWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := Analyze(snapshots); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

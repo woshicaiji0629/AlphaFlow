@@ -180,20 +180,27 @@ func trendEventName(event string) string {
 }
 
 func latestDirectionChangeEvent(ctx *analysisContext, key string) (string, int, bool) {
-	series := signalSeries(ctx.points, key)
-	if len(series) < 2 {
-		return "", 0, false
-	}
-	for index := len(series) - 1; index > 0; index-- {
-		current := directionBias(series[index])
-		previous := directionBias(series[index-1])
+	current := ""
+	age := 0
+	for index := len(ctx.points) - 1; index >= 0; index-- {
+		value, ok := ctx.points[index].signals[key]
+		if !ok {
+			continue
+		}
+		if current == "" {
+			current = directionBias(value)
+			continue
+		}
+		previous := directionBias(value)
 		if current == "neutral" || current == previous {
+			current = previous
+			age++
 			continue
 		}
 		if current == "bull" {
-			return "buy", len(series) - 1 - index, true
+			return "buy", age, true
 		}
-		return "sell", len(series) - 1 - index, true
+		return "sell", age, true
 	}
 	return "", 0, false
 }

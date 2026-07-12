@@ -75,7 +75,7 @@ func (r *Runner) indicatorWindowSnapshot(
 	snapshots []model.IndicatorSnapshot,
 	updatedAt int64,
 ) (model.IndicatorWindowSnapshot, error) {
-	result, err := indicatorwindow.Analyze(snapshots)
+	result, err := indicatorwindow.AnalyzeOrdered(snapshots)
 	if err != nil {
 		return model.IndicatorWindowSnapshot{}, err
 	}

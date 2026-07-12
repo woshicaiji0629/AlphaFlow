@@ -106,6 +106,17 @@ func TestVolumeFlowIndicatorCompactMatchesBatch(t *testing.T) {
 	assertFloatClose(t, "vfi price cutoff", got.priceCutoff, want.priceCutoff)
 }
 
+func BenchmarkVolumeFlowIndicatorCompact(b *testing.B) {
+	highs, lows, closes, volumes := moneyFlowSeries(320, 100, 0.3, 100)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, 130, 0.2, 2.5, 5); !ok {
+			b.Fatal("volumeFlowIndicatorCompact returned false")
+		}
+	}
+}
+
 func TestVolumeStateDetectsSpikeAndDry(t *testing.T) {
 	if got := volumeState(2.1, true); got != "spike" {
 		t.Fatalf("volumeState spike = %q", got)

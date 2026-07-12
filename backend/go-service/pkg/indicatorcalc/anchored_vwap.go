@@ -50,6 +50,7 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 	if useAdapt {
 		aptSeries = dynamicSwingAPTSeries(highs, lows, closes, baseAPT, true, volBias)
 	}
+	fixedAlpha := alphaFromAPT(baseAPT)
 	ph := math.NaN()
 	pl := math.NaN()
 	phL := 0
@@ -105,7 +106,11 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 			state.anchorAge = index - anchorIndex
 			state.anchorType = anchorType
 			for cursor := anchorIndex; cursor <= index; cursor++ {
-				p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[cursor], lows[cursor], closes[cursor], volumes[cursor], dynamicSwingAPTAt(aptSeries, baseAPT, cursor))
+				alpha := fixedAlpha
+				if useAdapt {
+					alpha = alphaFromAPT(dynamicSwingAPTAt(aptSeries, baseAPT, cursor))
+				}
+				p, vol, state.value = dynamicSwingVWAPStepAlpha(p, vol, highs[cursor], lows[cursor], closes[cursor], volumes[cursor], alpha)
 			}
 		} else {
 			initializedAnchor := false
@@ -114,7 +119,11 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 				state.swingLabel = "none"
 				initializedAnchor = true
 			}
-			p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[index], lows[index], closes[index], volumes[index], dynamicSwingAPTAt(aptSeries, baseAPT, index))
+			alpha := fixedAlpha
+			if useAdapt {
+				alpha = alphaFromAPT(dynamicSwingAPTAt(aptSeries, baseAPT, index))
+			}
+			p, vol, state.value = dynamicSwingVWAPStepAlpha(p, vol, highs[index], lows[index], closes[index], volumes[index], alpha)
 			if !initializedAnchor {
 				state.anchorAge++
 			}
@@ -142,7 +151,10 @@ func dynamicSwingCurrentAnchor(dir int, ph float64, pl float64, phL int, plL int
 }
 
 func dynamicSwingVWAPStep(previousP float64, previousVol float64, high float64, low float64, close float64, volume float64, apt float64) (float64, float64, float64) {
-	alpha := alphaFromAPT(apt)
+	return dynamicSwingVWAPStepAlpha(previousP, previousVol, high, low, close, volume, alphaFromAPT(apt))
+}
+
+func dynamicSwingVWAPStepAlpha(previousP float64, previousVol float64, high float64, low float64, close float64, volume float64, alpha float64) (float64, float64, float64) {
 	pxv := ((high + low + close) / 3) * volume
 	p := (1-alpha)*previousP + alpha*pxv
 	vol := (1-alpha)*previousVol + alpha*volume

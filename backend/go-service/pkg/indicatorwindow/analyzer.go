@@ -28,9 +28,24 @@ func Analyze(snapshots []model.IndicatorSnapshot) (Result, error) {
 	if len(ordered) > DefaultLookback {
 		ordered = ordered[len(ordered)-DefaultLookback:]
 	}
+	return analyzeOrdered(ordered)
+}
 
-	points := make([]point, 0, len(ordered))
-	for _, snapshot := range ordered {
+// AnalyzeOrdered analyzes snapshots already ordered by ascending OpenTime.
+// Callers must not insert or update older snapshots out of order.
+func AnalyzeOrdered(snapshots []model.IndicatorSnapshot) (Result, error) {
+	if len(snapshots) == 0 {
+		return Result{}, fmt.Errorf("no indicator snapshots")
+	}
+	if len(snapshots) > DefaultLookback {
+		snapshots = snapshots[len(snapshots)-DefaultLookback:]
+	}
+	return analyzeOrdered(snapshots)
+}
+
+func analyzeOrdered(snapshots []model.IndicatorSnapshot) (Result, error) {
+	points := make([]point, 0, len(snapshots))
+	for _, snapshot := range snapshots {
 		points = append(points, pointFromSnapshot(snapshot))
 	}
 	return analyzePoints(points)
@@ -124,12 +139,12 @@ func (ctx *analysisContext) addNumeric(keys ...string) {
 		if _, ok := ctx.numericAnalyzed[key]; ok {
 			continue
 		}
-		series := numericSeries(ctx.points, key)
-		if len(series) == 0 {
+		stats, ok := numericStatsFromPoints(ctx.points, key)
+		if !ok {
 			continue
 		}
 		ctx.numericAnalyzed[key] = struct{}{}
-		addNumericSeriesAnalysis(ctx.values, ctx.signals, key, series)
+		addNumericStatsAnalysis(ctx.values, ctx.signals, key, stats)
 	}
 }
 
@@ -138,11 +153,11 @@ func (ctx *analysisContext) addSignals(keys ...string) {
 		if _, ok := ctx.signalAnalyzed[key]; ok {
 			continue
 		}
-		series := signalSeries(ctx.points, key)
-		if len(series) == 0 {
+		stats, ok := signalStatsFromPoints(ctx.points, key)
+		if !ok {
 			continue
 		}
 		ctx.signalAnalyzed[key] = struct{}{}
-		addSignalSeriesAnalysis(ctx.values, ctx.signals, key, series)
+		addSignalStatsAnalysis(ctx.values, ctx.signals, key, stats)
 	}
 }

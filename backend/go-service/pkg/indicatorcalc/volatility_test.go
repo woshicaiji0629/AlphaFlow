@@ -519,6 +519,27 @@ func TestDynamicSwingAnchoredVWAPOutputsState(t *testing.T) {
 	}
 }
 
+func TestDynamicSwingVWAPPrecomputedAlphaMatchesAPTStep(t *testing.T) {
+	const apt = 20.0
+	wantP, wantVolume, wantValue := dynamicSwingVWAPStep(1000, 10, 101, 99, 100, 12, apt)
+	gotP, gotVolume, gotValue := dynamicSwingVWAPStepAlpha(1000, 10, 101, 99, 100, 12, alphaFromAPT(apt))
+	assertFloatClose(t, "dynamic swing p", gotP, wantP)
+	assertFloatClose(t, "dynamic swing volume", gotVolume, wantVolume)
+	assertFloatClose(t, "dynamic swing value", gotValue, wantValue)
+}
+
+func BenchmarkDynamicSwingAnchoredVWAP(b *testing.B) {
+	highs, lows, closes, volumes := trendingSeries(268, 100, 0.3)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		state := dynamicSwingAnchoredVWAP(highs, lows, closes, volumes, dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, dynamicSwingVWAPUseAdapt, dynamicSwingVWAPVolBias)
+		if !state.ok {
+			b.Fatal("dynamicSwingAnchoredVWAP returned invalid state")
+		}
+	}
+}
+
 func trendPointsFromValues(values ...float64) []trendPoint {
 	points := make([]trendPoint, 0, len(values))
 	for _, value := range values {

@@ -92,11 +92,11 @@
 - HMA 只计算最后输出所需的差分窗口。
 - DEMA/TEMA 使用流式 EMA 状态取最终值。
 - Moving Average、EZ EMA 和脚本均线优先读取 `CalculationWindow` 的 EMA 状态。
-- VFI 使用 compact 路径，以滚动 VCP 和流式 signal EMA 替代旧实现中的嵌套窗口求和与 signal 序列数组；旧批量实现保留为 fallback。
+- VFI 使用 compact 路径，以滚动 VCP、滚动 `sum/sum²` 波动率和流式 signal EMA 替代旧实现中的嵌套窗口求和、30 点双遍标准差扫描与 signal 序列数组；旧批量实现保留为 fallback 和等价性测试参考。
 - `CalculateWindow` 正常路径复用 `CalculationWindow` 已解析 series 做数据质量检查，解析失败时回退旧质量检查逻辑以保留错误原因。
 - Nadaraya-Watson envelope 复用栈上权重缓存，避免每个点重复构造权重；MoneyFlow 的区间最高/最低扫描已抽成公共 helper。
 - Bollinger 20 和 Donchian 20 复用 `CalculationWindow` 中的滚动 sum/sum² 与单调队列；滚动方差定期全量校正并钳制浮点误差导致的极小负方差。
-- ATR、Supertrend、AlphaTrend、QQE、Heikin Ashi、EMD、MACD divergence、AI Supertrend 和 Dynamic Swing VWAP 的只读末值或共享基础序列路径避免构造不必要的完整临时数组。
+- ATR、Supertrend、AlphaTrend、QQE、Heikin Ashi、EMD、MACD divergence、AI Supertrend 和 Dynamic Swing VWAP 的只读末值或共享基础序列路径避免构造不必要的完整临时数组。Dynamic Swing VWAP 在非 adaptive 模式下只计算一次固定 APT alpha，避免每个点重复调用 `Log/Exp`。
 - 回测使用 `CalculateWindowNumeric`，不生成旧字符串值 map；策略读取先查 `NumericValues`，只有旧快照才回退解析 `Values`。
 
 当前可用 benchmark：
@@ -106,6 +106,10 @@ go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTem
 go test ./pkg/indicatorcalc -run '^$' -bench 'BenchmarkCalculate(250|300)Bars' -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowStreaming -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowNumericStreaming -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkVolumeFlowIndicatorCompact -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkDynamicSwingAnchoredVWAP -benchmem
+go test ./pkg/indicatorwindow -run '^$' -bench BenchmarkAnalyzeOrderedWindow20 -benchmem
+go test ./pkg/strategyframe -run '^$' -bench BenchmarkWindowViewFromResult -benchmem
 ```
 
 它覆盖 realtime open kline 的临时窗口构造和 `CalculateWindow` 完整特征计算。一次本地基线结果为：
@@ -120,7 +124,9 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 
 本地年度真实路径试验表明，完整指标结果包含大量 map，过大的批次会显著放大常驻内存和 GC 压力。`512` 批次曾出现约 `5GB` 物理内存、约 `8.2GB` 峰值；在同一环境的短时对比中，无缓冲 `30` 批次优于 `20`、`40`、`50` 和 `512`。这些数据用于选择安全默认值，不是生产 SLA；机器负载、指标集合或结果结构变化后应重新 profile。
 
-年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、每根 K 线重复分析未被策略读取的指标窗口，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。剩余热点主要是 QQE、Volume Flow、普通 Supertrend/ATR 序列和结果 map/字符串分配。
+年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、窗口分析排序和临时 numeric/signal series、VFI 的 30 点双遍标准差扫描，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。2026-07 本地 profile 中，VFI 优化后 `standardDeviationRing` 已退出热点列表；Dynamic Swing VWAP 缓存固定 alpha 后累计占比从约 `11.7%` 降至约 `5.0%`。这些占比只用于同机 profile 前后比较，不是生产 SLA。
+
+已否决的实验也应保留结论：将指标并发度固定为 `1` 会降低五周期回放吞吐；把 AI Supertrend 的 `factor -> bar` 循环交换为 `bar -> factor state` 没有稳定 CPU 收益且增加分配；窗口结果 typed 快速路径若只覆盖通用 `*_win_*` 字段会遗漏 pump、SMC、资金流等适配语义，不能局部上线。AI Supertrend 若继续优化，需要随 `CalculationWindow` 推进的真正增量状态和逐 bar batch 对照测试。
 
 ## 策略常用语义特征
 

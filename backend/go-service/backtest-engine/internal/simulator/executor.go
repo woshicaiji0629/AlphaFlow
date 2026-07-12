@@ -62,6 +62,14 @@ type Executor struct {
 	progress      func(processed int, total int, trades int)
 	processed     int
 	progressTotal int
+	incremental   executionState
+}
+
+type executionState struct {
+	initialized bool
+	eventCursor int
+	realizedPnL float64
+	orderFills  int
 }
 
 func NewExecutor(options ExecutorOptions) (*Executor, error) {
@@ -119,17 +127,38 @@ func NewExecutor(options ExecutorOptions) (*Executor, error) {
 }
 
 func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (ExecutionSummary, error) {
+	state := executionState{}
+	return e.execute(ctx, contexts, &state, true)
+}
+
+// ExecuteIncremental executes a streaming batch while retaining event-derived
+// state across calls. Full event materialization remains the caller's final
+// aggregation responsibility.
+func (e *Executor) ExecuteIncremental(ctx context.Context, contexts []strategy.Context) (ExecutionSummary, error) {
+	return e.execute(ctx, contexts, &e.incremental, false)
+}
+
+func (e *Executor) execute(
+	ctx context.Context,
+	contexts []strategy.Context,
+	state *executionState,
+	includeEvents bool,
+) (ExecutionSummary, error) {
 	if e == nil {
 		return ExecutionSummary{}, fmt.Errorf("executor is required")
 	}
 	summary := ExecutionSummary{Contexts: len(contexts)}
-	existingEvents, eventCursor := e.store.EventsSince(0)
-	for _, event := range existingEvents {
-		if event.EventType == strategy.EventTypeOrderFilled {
-			summary.OrderFills++
+	if !state.initialized {
+		existingEvents, eventCursor := e.store.EventsSince(0)
+		state.eventCursor = eventCursor
+		state.realizedPnL = realizedPnLFromEvents(existingEvents)
+		for _, event := range existingEvents {
+			if event.EventType == strategy.EventTypeOrderFilled {
+				state.orderFills++
+			}
 		}
+		state.initialized = true
 	}
-	realizedPnL := realizedPnLFromEvents(existingEvents)
 	for index := 0; index < len(contexts); {
 		batchEnd := nextContextBatch(contexts, index)
 		batch := contexts[index:batchEnd]
@@ -164,18 +193,18 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 			if err := e.dispatcher.Dispatch(ctx, input, decision); err != nil {
 				return ExecutionSummary{}, err
 			}
-			newEvents, nextEventCursor := e.store.EventsSince(eventCursor)
-			realizedPnL += realizedPnLFromEvents(newEvents)
+			newEvents, nextEventCursor := e.store.EventsSince(state.eventCursor)
+			state.realizedPnL += realizedPnLFromEvents(newEvents)
 			for _, event := range newEvents {
 				if event.EventType == strategy.EventTypeOrderFilled {
-					summary.OrderFills++
+					state.orderFills++
 				}
 			}
 			if e.account != nil {
 				e.account.ApplyEvents(newEvents)
 			}
-			eventCursor = nextEventCursor
-			point, ok, err := e.barEquityPoint(ctx, item, realizedPnL)
+			state.eventCursor = nextEventCursor
+			point, ok, err := e.barEquityPoint(ctx, item, state.realizedPnL)
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
@@ -205,9 +234,11 @@ func (e *Executor) Execute(ctx context.Context, contexts []strategy.Context) (Ex
 		}
 		index = batchEnd
 	}
-	events := e.store.Events()
-	summary.Events = len(events)
-	summary.StrategyEvents = events
+	summary.Events = state.eventCursor
+	summary.OrderFills = state.orderFills
+	if includeEvents {
+		summary.StrategyEvents = e.store.Events()
+	}
 	runID := firstRunID(contexts)
 	if runID != "" {
 		positions, err := e.store.ListPositions(ctx, position.Filter{
