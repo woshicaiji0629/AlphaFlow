@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,7 @@ const (
 	maxEventWorkers          = 16
 	latestEventEnqueueTTL    = 50 * time.Millisecond
 	latestFlushInterval      = 500 * time.Millisecond
+	defaultEventDrainTimeout = 10 * time.Second
 	backfillRequestInterval  = 100 * time.Millisecond
 	openInterestStartupDelay = 2 * time.Minute
 	maxOpenInterestSymbols   = 100
@@ -61,6 +63,8 @@ type Collector struct {
 	store               Store
 	eventQueue          chan collectorEvent
 	eventWorkers        int
+	eventPending        atomic.Int64
+	eventDrainNotify    chan struct{}
 	latestMu            sync.Mutex
 	latestEvents        map[string]collectorEvent
 	stats               collectorStats
@@ -144,6 +148,7 @@ type Options struct {
 	BackfillIntervals    []string
 	StartupDerivedRules  []aggregator.Rule
 	GapPublisher         GapPublisher
+	EventDrainTimeout    time.Duration
 }
 
 func New(
@@ -161,6 +166,7 @@ func New(
 		store:               store,
 		eventQueue:          make(chan collectorEvent, eventQueueSize),
 		eventWorkers:        eventWorkers,
+		eventDrainNotify:    make(chan struct{}, 1),
 		latestEvents:        make(map[string]collectorEvent),
 		lastExchangeTimes:   make(map[string]int64),
 		klineVersions:       make(map[string]map[int64]klineVersion),
@@ -172,6 +178,14 @@ func New(
 
 func DefaultReconnectDelay() time.Duration {
 	return defaultReconnectDelay
+}
+
+func (c *Collector) Exchange() string {
+	return c.rest.Exchange()
+}
+
+func (c *Collector) Market() string {
+	return c.rest.Market()
 }
 
 func (c *Collector) Stats() Stats {
@@ -238,37 +252,96 @@ func (c *Collector) RunRealtime(ctx context.Context) error {
 }
 
 func (c *Collector) run(ctx context.Context, backfill bool) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	producerCtx, cancelProducers := context.WithCancel(ctx)
+	defer cancelProducers()
 	if backfill {
-		if err := c.Backfill(ctx); err != nil {
+		if err := c.Backfill(producerCtx); err != nil {
 			return err
 		}
 	}
 
+	workerCtx, cancelWorkers := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelWorkers()
 	var eventWorkerWG sync.WaitGroup
-	c.startEventWorkers(ctx, &eventWorkerWG)
-	c.startLatestEventFlusher(ctx, &eventWorkerWG)
+	c.startEventWorkers(workerCtx, &eventWorkerWG)
+	c.startLatestEventFlusher(producerCtx, &eventWorkerWG)
 
 	errCh := make(chan error, 2)
 
 	go func() {
-		errCh <- c.runWebSocketLoop(ctx)
+		errCh <- c.runWebSocketLoop(producerCtx)
 	}()
 
 	go func() {
-		errCh <- c.runPollingLoop(ctx)
+		errCh <- c.runPollingLoop(producerCtx)
 	}()
 
 	firstErr := <-errCh
-	if firstErr != nil && ctx.Err() == nil {
-		c.setMarketUnavailable(ctx, firstErr.Error())
+	if firstErr != nil && producerCtx.Err() == nil {
+		c.setMarketUnavailable(producerCtx, firstErr.Error())
 	}
-	cancel()
+	cancelProducers()
 	secondErr := <-errCh
+	drained := c.waitForEventDrain(c.eventDrainTimeout())
+	if !drained {
+		slog.Error(
+			"collector event queue drain timed out",
+			"exchange", c.rest.Exchange(),
+			"market", c.rest.Market(),
+			"timeout", c.eventDrainTimeout(),
+			"pending_events", c.eventPending.Load(),
+			"queue_length", len(c.eventQueue),
+			"queue_capacity", cap(c.eventQueue),
+		)
+	}
+	cancelWorkers()
 	eventWorkerWG.Wait()
 	if firstErr != nil {
 		return firstErr
 	}
 	return secondErr
+}
+
+func (c *Collector) eventDrainTimeout() time.Duration {
+	if c.options.EventDrainTimeout > 0 {
+		return c.options.EventDrainTimeout
+	}
+	return defaultEventDrainTimeout
+}
+
+func (c *Collector) waitForEventDrain(timeout time.Duration) bool {
+	if c.eventPending.Load() == 0 {
+		return true
+	}
+	if timeout <= 0 {
+		for c.eventPending.Load() > 0 {
+			<-c.eventDrainNotify
+		}
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-c.eventDrainNotify:
+			if c.eventPending.Load() == 0 {
+				return true
+			}
+		case <-timer.C:
+			return c.eventPending.Load() == 0
+		}
+	}
+}
+
+func (c *Collector) addPendingEvent() {
+	c.eventPending.Add(1)
+}
+
+func (c *Collector) completePendingEvent() {
+	if c.eventPending.Add(-1) == 0 {
+		select {
+		case c.eventDrainNotify <- struct{}{}:
+		default:
+		}
+	}
 }

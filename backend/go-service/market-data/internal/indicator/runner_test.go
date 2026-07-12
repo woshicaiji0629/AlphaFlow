@@ -37,6 +37,16 @@ type fakeStore struct {
 	maxActiveRangeCalls      atomic.Int64
 }
 
+type batchFakeStore struct {
+	*fakeStore
+	batches [][]model.IndicatorSnapshot
+}
+
+func (s *batchFakeStore) SetIndicators(_ context.Context, snapshots []model.IndicatorSnapshot) error {
+	s.batches = append(s.batches, append([]model.IndicatorSnapshot(nil), snapshots...))
+	return nil
+}
+
 func (s *fakeStore) IsSymbolAvailable(context.Context, string, string, string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -102,6 +112,38 @@ func (s *fakeStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 	s.snapshots = append(s.snapshots, snapshot)
 	s.writeOrder = append(s.writeOrder, "indicator")
 	return nil
+}
+
+func TestStoreMissingClosedIndicatorsUsesBatchStore(t *testing.T) {
+	store := &batchFakeStore{fakeStore: &fakeStore{}}
+	runner := NewRunner(store, RunnerOptions{})
+	snapshots := []model.IndicatorSnapshot{{OpenTime: 1000}, {OpenTime: 2000}, {OpenTime: 3000}}
+
+	if err := runner.storeMissingClosedIndicators(context.Background(), snapshots, 1000, true); err != nil {
+		t.Fatalf("storeMissingClosedIndicators: %v", err)
+	}
+	if len(store.batches) != 1 {
+		t.Fatalf("batches = %d, want 1", len(store.batches))
+	}
+	if got := store.batches[0]; len(got) != 2 || got[0].OpenTime != 2000 || got[1].OpenTime != 3000 {
+		t.Fatalf("batch = %#v, want open times [2000 3000]", got)
+	}
+	if len(store.snapshots) != 0 {
+		t.Fatalf("fallback snapshots = %d, want 0", len(store.snapshots))
+	}
+}
+
+func TestStoreMissingClosedIndicatorsFallsBackToSingleWrites(t *testing.T) {
+	store := &fakeStore{}
+	runner := NewRunner(store, RunnerOptions{})
+	snapshots := []model.IndicatorSnapshot{{OpenTime: 1000}, {OpenTime: 2000}, {OpenTime: 3000}}
+
+	if err := runner.storeMissingClosedIndicators(context.Background(), snapshots, 1000, true); err != nil {
+		t.Fatalf("storeMissingClosedIndicators: %v", err)
+	}
+	if got := store.snapshots; len(got) != 2 || got[0].OpenTime != 2000 || got[1].OpenTime != 3000 {
+		t.Fatalf("snapshots = %#v, want open times [2000 3000]", got)
+	}
 }
 
 func (s *fakeStore) SetIndicatorWindow(

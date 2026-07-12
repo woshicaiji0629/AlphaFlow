@@ -19,6 +19,8 @@ import (
 	"alphaflow/go-service/pkg/redisclient"
 )
 
+const collectorStatsLogInterval = 30 * time.Second
+
 func Run(ctx context.Context, configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -106,6 +108,11 @@ func runMarketData(
 			runCollectorRealtimeLoop(ctx, c, restartDelay)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runCollectorStatsLogger(ctx, collectors, collectorStatsLogInterval)
+	}()
 
 	if err := runStartupBackfill(ctx, collectors); err != nil {
 		cancel()
@@ -202,4 +209,64 @@ func runCollectorRealtimeLoop(ctx context.Context, c *collector.Collector, resta
 		case <-time.After(restartDelay):
 		}
 	}
+}
+
+func runCollectorStatsLogger(ctx context.Context, collectors []*collector.Collector, interval time.Duration) {
+	if interval <= 0 {
+		interval = collectorStatsLogInterval
+	}
+	previous := make(map[*collector.Collector]collector.Stats, len(collectors))
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, c := range collectors {
+				current := c.Stats()
+				logCollectorStats(c, previous[c], current)
+				previous[c] = current
+			}
+		}
+	}
+}
+
+func logCollectorStats(c *collector.Collector, previous collector.Stats, current collector.Stats) {
+	level := collectorStatsLogLevel(previous, current)
+	slog.Log(
+		context.Background(),
+		level,
+		"collector runtime stats",
+		"exchange", c.Exchange(),
+		"market", c.Market(),
+		"processed_events", current.ProcessedEvents,
+		"process_event_errors", current.ProcessEventErrors,
+		"dropped_latest_events", current.DroppedLatestEvents,
+		"coalesced_latest_events", current.CoalescedLatestEvents,
+		"flushed_latest_events", current.FlushedLatestEvents,
+		"queue_length", current.QueueLen,
+		"queue_capacity", current.QueueCap,
+		"queue_peak", current.QueuePeak,
+		"source_delay_max_ms", current.SourceDelayMaxMillis,
+		"queue_delay_max_ms", current.QueueDelayMaxMillis,
+		"process_max_ms", current.ProcessMaxMillis,
+		"out_of_order_events", current.OutOfOrderEvents,
+		"duplicate_kline_events", current.DuplicateKlineEvents,
+		"stale_kline_events", current.StaleKlineEvents,
+		"kline_gaps_detected", current.KlineGapsDetected,
+		"kline_gap_request_errors", current.KlineGapRequestErrors,
+	)
+}
+
+func collectorStatsLogLevel(previous collector.Stats, current collector.Stats) slog.Level {
+	queueHigh := current.QueueCap > 0 && current.QueueLen*100 >= current.QueueCap*80
+	newErrors := current.ProcessEventErrors > previous.ProcessEventErrors ||
+		current.DroppedLatestEvents > previous.DroppedLatestEvents ||
+		current.KlineGapRequestErrors > previous.KlineGapRequestErrors
+	if queueHigh || newErrors {
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
 }

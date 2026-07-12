@@ -124,14 +124,18 @@ func newAISourceState(input aiSourceInput) *aiSourceState {
 }
 
 func cloneAISourceInput(input aiSourceInput) aiSourceInput {
+	return cloneAISourceInputWithExtra(input, 0)
+}
+
+func cloneAISourceInputWithExtra(input aiSourceInput, extra int) aiSourceInput {
 	for index := range input.sources {
-		input.sources[index] = append([]float64(nil), input.sources[index]...)
+		input.sources[index] = cloneSliceWithExtra(input.sources[index], extra)
 	}
-	input.highs = append([]float64(nil), input.highs...)
-	input.lows = append([]float64(nil), input.lows...)
-	input.closes = append([]float64(nil), input.closes...)
-	input.atr14 = append([]float64(nil), input.atr14...)
-	input.stATR = append([]float64(nil), input.stATR...)
+	input.highs = cloneSliceWithExtra(input.highs, extra)
+	input.lows = cloneSliceWithExtra(input.lows, extra)
+	input.closes = cloneSliceWithExtra(input.closes, extra)
+	input.atr14 = cloneSliceWithExtra(input.atr14, extra)
+	input.stATR = cloneSliceWithExtra(input.stATR, extra)
 	return input
 }
 
@@ -174,11 +178,15 @@ func (s *aiSourceState) result(closes []float64) (aiSourceResult, bool) {
 }
 
 func (s *aiSourceState) clone() *aiSourceState {
+	return s.cloneWithExtraCapacity(0)
+}
+
+func (s *aiSourceState) cloneWithExtraCapacity(extra int) *aiSourceState {
 	if s == nil {
 		return nil
 	}
 	cloned := *s
-	cloned.input = cloneAISourceInput(s.input)
+	cloned.input = cloneAISourceInputWithExtra(s.input, extra)
 	for index := range s.featureCursors {
 		if len(cloned.input.sources[index]) > 0 {
 			cloned.featureCursors[index].source = cloned.input.sources[index]

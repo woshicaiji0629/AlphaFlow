@@ -27,9 +27,10 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - `market-data` 已通过 NATS JetStream 发布已收盘和未收盘 market snapshot，供 `strategy-engine` 运行期更新内存态。
 - ClickHouse 保存已闭合 K 线历史。
 - 指标计算和窗口分析已下沉到公共包，供实时服务、回测和未来重算复用。
-- 指标 runner 已按 K 线预热、指标计算、窗口分析三层拆分：启动先准备连续 K 线，再补齐底层指标 snapshot，最后窗口分析只读取 recent 指标缓存；闭合指标和窗口特征 Redis 写入合并为 pipeline，扫描型冷启动任务进入 NATS JetStream 内部队列并由 `market-data` 进程内 worker 消费。
+- 指标 runner 已按 K 线预热、指标计算、窗口分析三层拆分：启动先准备连续 K 线，再补齐底层指标 snapshot，最后窗口分析只读取 recent 指标缓存；闭合指标和窗口特征 Redis 写入合并为 pipeline，同一任务补齐的冷启动指标历史也批量写入 Redis，扫描型冷启动任务进入 NATS JetStream 内部队列并由 `market-data` 进程内 worker 消费。
 - 指标计算已流式化主要热点路径：`CalculationWindow` 复用 SMA、EMA、RSI、ATR、ADX/DI、MACD、OBV、VWAP、WaveTrend、MoneyFlow、AI Source 和 Adaptive Supertrend 状态；在线和回测稳态都只为新收盘 K 线推进一次状态。
-- 指标计算局部热点已继续削减重复工作：`CalculateWindow` 正常路径避免重复解析，Nadaraya-Watson envelope 复用栈上权重缓存，MoneyFlow 区间最高/最低扫描抽成公共 helper。
+- 指标计算局部热点已继续削减重复工作：`CalculateWindow` 正常路径避免重复解析，Nadaraya-Watson envelope 复用栈上权重缓存，MoneyFlow 区间最高/最低扫描抽成公共 helper；AI Source realtime preview 复用 prefix 并递推单点 ATR，避免每个 tick 重算完整 ATR 序列。
+- Collector 已周期输出队列、延迟、丢弃、错误和 K 线 gap 统计；正常关闭时先停止 producer，再最多等待 `10s` 排空已入队 critical event，异常退出后的缺口仍由启动 REST backfill 补偿。
 - 最近一次小样本本地指标负载验证使用 `symbols=2`、四个模拟交易所、服务当前周期集合、`lookback=300`、`warmup=250`、`window-lookback=50`、`runs=2` 和 `advance-each-run`，结果中 `tasks=56`、`calculate_window_calls=2856`，等于冷启动 `56 * 50` 加第二轮稳态 `56 * 1`；该结果只验证计算次数收敛，不是生产 SLA。
 
 ### 策略框架
@@ -124,7 +125,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - Control API 和前端基础链路已实现；账户挂载、订阅、订单、用户管理和审计查询页面仍待补齐。
 - ClickHouse 表当前通过 `CREATE TABLE IF NOT EXISTS` 初始化，后续字段变更需要单独迁移策略。
 - top500 场景下的 Redis ops、NATS market snapshot 积压、NATS strategy decision 积压、ClickHouse 写入和实时采集延迟仍需要长时间全链路压测确认；不能把最近一次小样本压测结果当作生产 SLA。
-- 冷启动会为最近窗口写入底层指标 snapshot 和窗口快照，Redis 写入次数会随 `tasks * window-lookback` 增长；top500 长跑后再判断是否需要异步刷 Redis、批量压缩或降低写入频率。
+- 冷启动 snapshot 数量仍随 `tasks * window-lookback` 增长，但同一任务的指标历史已合并为一次批量 Redis pipeline；top500 长跑后再根据 Redis ops、payload 大小和队列积压判断是否需要异步刷 Redis 或降低写入频率。
 - Redis 指标写入当前仍保留同步路径；已收盘异步刷 Redis、未收盘定期刷 Redis 还未实现。
 - `market-health` 当前主要观测 Redis health/cursor 和队列状态，还没有完整覆盖 `strategy-engine` 内存市场态和 market snapshot 消费延迟。
 

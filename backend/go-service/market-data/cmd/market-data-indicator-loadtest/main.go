@@ -23,6 +23,7 @@ type loadStore struct {
 	redisLatency   time.Duration
 	rangeReads     atomic.Uint64
 	redisWrites    atomic.Uint64
+	redisBatches   atomic.Uint64
 	lastIndicators map[string]int64
 	snapshots      map[string][]model.IndicatorSnapshot
 	snapshotLimit  int
@@ -89,6 +90,20 @@ func (s *loadStore) SetIndicator(_ context.Context, snapshot model.IndicatorSnap
 	s.redisWrites.Add(1)
 	s.mu.Lock()
 	s.rememberIndicatorLocked(snapshot)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *loadStore) SetIndicators(_ context.Context, snapshots []model.IndicatorSnapshot) error {
+	if s.redisLatency > 0 {
+		time.Sleep(s.redisLatency)
+	}
+	s.redisWrites.Add(uint64(len(snapshots)))
+	s.redisBatches.Add(1)
+	s.mu.Lock()
+	for _, snapshot := range snapshots {
+		s.rememberIndicatorLocked(snapshot)
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -223,10 +238,13 @@ func main() {
 	})
 
 	startedAt := time.Now()
+	runDurations := make([]time.Duration, 0, *runs)
 	for run := 0; run < *runs; run++ {
+		runStartedAt := time.Now()
 		if err := runner.RunOnce(context.Background()); err != nil {
 			exitWithError("RunOnce failed", "run", run+1, "error", err)
 		}
+		runDurations = append(runDurations, time.Since(runStartedAt))
 		if *advanceEachRun && run < *runs-1 {
 			store.AdvanceClosedKline()
 		}
@@ -246,9 +264,24 @@ func main() {
 		*redisLatency,
 	)
 	fmt.Printf("elapsed=%s throughput=%.2f tasks/s\n", elapsed, float64(tasks*(*runs))/elapsed.Seconds())
-	fmt.Printf("range_reads=%d redis_writes=%d recent_indicator_reads=%d recent_indicator_hits=%d recent_indicator_misses=%d calculate_window_calls=%d\n",
+	for run, duration := range runDurations {
+		phase := "repeat"
+		if run == 0 {
+			phase = "cold"
+		} else if *advanceEachRun {
+			phase = "steady_advance"
+		}
+		fmt.Printf("run=%d phase=%s elapsed=%s throughput=%.2f tasks/s\n",
+			run+1,
+			phase,
+			duration,
+			float64(tasks)/duration.Seconds(),
+		)
+	}
+	fmt.Printf("range_reads=%d redis_writes=%d redis_batches=%d recent_indicator_reads=%d recent_indicator_hits=%d recent_indicator_misses=%d calculate_window_calls=%d\n",
 		store.rangeReads.Load(),
 		store.redisWrites.Load(),
+		store.redisBatches.Load(),
 		store.recentIndicatorReads.Load(),
 		store.recentIndicatorHits.Load(),
 		store.recentIndicatorMisses.Load(),

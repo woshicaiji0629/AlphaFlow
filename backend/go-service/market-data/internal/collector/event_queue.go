@@ -120,19 +120,22 @@ func (c *Collector) runEventWorker(ctx context.Context, worker int) {
 		case <-ctx.Done():
 			return
 		case event := <-c.eventQueue:
-			if err := c.processEvent(ctx, event); err != nil {
-				c.stats.processEventErrors.Add(1)
-				slog.Error(
-					"process collector event failed",
-					"exchange", c.rest.Exchange(),
-					"market", c.rest.Market(),
-					"worker", worker,
-					"event_type", event.eventType,
-					"symbol", event.symbol(),
-					"interval", event.interval(),
-					"error", err,
-				)
-			}
+			func() {
+				defer c.completePendingEvent()
+				if err := c.processEvent(ctx, event); err != nil {
+					c.stats.processEventErrors.Add(1)
+					slog.Error(
+						"process collector event failed",
+						"exchange", c.rest.Exchange(),
+						"market", c.rest.Market(),
+						"worker", worker,
+						"event_type", event.eventType,
+						"symbol", event.symbol(),
+						"interval", event.interval(),
+						"error", err,
+					)
+				}
+			}()
 		}
 	}
 }
@@ -144,8 +147,10 @@ func (c *Collector) enqueueEvent(ctx context.Context, event collectorEvent) erro
 		return nil
 	}
 	if event.isCritical() {
+		c.addPendingEvent()
 		select {
 		case <-ctx.Done():
+			c.completePendingEvent()
 			return nil
 		case c.eventQueue <- event:
 			c.recordQueueLen()
@@ -155,13 +160,16 @@ func (c *Collector) enqueueEvent(ctx context.Context, event collectorEvent) erro
 
 	timer := time.NewTimer(latestEventEnqueueTTL)
 	defer timer.Stop()
+	c.addPendingEvent()
 	select {
 	case <-ctx.Done():
+		c.completePendingEvent()
 		return nil
 	case c.eventQueue <- event:
 		c.recordQueueLen()
 		return nil
 	case <-timer.C:
+		c.completePendingEvent()
 		c.stats.droppedLatestEvents.Add(1)
 		slog.Warn(
 			"drop collector event after enqueue timeout",

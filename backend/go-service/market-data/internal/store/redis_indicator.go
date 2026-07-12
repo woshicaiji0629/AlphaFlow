@@ -76,6 +76,58 @@ func (s *RedisStore) SetIndicatorWithOpenTime(ctx context.Context, snapshot mode
 	return nil
 }
 
+func (s *RedisStore) SetIndicatorsWithOpenTime(ctx context.Context, snapshots []model.IndicatorSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	latest := snapshots[len(snapshots)-1]
+	indicatorKey := model.IndicatorKey(latest.Exchange, latest.Market, latest.Symbol, latest.Interval)
+	lastKey := model.IndicatorLastKey(latest.Exchange, latest.Market, latest.Symbol, latest.Interval)
+	historyIndexKey := indicatorHistoryIndexKey(latest)
+	historyDataKey := indicatorHistoryDataKey(latest)
+	historyFields := make([]interface{}, 0, len(snapshots)*2)
+	historyIndexes := make([]redis.Z, 0, len(snapshots))
+	var latestPayload []byte
+	for index, snapshot := range snapshots {
+		if snapshot.Exchange != latest.Exchange || snapshot.Market != latest.Market ||
+			snapshot.Symbol != latest.Symbol || snapshot.Interval != latest.Interval {
+			return fmt.Errorf("set indicators: mixed snapshot identity")
+		}
+		payload, err := json.Marshal(snapshot)
+		if err != nil {
+			return fmt.Errorf("marshal indicator: %w", err)
+		}
+		field := strconv.FormatInt(snapshot.OpenTime, 10)
+		historyFields = append(historyFields, field, payload)
+		historyIndexes = append(historyIndexes, redis.Z{Score: float64(snapshot.OpenTime), Member: field})
+		if index == len(snapshots)-1 {
+			latestPayload = payload
+		}
+	}
+
+	pipe := s.client.Pipeline()
+	pipe.Set(ctx, indicatorKey, latestPayload, s.retention.LatestTTL)
+	pipe.Set(ctx, lastKey, strconv.FormatInt(latest.OpenTime, 10), s.retention.LatestTTL)
+	pipe.HSet(ctx, historyDataKey, historyFields...)
+	pipe.ZAdd(ctx, historyIndexKey, historyIndexes...)
+	s.maintainIndicatorKeys([]string{indicatorKey, lastKey, historyIndexKey, historyDataKey}, func(key string) {
+		pipe.Expire(ctx, key, s.retention.LatestTTL)
+	})
+	s.maintainIndicatorKey(historyIndexKey+":trim", func() {
+		pipe.Eval(ctx, trimIndicatorHistoryScript, []string{historyIndexKey, historyDataKey}, indicatorHistoryTrimStopRank(s.retention.IndicatorLimit), s.retention.LatestTTL.Milliseconds())
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set indicators: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) SetIndicatorWindowWithOpenTime(
 	ctx context.Context,
 	snapshot model.IndicatorWindowSnapshot,

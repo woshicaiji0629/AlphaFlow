@@ -159,28 +159,31 @@ func (w *CalculationWindow) previewAISource(kline model.Kline) (aiSourceResult, 
 	if err != nil {
 		return aiSourceResult{}, false
 	}
-	start := 0
-	if w.limit > 0 && len(w.closes) >= w.limit {
-		start = len(w.closes) - w.limit + 1
-	}
-	opens := append(append([]float64(nil), w.opens[start:]...), open)
-	highs := append(append([]float64(nil), w.highs[start:]...), high)
-	lows := append(append([]float64(nil), w.lows[start:]...), low)
-	closes := append(append([]float64(nil), w.closes[start:]...), closeValue)
 	cfg := defaultAISourceConfig()
-	atr14, ok14 := atrSeries(highs, lows, closes, 14)
-	stATR, okST := atrSeries(highs, lows, closes, cfg.stLength)
+	atr14Value, ok14 := nextAISourceATR(w.aiPrefix.input, high, low, 14)
+	stATRValue, okST := nextAISourceATR(w.aiPrefix.input, high, low, cfg.stLength)
 	if !ok14 || !okST {
 		return aiSourceResult{}, false
 	}
-	input := aiSourceInput{sources: [4][]float64{opens, highs, lows, closes}, highs: highs, lows: lows, closes: closes,
-		atr14: atr14, atr14Offset: len(closes) - len(atr14), stATR: stATR, stATROffset: len(closes) - len(stATR), config: cfg}
-	state := w.aiPrefix.clone()
-	for index := range state.featureCursors {
-		state.featureCursors[index].source = input.sources[index]
+	state := w.aiPrefix.cloneWithExtraCapacity(1)
+	return state.appendClosed(open, high, low, closeValue, atr14Value, stATRValue)
+}
+
+func nextAISourceATR(input aiSourceInput, high float64, low float64, period int) (float64, bool) {
+	if period <= 0 || len(input.closes) == 0 {
+		return 0, false
 	}
-	state.append(input, len(closes)-1, appendAISourceState)
-	return state.result(closes)
+	series := input.atr14
+	if period == input.config.stLength {
+		series = input.stATR
+	}
+	if len(series) == 0 {
+		return 0, false
+	}
+	previousATR := series[len(series)-1]
+	previousClose := input.closes[len(input.closes)-1]
+	trueRange := maxFloat(high-low, absFloat(high-previousClose), absFloat(low-previousClose))
+	return (previousATR*float64(period-1) + trueRange) / float64(period), true
 }
 
 func (w *CalculationWindow) Reset(klines []model.Kline) {

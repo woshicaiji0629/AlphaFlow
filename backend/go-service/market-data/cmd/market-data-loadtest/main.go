@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,9 +42,13 @@ func (fakeREST) FetchOpenInterest(context.Context, string) (model.OpenInterest, 
 	return model.OpenInterest{}, nil
 }
 
-type blockingWS struct{}
+type blockingWS struct {
+	started chan struct{}
+	once    sync.Once
+}
 
-func (blockingWS) Run(ctx context.Context, _ []exchange.Stream, _ exchange.Handler) error {
+func (w *blockingWS) Run(ctx context.Context, _ []exchange.Stream, _ exchange.Handler) error {
+	w.once.Do(func() { close(w.started) })
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -140,6 +145,7 @@ func main() {
 
 	symbols := makeSymbols(*symbolCount)
 	store := &loadStore{latency: *storeLatency}
+	ws := &blockingWS{started: make(chan struct{})}
 	c := collector.New(collector.Options{
 		Symbols:              symbols,
 		Intervals:            []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"},
@@ -149,15 +155,24 @@ func main() {
 		PollOpenInterest:     false,
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
-	}, fakeREST{symbols: symbols}, blockingWS{}, store)
+	}, fakeREST{symbols: symbols}, ws, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.Run(ctx)
+		errCh <- c.RunRealtime(ctx)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-ws.started:
+	case err := <-errCh:
+		if err == nil {
+			exitWithError("collector stopped before load started")
+		}
+		exitWithError("collector stopped before load started", "error", err)
+	case <-time.After(5 * time.Second):
+		exitWithError("collector did not become ready")
+	}
 
 	startedAt := time.Now()
 	sent := runLoad(ctx, c, symbols, *duration, *rate)

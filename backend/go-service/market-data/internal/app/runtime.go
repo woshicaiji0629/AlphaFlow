@@ -114,20 +114,7 @@ func buildRuntime(
 		indicatorRunnerOptions.TaskMaxDeliveries = cfg.Indicator.MaxDeliveries
 		indicatorRunnerOptions.TaskWorkers = cfg.Indicator.WorkerCount
 	}
-	indicatorRunner := indicator.NewRunner(marketStore, indicator.RunnerOptions{
-		Rules:             indicatorRunnerOptions.Rules,
-		ScanInterval:      indicatorRunnerOptions.ScanInterval,
-		LookbackPeriods:   indicatorRunnerOptions.LookbackPeriods,
-		WarmupPeriods:     indicatorRunnerOptions.WarmupPeriods,
-		CalculateOptions:  indicatorRunnerOptions.CalculateOptions,
-		Publisher:         indicatorRunnerOptions.Publisher,
-		PublishTTL:        indicatorRunnerOptions.PublishTTL,
-		TaskQueue:         indicatorRunnerOptions.TaskQueue,
-		TaskBatch:         indicatorRunnerOptions.TaskBatch,
-		TaskMaxWait:       indicatorRunnerOptions.TaskMaxWait,
-		TaskMaxDeliveries: indicatorRunnerOptions.TaskMaxDeliveries,
-		TaskWorkers:       indicatorRunnerOptions.TaskWorkers,
-	})
+	indicatorRunner := indicator.NewRunner(marketStore, indicatorRunnerOptions)
 	healthRunner := health.NewRunner(marketStore, health.Options{
 		Rules:        healthRules(cfg),
 		ScanInterval: config.HealthScanInterval(),

@@ -10,6 +10,10 @@ func (s *MarketStore) SetIndicator(ctx context.Context, snapshot model.Indicator
 	return s.redis.SetIndicatorWithOpenTime(ctx, snapshot)
 }
 
+func (s *MarketStore) SetIndicators(ctx context.Context, snapshots []model.IndicatorSnapshot) error {
+	return s.redis.SetIndicatorsWithOpenTime(ctx, snapshots)
+}
+
 func (s *MarketStore) SetClosedIndicator(
 	ctx context.Context,
 	snapshot model.IndicatorSnapshot,

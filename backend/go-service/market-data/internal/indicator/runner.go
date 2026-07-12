@@ -66,6 +66,10 @@ type symbolAvailabilityStore interface {
 	IsSymbolAvailable(ctx context.Context, exchange string, market string, symbol string) (bool, error)
 }
 
+type indicatorBatchStore interface {
+	SetIndicators(ctx context.Context, snapshots []model.IndicatorSnapshot) error
+}
+
 type Rule struct {
 	Exchange  string
 	Market    string
@@ -517,10 +521,20 @@ func (r *Runner) storeMissingClosedIndicators(
 	lastIndicatorOpenTime int64,
 	hasLastIndicator bool,
 ) error {
+	missing := make([]model.IndicatorSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		if hasLastIndicator && snapshot.OpenTime <= lastIndicatorOpenTime {
 			continue
 		}
+		missing = append(missing, snapshot)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if batchStore, ok := r.store.(indicatorBatchStore); ok {
+		return batchStore.SetIndicators(ctx, missing)
+	}
+	for _, snapshot := range missing {
 		if err := r.store.SetIndicator(ctx, snapshot); err != nil {
 			return err
 		}

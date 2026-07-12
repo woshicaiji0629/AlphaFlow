@@ -1150,6 +1150,39 @@ func TestCriticalEventWaitsWhenQueueIsFull(t *testing.T) {
 	}
 }
 
+func TestWaitForEventDrainCompletesWithinTimeout(t *testing.T) {
+	c := New(testOptions(), &fakeREST{}, nil, &fakeStore{})
+	c.addPendingEvent()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		c.completePendingEvent()
+	}()
+
+	if !c.waitForEventDrain(time.Second) {
+		t.Fatal("waitForEventDrain timed out")
+	}
+	if pending := c.eventPending.Load(); pending != 0 {
+		t.Fatalf("pending = %d, want 0", pending)
+	}
+}
+
+func TestWaitForEventDrainTimesOutAndCanBeReused(t *testing.T) {
+	c := New(testOptions(), &fakeREST{}, nil, &fakeStore{})
+	c.addPendingEvent()
+	startedAt := time.Now()
+	if c.waitForEventDrain(20 * time.Millisecond) {
+		t.Fatal("waitForEventDrain unexpectedly completed")
+	}
+	if elapsed := time.Since(startedAt); elapsed < 15*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("elapsed = %s, want bounded timeout", elapsed)
+	}
+
+	c.completePendingEvent()
+	if !c.waitForEventDrain(20 * time.Millisecond) {
+		t.Fatal("waitForEventDrain did not recover after pending event completed")
+	}
+}
+
 func testOptions() Options {
 	return Options{
 		Symbols:              []string{"ETHUSDT"},
