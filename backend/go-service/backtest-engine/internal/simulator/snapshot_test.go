@@ -161,6 +161,48 @@ func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 	}
 }
 
+func TestContextIteratorCloseStopsProducers(t *testing.T) {
+	const minute = int64(60_000)
+	dataset := reader.Dataset{Series: []reader.SeriesResult{
+		{Key: reader.SeriesKey{Symbol: "ETHUSDT", Interval: "1m"}, Result: reader.Result{
+			Klines: testKlines("ETHUSDT", "1m", []int64{0, minute, 2 * minute}), End: 3 * minute,
+		}},
+		{Key: reader.SeriesKey{Symbol: "ETHUSDT", Interval: "5m"}, Result: reader.Result{
+			Klines: testKlines("ETHUSDT", "5m", []int64{-5 * minute, 0}), End: 3 * minute,
+		}},
+	}}
+	builder, err := NewSnapshotBuilder(SnapshotBuilderOptions{
+		Dataset:  dataset,
+		Target:   strategy.Target{Exchange: "binance", Market: "um", Symbol: "ETHUSDT"},
+		Interval: "1m", ConfirmIntervals: []string{"5m"}, IndicatorBatchSize: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterator, err := builder.Iterator(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	iterator.Close()
+	iterator.Close()
+
+	for key, state := range builder.stateByKey {
+		timeout := time.After(time.Second)
+		for {
+			select {
+			case _, ok := <-state.batches:
+				if !ok {
+					goto nextProducer
+				}
+			case <-timeout:
+				t.Fatalf("producer %s/%s did not stop after close", key.Symbol, key.Interval)
+			}
+		}
+	nextProducer:
+	}
+}
+
 func testKlines(symbol string, interval string, openTimes []int64) []marketmodel.Kline {
 	intervalMillis, err := marketmodel.IntervalMillis(interval)
 	if err != nil {

@@ -307,6 +307,11 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 	}
 	summary := simulator.ExecutionSummary{}
 	iteratorStates := []contextIteratorState{}
+	defer func() {
+		for _, state := range iteratorStates {
+			state.iterator.Close()
+		}
+	}()
 	indicatorConcurrency := cfg.Data.IndicatorConcurrency
 	if indicatorConcurrency <= 0 {
 		indicatorConcurrency = runtime.GOMAXPROCS(0)

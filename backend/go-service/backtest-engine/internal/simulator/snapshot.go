@@ -131,6 +131,7 @@ func (b *SnapshotBuilder) Build(ctx context.Context) ([]strategy.Context, error)
 	if err != nil {
 		return nil, err
 	}
+	defer iterator.Close()
 	contexts := []strategy.Context{}
 	for {
 		item, ok, err := iterator.Next(ctx)
@@ -153,9 +154,17 @@ func (b *SnapshotBuilder) Iterator(ctx context.Context) (*ContextIterator, error
 	}
 	entry, err := b.series(b.target.Symbol, b.interval)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	return &ContextIterator{builder: b, entry: entry, cancel: cancel}, nil
+}
+
+func (i *ContextIterator) Close() {
+	if i == nil || i.cancel == nil {
+		return
+	}
+	i.cancel()
 }
 
 func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok bool, err error) {
@@ -164,7 +173,7 @@ func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok b
 	}
 	defer func() {
 		if err != nil {
-			i.cancel()
+			i.Close()
 		}
 	}()
 	for i.index < len(i.entry.Result.Klines) {
@@ -186,7 +195,7 @@ func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok b
 			continue
 		}
 		if current.OpenTime >= i.entry.Result.End {
-			i.cancel()
+			i.Close()
 			return strategy.Context{}, false, nil
 		}
 		item, err := i.builder.buildAt(current)
@@ -198,7 +207,7 @@ func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok b
 		}
 		return item, true, nil
 	}
-	i.cancel()
+	i.Close()
 	return strategy.Context{}, false, nil
 }
 
