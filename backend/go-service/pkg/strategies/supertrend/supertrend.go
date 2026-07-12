@@ -504,8 +504,8 @@ func numericString(snapshot strategy.Snapshot, key string) string {
 	if series, ok := snapshot.Window.Values[key]; ok && series.Latest > 0 {
 		return fmt.Sprintf("%g", series.Latest)
 	}
-	if value := snapshot.Indicator.Values[key]; value != "" {
-		return value
+	if value, ok := snapshot.Indicator.Float(key); ok {
+		return strconv.FormatFloat(value, 'f', -1, 64)
 	}
 	return ""
 }

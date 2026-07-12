@@ -3,6 +3,10 @@ package indicatorcalc
 import "math"
 
 func addSqueezeMomentum(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addSqueezeMomentumToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addSqueezeMomentumToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	const (
 		length   = 20
 		multKC   = 1.5
@@ -23,8 +27,7 @@ func addSqueezeMomentum(values map[string]string, signals map[string]string, hig
 	if !ok {
 		return
 	}
-	ranges := trueRangeSeries(highs, lows, closes)
-	rangeMA, ok := sma(ranges, lengthKC)
+	rangeMA, ok := recentTrueRangeMean(highs, lows, closes, lengthKC)
 	if !ok {
 		return
 	}
@@ -42,8 +45,8 @@ func addSqueezeMomentum(values map[string]string, signals map[string]string, hig
 	if !ok {
 		return
 	}
-	setValue(values, "squeeze_momentum", momentum, true)
-	setValue(values, "squeeze_momentum_delta", momentum-previous, true)
+	setValueTarget(target, values, "squeeze_momentum", momentum, true)
+	setValueTarget(target, values, "squeeze_momentum_delta", momentum-previous, true)
 	signals["squeeze_state"] = squeezeState(squeeze, momentum, previous)
 	switch {
 	case momentum > 0 && momentum >= previous:
@@ -57,6 +60,22 @@ func addSqueezeMomentum(values map[string]string, signals map[string]string, hig
 	default:
 		signals["momentum_state"] = "flat"
 	}
+}
+
+func recentTrueRangeMean(highs []float64, lows []float64, closes []float64, period int) (float64, bool) {
+	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) {
+		return 0, false
+	}
+	start := len(closes) - period
+	total := 0.0
+	for index := start; index < len(closes); index++ {
+		total += maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+	}
+	return total / float64(period), true
 }
 
 func squeezeState(squeeze string, momentum float64, previous float64) string {
@@ -82,6 +101,10 @@ func addBollingerFeatures(values map[string]string, signals map[string]string, c
 }
 
 func addBollingerFeaturesWithContext(values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
+	addBollingerFeaturesWithContextToSet(nil, values, signals, closes, features)
+}
+
+func addBollingerFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
 	upper, middle, lower, ok := 0.0, 0.0, 0.0, false
 	if features != nil {
 		upper, middle, lower, ok = features.bollinger(20, 2)
@@ -93,9 +116,9 @@ func addBollingerFeaturesWithContext(values map[string]string, signals map[strin
 	}
 	last := closes[len(closes)-1]
 	width := (upper - lower) / middle * 100
-	setValue(values, "bb_width_pct", width, true)
-	setValue(values, "bb_percent_b", (last-lower)/(upper-lower), true)
-	addBollingerShapeFeatures(values, signals, closes, width)
+	setValueTarget(target, values, "bb_width_pct", width, true)
+	setValueTarget(target, values, "bb_percent_b", (last-lower)/(upper-lower), true)
+	addBollingerShapeFeaturesToSet(target, values, signals, closes, width)
 	switch {
 	case last > upper:
 		signals["bb_position"] = "above_upper"
@@ -107,6 +130,10 @@ func addBollingerFeaturesWithContext(values map[string]string, signals map[strin
 }
 
 func addBollingerShapeFeatures(values map[string]string, signals map[string]string, closes []float64, currentWidth float64) {
+	addBollingerShapeFeaturesToSet(nil, values, signals, closes, currentWidth)
+}
+
+func addBollingerShapeFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, currentWidth float64) {
 	if len(closes) < 25 {
 		return
 	}
@@ -120,10 +147,10 @@ func addBollingerShapeFeatures(values map[string]string, signals map[string]stri
 	}
 	previousWidth := (prevUpper - prevLower) / prevMiddle * 100
 	widthDelta := currentWidth - previousWidth
-	setValue(values, "bb_width_delta", widthDelta, true)
-	setValue(values, "bb_middle_slope_pct", percentDistance(middle, prevMiddle), prevMiddle != 0)
-	setValue(values, "bb_upper_slope_pct", percentDistance(upper, prevUpper), prevUpper != 0)
-	setValue(values, "bb_lower_slope_pct", percentDistance(lower, prevLower), prevLower != 0)
+	setValueTarget(target, values, "bb_width_delta", widthDelta, true)
+	setValueTarget(target, values, "bb_middle_slope_pct", percentDistance(middle, prevMiddle), prevMiddle != 0)
+	setValueTarget(target, values, "bb_upper_slope_pct", percentDistance(upper, prevUpper), prevUpper != 0)
+	setValueTarget(target, values, "bb_lower_slope_pct", percentDistance(lower, prevLower), prevLower != 0)
 	signals["bb_width_state"] = bollingerWidthState(widthDelta, previousWidth)
 	signals["bb_trend"] = bollingerTrend(percentDistance(middle, prevMiddle))
 }
@@ -133,9 +160,13 @@ func addChannelFeatures(values map[string]string, signals map[string]string, hig
 }
 
 func addChannelFeaturesWithContext(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
+	addChannelFeaturesWithContextToSet(nil, values, signals, highs, lows, closes, features)
+}
+
+func addChannelFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
 	if features != nil {
 		if upper, lower, ok := features.donchian(20); ok {
-			addDonchianChannelFeaturesWithRange(values, signals, highs, lows, closes, 20, upper, lower)
+			addDonchianChannelFeaturesWithRangeToSet(target, values, signals, highs, lows, closes, 20, upper, lower)
 		} else {
 			addDonchianChannelFeatures(values, signals, highs, lows, closes, 20)
 		}
@@ -146,7 +177,7 @@ func addChannelFeaturesWithContext(values map[string]string, signals map[string]
 		atrValue, atrOK := features.atrValue(20)
 		middle, middleOK := features.emaValue(20)
 		if atrOK && middleOK {
-			addKeltnerChannelFeaturesWithValues(values, signals, closes, middle, atrValue, 2)
+			addKeltnerChannelFeaturesWithValuesToSet(target, values, signals, closes, middle, atrValue, 2)
 			return
 		}
 	}
@@ -162,16 +193,20 @@ func addDonchianChannelFeatures(values map[string]string, signals map[string]str
 }
 
 func addDonchianChannelFeaturesWithRange(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, upper float64, lower float64) {
+	addDonchianChannelFeaturesWithRangeToSet(nil, values, signals, highs, lows, closes, period, upper, lower)
+}
+
+func addDonchianChannelFeaturesWithRangeToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, upper float64, lower float64) {
 	if len(closes) == 0 {
 		return
 	}
 	middle := (upper + lower) / 2
 	last := closes[len(closes)-1]
-	setValue(values, "donchian_high20", upper, true)
-	setValue(values, "donchian_low20", lower, true)
-	setValue(values, "donchian_mid20", middle, true)
-	setValue(values, "donchian_width_pct20", (upper-lower)/middle*100, middle != 0)
-	setValue(values, "donchian_position20", (last-lower)/(upper-lower), upper != lower)
+	setValueTarget(target, values, "donchian_high20", upper, true)
+	setValueTarget(target, values, "donchian_low20", lower, true)
+	setValueTarget(target, values, "donchian_mid20", middle, true)
+	setValueTarget(target, values, "donchian_width_pct20", (upper-lower)/middle*100, middle != 0)
+	setValueTarget(target, values, "donchian_position20", (last-lower)/(upper-lower), upper != lower)
 	breakoutUpper := upper
 	breakoutLower := lower
 	if len(highs) > period && len(lows) > period {
@@ -200,17 +235,21 @@ func addKeltnerChannelFeaturesWithATR(values map[string]string, signals map[stri
 }
 
 func addKeltnerChannelFeaturesWithValues(values map[string]string, signals map[string]string, closes []float64, middle float64, atrValue float64, multiplier float64) {
+	addKeltnerChannelFeaturesWithValuesToSet(nil, values, signals, closes, middle, atrValue, multiplier)
+}
+
+func addKeltnerChannelFeaturesWithValuesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, middle float64, atrValue float64, multiplier float64) {
 	if len(closes) == 0 {
 		return
 	}
 	upper := middle + atrValue*multiplier
 	lower := middle - atrValue*multiplier
 	last := closes[len(closes)-1]
-	setValue(values, "keltner_upper20", upper, true)
-	setValue(values, "keltner_middle20", middle, true)
-	setValue(values, "keltner_lower20", lower, true)
-	setValue(values, "keltner_width_pct20", (upper-lower)/middle*100, middle != 0)
-	setValue(values, "keltner_position20", (last-lower)/(upper-lower), upper != lower)
+	setValueTarget(target, values, "keltner_upper20", upper, true)
+	setValueTarget(target, values, "keltner_middle20", middle, true)
+	setValueTarget(target, values, "keltner_lower20", lower, true)
+	setValueTarget(target, values, "keltner_width_pct20", (upper-lower)/middle*100, middle != 0)
+	setValueTarget(target, values, "keltner_position20", (last-lower)/(upper-lower), upper != lower)
 	signals["keltner_breakout"] = channelBreakout(last, upper, lower)
 }
 

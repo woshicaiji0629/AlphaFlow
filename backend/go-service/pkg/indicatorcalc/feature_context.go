@@ -1,5 +1,7 @@
 package indicatorcalc
 
+import "math"
+
 type cachedFloatSeries struct {
 	values []float64
 	ok     bool
@@ -31,6 +33,7 @@ type featureContext struct {
 	lows   []float64
 	closes []float64
 	basic  *basicIndicatorState
+	window *CalculationWindow
 
 	atrByPeriod   map[int]cachedFloatSeries
 	emaByPeriod   map[int]cachedFloat
@@ -39,8 +42,12 @@ type featureContext struct {
 }
 
 func newFeatureContext(highs []float64, lows []float64, closes []float64, basic *basicIndicatorState) *featureContext {
+	return newFeatureContextWithWindow(highs, lows, closes, basic, nil)
+}
+
+func newFeatureContextWithWindow(highs []float64, lows []float64, closes []float64, basic *basicIndicatorState, window *CalculationWindow) *featureContext {
 	return &featureContext{
-		highs: highs, lows: lows, closes: closes, basic: basic,
+		highs: highs, lows: lows, closes: closes, basic: basic, window: window,
 		atrByPeriod:   make(map[int]cachedFloatSeries),
 		emaByPeriod:   make(map[int]cachedFloat),
 		bbByPeriod:    make(map[int]cachedBollinger),
@@ -55,6 +62,15 @@ func (c *featureContext) bollinger(period int, multiplier float64) (float64, flo
 	if cached, ok := c.bbByPeriod[period]; ok {
 		return cached.upper, cached.middle, cached.lower, cached.ok
 	}
+	if period == 20 && c.window != nil && c.window.close20 != nil {
+		middle, variance, ok := c.window.close20.meanVariance()
+		if ok {
+			deviation := math.Sqrt(variance)
+			upper, lower := middle+multiplier*deviation, middle-multiplier*deviation
+			c.bbByPeriod[period] = cachedBollinger{upper: upper, middle: middle, lower: lower, ok: true}
+			return upper, middle, lower, true
+		}
+	}
 	upper, middle, lower, ok := bollinger(c.closes, period, multiplier)
 	c.bbByPeriod[period] = cachedBollinger{upper: upper, middle: middle, lower: lower, ok: ok}
 	return upper, middle, lower, ok
@@ -66,6 +82,14 @@ func (c *featureContext) donchian(period int) (float64, float64, bool) {
 	}
 	if cached, ok := c.rangeByPeriod[period]; ok {
 		return cached.high, cached.low, cached.ok
+	}
+	if period == 20 && c.window != nil && c.window.high20 != nil && c.window.low20 != nil {
+		high, _, highOK := c.window.high20.rangeValues()
+		_, low, lowOK := c.window.low20.rangeValues()
+		if highOK && lowOK {
+			c.rangeByPeriod[period] = cachedMinMax{high: high, low: low, ok: true}
+			return high, low, true
+		}
 	}
 	high, low, ok := donchian(c.highs, c.lows, period)
 	c.rangeByPeriod[period] = cachedMinMax{high: high, low: low, ok: ok}

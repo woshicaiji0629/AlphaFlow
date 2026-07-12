@@ -33,15 +33,19 @@ func addMACDSeriesFeatures(
 	series []macdPoint,
 	prefix string,
 ) {
+	addMACDSeriesFeaturesToSet(nil, values, signals, closes, series, prefix)
+}
+
+func addMACDSeriesFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, series []macdPoint, prefix string) {
 	if len(series) == 0 {
 		return
 	}
 	last := series[len(series)-1]
-	setValue(values, prefix, last.value, true)
-	setValue(values, prefix+"_signal", last.signal, true)
-	setValue(values, prefix+"_hist", last.hist, true)
-	setValue(values, prefix+"_hist_delta", macdHistDelta(series), len(series) >= 2)
-	setValue(values, prefix+"_zero_distance", last.value, true)
+	setValueTarget(target, values, prefix, last.value, true)
+	setValueTarget(target, values, prefix+"_signal", last.signal, true)
+	setValueTarget(target, values, prefix+"_hist", last.hist, true)
+	setValueTarget(target, values, prefix+"_hist_delta", macdHistDelta(series), len(series) >= 2)
+	setValueTarget(target, values, prefix+"_zero_distance", last.value, true)
 	signals[prefix+"_cross"] = macdCross(series)
 	signals[prefix+"_zone"] = macdZone(last)
 	signals[prefix+"_momentum"] = macdMomentum(series)
@@ -182,11 +186,7 @@ func macdDivergence(closes []float64, series []macdPoint) string {
 	offset := len(closes) - len(series)
 	priceWindow := closes[offset:]
 	priceHighs, priceLows := valuePivots(priceWindow, 2)
-	macdValues := make([]float64, len(series))
-	for index, point := range series {
-		macdValues[index] = point.hist
-	}
-	macdHighs, macdLows := valuePivots(macdValues, 2)
+	macdHighs, macdLows := macdHistPivots(series, 2)
 	if len(priceHighs) >= 2 && len(macdHighs) >= 2 {
 		prevPrice, lastPrice := lastTwoSwings(priceHighs)
 		prevMACD, lastMACD := nearestLevels(macdHighs, prevPrice.recency, lastPrice.recency)
@@ -202,6 +202,33 @@ func macdDivergence(closes []float64, series []macdPoint) string {
 		}
 	}
 	return "none"
+}
+
+func macdHistPivots(values []macdPoint, width int) ([]priceLevel, []priceLevel) {
+	highs := []priceLevel{}
+	lows := []priceLevel{}
+	if width <= 0 || len(values) < width*2+1 {
+		return highs, lows
+	}
+	for index := width; index < len(values)-width; index++ {
+		isHigh := true
+		isLow := true
+		for offset := 1; offset <= width; offset++ {
+			if values[index].hist <= values[index-offset].hist || values[index].hist <= values[index+offset].hist {
+				isHigh = false
+			}
+			if values[index].hist >= values[index-offset].hist || values[index].hist >= values[index+offset].hist {
+				isLow = false
+			}
+		}
+		if isHigh {
+			highs = append(highs, priceLevel{price: values[index].hist, recency: index, touches: 1})
+		}
+		if isLow {
+			lows = append(lows, priceLevel{price: values[index].hist, recency: index, touches: 1})
+		}
+	}
+	return highs, lows
 }
 
 func valuePivots(values []float64, width int) ([]priceLevel, []priceLevel) {

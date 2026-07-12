@@ -189,6 +189,55 @@ func supertrendSeriesReference(highs []float64, lows []float64, closes []float64
 	return points, len(points) >= 2
 }
 
+func TestRecentTrueRangeMeanMatchesSeries(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(80, 100, 0.8)
+	got, ok := recentTrueRangeMean(highs, lows, closes, 20)
+	if !ok {
+		t.Fatal("recentTrueRangeMean returned false")
+	}
+	ranges := trueRangeSeries(highs, lows, closes)
+	want, ok := sma(ranges, 20)
+	if !ok {
+		t.Fatal("sma returned false")
+	}
+	if got != want {
+		t.Fatalf("recent mean = %v, want %v", got, want)
+	}
+}
+
+func TestAIPerformanceDenominatorMatchesEMA(t *testing.T) {
+	_, _, closes, _ := trendingSeries(80, 100, 0.8)
+	changes := make([]float64, 0, len(closes)-1)
+	for index := 1; index < len(closes); index++ {
+		changes = append(changes, absFloat(closes[index]-closes[index-1]))
+	}
+	want, wantOK := ema(changes, 10)
+	got, gotOK := aiPerformanceDenominator(closes, 10)
+	if gotOK != wantOK || got != want {
+		t.Fatalf("denominator = %v/%v, want %v/%v", got, gotOK, want, wantOK)
+	}
+}
+
+func TestSupertrendATRFactorSummaryMatchesSeries(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(80, 100, 0.8)
+	atrValues, ok := atrSeries(highs, lows, closes, 10)
+	if !ok {
+		t.Fatal("atrSeries returned false")
+	}
+	offset := len(closes) - len(atrValues)
+	points, ok := supertrendSeriesWithATRFactor(highs, lows, closes, atrValues, offset, 2.5)
+	if !ok {
+		t.Fatal("supertrendSeriesWithATRFactor returned false")
+	}
+	previous, last, ama, ok := supertrendATRFactorSummary(highs, lows, closes, atrValues, offset, 2.5, 0.3)
+	if !ok {
+		t.Fatal("supertrendATRFactorSummary returned false")
+	}
+	if previous != points[len(points)-2] || last != points[len(points)-1] || ama != aiSupertrendAMA(points, 0.3) {
+		t.Fatalf("summary differs: previous=%#v last=%#v ama=%v", previous, last, ama)
+	}
+}
+
 func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	highs, lows, closes, volumes := trendingSeries(160, 100, 0.8)
 	values := map[string]string{}

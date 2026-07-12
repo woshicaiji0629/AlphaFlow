@@ -6,23 +6,27 @@ import (
 )
 
 func addMovingAverageFeatures(values map[string]string, signals map[string]string, closes []float64, volumes []float64, basic *basicIndicatorState) {
+	addMovingAverageFeaturesToSet(nil, values, signals, closes, volumes, basic)
+}
+
+func addMovingAverageFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, volumes []float64, basic *basicIndicatorState) {
 	hma21, ok := hma(closes, 21)
-	setValue(values, "hma21", hma21, ok)
+	setValueTarget(target, values, "hma21", hma21, ok)
 	vwma20, ok := vwma(closes, volumes, 20)
-	setValue(values, "vwma20", vwma20, ok)
+	setValueTarget(target, values, "vwma20", vwma20, ok)
 	dema21, ok := dema(closes, 21)
-	setValue(values, "dema21", dema21, ok)
+	setValueTarget(target, values, "dema21", dema21, ok)
 	tema21, ok := tema(closes, 21)
-	setValue(values, "tema21", tema21, ok)
+	setValueTarget(target, values, "tema21", tema21, ok)
 	kama10, ok := kama(closes, 10, 2, 30)
-	setValue(values, "kama10", kama10, ok)
-	addAlligatorFeatures(values, signals, closes)
+	setValueTarget(target, values, "kama10", kama10, ok)
+	addAlligatorFeaturesToSet(target, values, signals, closes)
 
 	if len(closes) >= 30 {
 		recentHMA, okRecent := hma(closes, 21)
 		previousHMA, okPrevious := hma(closes[:len(closes)-3], 21)
 		if okRecent && okPrevious && previousHMA != 0 {
-			setValue(values, "hma21_slope3_pct", percentDistance(recentHMA, previousHMA), true)
+			setValueTarget(target, values, "hma21_slope3_pct", percentDistance(recentHMA, previousHMA), true)
 		}
 	}
 
@@ -32,29 +36,33 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 	last := closes[len(closes)-1]
 	if ok7 && ok25 && ok99 {
 		spread := (ema7 - ema99) / last * 100
-		setValue(values, "ema_spread_pct", spread, last != 0)
+		setValueTarget(target, values, "ema_spread_pct", spread, last != 0)
 		signals["ma_state"] = movingAverageState(ema7, ema25, ema99, last)
 		signals["ma_arrangement"] = movingAverageArrangement(ema7, ema25, ema99)
-		setValue(values, "ma_trend_strength", math.Abs(spread), true)
-		addMovingAverageStructureFeatures(values, signals, closes, basic, ema7, ema25, ema99)
+		setValueTarget(target, values, "ma_trend_strength", math.Abs(spread), true)
+		addMovingAverageStructureFeaturesToSet(target, values, signals, closes, basic, ema7, ema25, ema99)
 	}
-	addEZEMASuiteFeatures(values, signals, closes, basic)
-	addScriptDualMovingAverage(values, signals, closes, volumes)
-	addScriptMovingAverageSignal(values, signals, closes, basic)
-	addEMDFeatures(values, signals, closes, 25, 1)
+	addEZEMASuiteFeaturesToSet(target, values, signals, closes, basic)
+	addScriptDualMovingAverageToSet(target, values, signals, closes, volumes)
+	addScriptMovingAverageSignalToSet(target, values, signals, closes, basic)
+	addEMDFeaturesToSet(target, values, signals, closes, 25, 1)
 }
 
 func addAlligatorFeatures(values map[string]string, signals map[string]string, closes []float64) {
+	addAlligatorFeaturesToSet(nil, values, signals, closes)
+}
+
+func addAlligatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64) {
 	jaw, teeth, lips, ok := alligator(closes)
 	if !ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "alligator_jaw", jaw, true)
-	setValue(values, "alligator_teeth", teeth, true)
-	setValue(values, "alligator_lips", lips, true)
+	setValueTarget(target, values, "alligator_jaw", jaw, true)
+	setValueTarget(target, values, "alligator_teeth", teeth, true)
+	setValueTarget(target, values, "alligator_lips", lips, true)
 	spread := (maxFloat(jaw, teeth, lips) - minFloat(jaw, teeth, lips)) / last * 100
-	setValue(values, "alligator_spread_pct", spread, last != 0)
+	setValueTarget(target, values, "alligator_spread_pct", spread, last != 0)
 	signals["alligator_direction"] = alligatorDirection(jaw, teeth, lips)
 	signals["alligator_state"] = alligatorState(spread)
 }
@@ -268,6 +276,10 @@ func previousEMAFromStateOrSeries(basic *basicIndicatorState, closes []float64, 
 }
 
 func addScriptDualMovingAverage(values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
+	addScriptDualMovingAverageToSet(nil, values, signals, closes, volumes)
+}
+
+func addScriptDualMovingAverageToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
 	const (
 		period1  = 20
 		period2  = 50
@@ -287,10 +299,10 @@ func addScriptDualMovingAverage(values map[string]string, signals map[string]str
 	if !ok1 || !ok2 || !okPrev1 || !okPrev2 || !okSmooth {
 		return
 	}
-	setValue(values, "script_dual_ma_out1", out1, true)
-	setValue(values, "script_dual_ma_out2", out2, true)
-	setValue(values, "script_dual_ma_out1_slope_pct", percentDistance(out1, smoothOut1), smoothOut1 != 0)
-	setValue(values, "script_dual_ma_out2_slope_pct", percentDistance(out2, prevOut2), prevOut2 != 0)
+	setValueTarget(target, values, "script_dual_ma_out1", out1, true)
+	setValueTarget(target, values, "script_dual_ma_out2", out2, true)
+	setValueTarget(target, values, "script_dual_ma_out1_slope_pct", percentDistance(out1, smoothOut1), smoothOut1 != 0)
+	setValueTarget(target, values, "script_dual_ma_out2_slope_pct", percentDistance(out2, prevOut2), prevOut2 != 0)
 	signals["script_ma1_direction"] = maDirection(out1, smoothOut1)
 	signals["script_price_cross_ma1"] = priceCrossMA(closes, out1)
 	signals["script_price_cross_ma2"] = priceCrossMA(closes, out2)
@@ -323,6 +335,10 @@ func priceCrossMA(closes []float64, average float64) string {
 }
 
 func addScriptMovingAverageSignal(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
+	addScriptMovingAverageSignalToSet(nil, values, signals, closes, basic)
+}
+
+func addScriptMovingAverageSignalToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
 	if len(closes) < 28 {
 		return
 	}
@@ -338,8 +354,8 @@ func addScriptMovingAverageSignal(values map[string]string, signals map[string]s
 	a1x := (ema10 - breakthrough) / breakthrough * 100
 	prevA1x := (prevEMA10 - prevBreakthrough) / prevBreakthrough * 100
 	midDirection := ema12 - ema26
-	setValue(values, "script_ma_breakout_pct", a1x, true)
-	setValue(values, "script_ma_mid_direction", midDirection, true)
+	setValueTarget(target, values, "script_ma_breakout_pct", a1x, true)
+	setValueTarget(target, values, "script_ma_mid_direction", midDirection, true)
 	switch {
 	case prevA1x <= 0 && a1x > 0 && midDirection > 0:
 		signals["script_ma_signal"] = "bull_breakout"
@@ -353,34 +369,25 @@ func addScriptMovingAverageSignal(values map[string]string, signals map[string]s
 }
 
 func addEMDFeatures(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
-	avgSeries, ok := smmaSeries(closes, period)
-	if !ok || len(avgSeries) < period+2 {
+	addEMDFeaturesToSet(nil, values, signals, closes, period, multiplier)
+}
+
+func addEMDFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
+	avg, previousAvg, emd, previousEMD, ok := emdLastTwo(closes, period)
+	if !ok {
 		return
 	}
-	offset := len(closes) - len(avgSeries)
-	deviations := make([]float64, 0, len(avgSeries))
-	for index, avg := range avgSeries {
-		deviations = append(deviations, math.Abs(closes[index+offset]-avg))
-	}
-	emdSeries, ok := emaSeries(deviations, period)
-	if !ok || len(emdSeries) < 2 {
-		return
-	}
-	avg := avgSeries[len(avgSeries)-1]
-	emd := emdSeries[len(emdSeries)-1]
 	upper := avg + emd*multiplier
 	lower := avg - emd*multiplier
-	previousAvg := avgSeries[len(avgSeries)-2]
-	previousEMD := emdSeries[len(emdSeries)-2]
 	previousUpper := previousAvg + previousEMD*multiplier
 	previousLower := previousAvg - previousEMD*multiplier
 	current := closes[len(closes)-1]
 	previous := closes[len(closes)-2]
 
-	setValue(values, "emd_avg", avg, true)
-	setValue(values, "emd_value", emd, true)
-	setValue(values, "emd_upper", upper, true)
-	setValue(values, "emd_lower", lower, true)
+	setValueTarget(target, values, "emd_avg", avg, true)
+	setValueTarget(target, values, "emd_value", emd, true)
+	setValueTarget(target, values, "emd_upper", upper, true)
+	setValueTarget(target, values, "emd_lower", lower, true)
 	switch {
 	case current > upper:
 		signals["emd_direction"] = "up"
@@ -397,6 +404,37 @@ func addEMDFeatures(values map[string]string, signals map[string]string, closes 
 	default:
 		signals["emd_cross"] = "none"
 	}
+}
+
+func emdLastTwo(closes []float64, period int) (float64, float64, float64, float64, bool) {
+	if period <= 0 || len(closes)-period+1 < period+2 {
+		return 0, 0, 0, 0, false
+	}
+	avg, _ := sma(closes[:period], period)
+	previousAvg := avg
+	deviationSum := 0.0
+	emd := 0.0
+	previousEMD := 0.0
+	emaMultiplier := 2 / float64(period+1)
+	deviationIndex := 0
+	for closeIndex := period - 1; closeIndex < len(closes); closeIndex++ {
+		if closeIndex >= period {
+			previousAvg = avg
+			avg = (avg*float64(period-1) + closes[closeIndex]) / float64(period)
+		}
+		deviation := math.Abs(closes[closeIndex] - avg)
+		if deviationIndex < period {
+			deviationSum += deviation
+			if deviationIndex == period-1 {
+				emd = deviationSum / float64(period)
+			}
+		} else {
+			previousEMD = emd
+			emd = (deviation-emd)*emaMultiplier + emd
+		}
+		deviationIndex++
+	}
+	return avg, previousAvg, emd, previousEMD, true
 }
 
 func alligatorDirection(jaw float64, teeth float64, lips float64) string {
@@ -422,6 +460,10 @@ func alligatorState(spreadPct float64) string {
 }
 
 func addMovingAverageStructureFeatures(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState, ema7 float64, ema25 float64, ema99 float64) {
+	addMovingAverageStructureFeaturesToSet(nil, values, signals, closes, basic, ema7, ema25, ema99)
+}
+
+func addMovingAverageStructureFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState, ema7 float64, ema25 float64, ema99 float64) {
 	if len(closes) < 110 {
 		return
 	}
@@ -434,7 +476,7 @@ func addMovingAverageStructureFeatures(values map[string]string, signals map[str
 	if ok7 && ok25 && ok99 {
 		currentSpread := maxFloat(ema7, ema25, ema99) - minFloat(ema7, ema25, ema99)
 		previousSpread := maxFloat(prevEMA7, prevEMA25, prevEMA99) - minFloat(prevEMA7, prevEMA25, prevEMA99)
-		setValue(values, "ma_group_spread_pct", currentSpread/closes[len(closes)-1]*100, closes[len(closes)-1] != 0)
+		setValueTarget(target, values, "ma_group_spread_pct", currentSpread/closes[len(closes)-1]*100, closes[len(closes)-1] != 0)
 		signals["ma_spread_state"] = spreadState(currentSpread, previousSpread)
 		signals["ma_compression"] = compressionState(currentSpread, closes[len(closes)-1])
 	}
@@ -518,6 +560,10 @@ func movingAverageState(ema7 float64, ema25 float64, ema99 float64, last float64
 }
 
 func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
+	addEZEMASuiteFeaturesToSet(nil, values, signals, closes, basic)
+}
+
+func addEZEMASuiteFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
 	periods := []int{5, 8, 9, 34, 55, 89, 144, 200}
 	if len(closes) < periods[len(periods)-1]+1 {
 		return
@@ -536,7 +582,7 @@ func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, 
 		}
 		current[period] = value
 		previous[period] = prev
-		setValue(values, "ez_ema_"+strconv.Itoa(period), value, true)
+		setValueTarget(target, values, "ez_ema_"+strconv.Itoa(period), value, true)
 	}
 
 	fast := current[9]
@@ -546,9 +592,9 @@ func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, 
 	last := closes[len(closes)-1]
 	prevClose := closes[len(closes)-2]
 
-	setValue(values, "ez_ema_fast", fast, true)
-	setValue(values, "ez_ema_slow", slow, true)
-	setValue(values, "ez_ema_spread_pct", percentDistance(fast, slow), slow != 0)
+	setValueTarget(target, values, "ez_ema_fast", fast, true)
+	setValueTarget(target, values, "ez_ema_slow", slow, true)
+	setValueTarget(target, values, "ez_ema_spread_pct", percentDistance(fast, slow), slow != 0)
 	signals["ez_ema_cross"] = crossSignal(prevFast, prevSlow, fast, slow)
 	signals["ez_price_cross_ema_pair"] = priceCrossEMAPair(prevClose, last, prevFast, prevSlow, fast, slow)
 	signals["ez_price_above_ema_pair"] = boolText(last > fast && last > slow)
@@ -557,7 +603,7 @@ func addEZEMASuiteFeatures(values map[string]string, signals map[string]string, 
 
 	currentSpread := ezEMASpread(current, periods)
 	previousSpread := ezEMASpread(previous, periods)
-	setValue(values, "ez_ema_group_spread_pct", currentSpread/last*100, last != 0)
+	setValueTarget(target, values, "ez_ema_group_spread_pct", currentSpread/last*100, last != 0)
 	signals["ez_ema_spread_state"] = spreadState(currentSpread, previousSpread)
 	signals["ez_ema_compression"] = compressionState(currentSpread, last)
 }

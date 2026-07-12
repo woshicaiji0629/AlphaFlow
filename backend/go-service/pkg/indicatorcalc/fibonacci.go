@@ -3,15 +3,19 @@ package indicatorcalc
 import "math"
 
 func addFibonacciFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addFibonacciFeaturesToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addFibonacciFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	levels, ok := fibonacciLevels(highs, lows, closes, 50)
 	if !ok {
 		return
 	}
-	setValue(values, "fib_236", levels[0], true)
-	setValue(values, "fib_382", levels[1], true)
-	setValue(values, "fib_5", levels[2], true)
-	setValue(values, "fib_618", levels[3], true)
-	setValue(values, "fib_786", levels[4], true)
+	setValueTarget(target, values, "fib_236", levels[0], true)
+	setValueTarget(target, values, "fib_382", levels[1], true)
+	setValueTarget(target, values, "fib_5", levels[2], true)
+	setValueTarget(target, values, "fib_618", levels[3], true)
+	setValueTarget(target, values, "fib_786", levels[4], true)
 	signals["fib_zone"] = fibonacciZone(closes[len(closes)-1], levels)
 }
 

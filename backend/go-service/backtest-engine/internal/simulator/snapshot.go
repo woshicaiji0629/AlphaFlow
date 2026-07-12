@@ -14,7 +14,7 @@ import (
 )
 
 var errSnapshotNotReady = errors.New("strategy snapshot not ready")
-var calculateIndicatorWindow = indicatorcalc.CalculateWindow
+var calculateIndicatorWindow = indicatorcalc.CalculateWindowNumeric
 var analyzeIndicatorWindow = indicatorwindow.Analyze
 
 const defaultReplayCalculationWindow = 268
@@ -229,7 +229,7 @@ func (b *SnapshotBuilder) advanceSeries(interval string, state *replaySeriesStat
 	}
 	indicator := marketmodel.IndicatorSnapshot{
 		Exchange: kline.Exchange, Market: kline.Market, Symbol: kline.Symbol, Interval: kline.Interval,
-		OpenTime: result.OpenTime, CloseTime: result.CloseTime, Values: result.Values, Signals: result.Signals, UpdatedAt: result.CloseTime,
+		OpenTime: result.OpenTime, CloseTime: result.CloseTime, Values: result.Values, NumericValues: result.NumericValues, Signals: result.Signals, UpdatedAt: result.CloseTime,
 	}
 	state.indicators = append(state.indicators, indicator)
 	if len(state.indicators) > indicatorwindow.DefaultLookback {

@@ -1,6 +1,10 @@
 package strategy
 
-import "alphaflow/go-service/pkg/marketmodel"
+import (
+	"strconv"
+
+	"alphaflow/go-service/pkg/marketmodel"
+)
 
 type SignalSide string
 
@@ -115,11 +119,24 @@ type TimeframeSnapshot struct {
 }
 
 type IndicatorView struct {
-	OpenTime  int64
-	CloseTime int64
-	Values    map[string]string
-	Signals   map[string]string
-	UpdatedAt int64
+	OpenTime      int64
+	CloseTime     int64
+	Values        map[string]string
+	NumericValues map[string]float64
+	Signals       map[string]string
+	UpdatedAt     int64
+}
+
+func (v IndicatorView) Float(name string) (float64, bool) {
+	if value, ok := v.NumericValues[name]; ok {
+		return value, true
+	}
+	text, ok := v.Values[name]
+	if !ok || text == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	return value, err == nil
 }
 
 type IndicatorWindowView struct {

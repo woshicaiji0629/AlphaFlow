@@ -10,6 +10,10 @@ type priceLevel struct {
 }
 
 func addSupportResistance(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addSupportResistanceToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addSupportResistanceToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	period := minInt(50, len(closes))
 	if period < 5 {
 		return
@@ -25,18 +29,18 @@ func addSupportResistance(values map[string]string, signals map[string]string, h
 	}
 	support := supports[0].price
 	resistance := resistances[0].price
-	setValue(values, "support_1", support, true)
-	setValue(values, "resistance_1", resistance, true)
+	setValueTarget(target, values, "support_1", support, true)
+	setValueTarget(target, values, "resistance_1", resistance, true)
 	if len(supports) > 1 {
-		setValue(values, "support_2", supports[1].price, true)
+		setValueTarget(target, values, "support_2", supports[1].price, true)
 	}
 	if len(resistances) > 1 {
-		setValue(values, "resistance_2", resistances[1].price, true)
+		setValueTarget(target, values, "resistance_2", resistances[1].price, true)
 	}
-	setValue(values, "support_strength", supports[0].score, true)
-	setValue(values, "resistance_strength", resistances[0].score, true)
-	setValue(values, "support_distance_pct", percentDistance(last, support), support != 0)
-	setValue(values, "resistance_distance_pct", percentDistance(last, resistance), resistance != 0)
+	setValueTarget(target, values, "support_strength", supports[0].score, true)
+	setValueTarget(target, values, "resistance_strength", resistances[0].score, true)
+	setValueTarget(target, values, "support_distance_pct", percentDistance(last, support), support != 0)
+	setValueTarget(target, values, "resistance_distance_pct", percentDistance(last, resistance), resistance != 0)
 	switch {
 	case support != 0 && math.Abs(last-support) <= tolerance:
 		signals["sr_position"] = "near_support"

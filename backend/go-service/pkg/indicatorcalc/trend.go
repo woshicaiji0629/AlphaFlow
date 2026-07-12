@@ -7,6 +7,10 @@ func addTrendFeatures(values map[string]string, signals map[string]string, close
 }
 
 func addTrendFeaturesWithContext(values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
+	addTrendFeaturesWithContextToSet(nil, values, signals, closes, features)
+}
+
+func addTrendFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, features *featureContext) {
 	ema7, ok7 := ema(closes, 7)
 	ema25, ok25 := ema(closes, 25)
 	ema99, ok99 := ema(closes, 99)
@@ -17,9 +21,9 @@ func addTrendFeaturesWithContext(values map[string]string, signals map[string]st
 	}
 	last := closes[len(closes)-1]
 	if ok7 && ok25 && ok99 {
-		setValue(values, "price_ema7_distance_pct", percentDistance(last, ema7), true)
-		setValue(values, "price_ema25_distance_pct", percentDistance(last, ema25), true)
-		setValue(values, "price_ema99_distance_pct", percentDistance(last, ema99), true)
+		setValueTarget(target, values, "price_ema7_distance_pct", percentDistance(last, ema7), true)
+		setValueTarget(target, values, "price_ema25_distance_pct", percentDistance(last, ema25), true)
+		setValueTarget(target, values, "price_ema99_distance_pct", percentDistance(last, ema99), true)
 		switch {
 		case ema7 > ema25 && ema25 > ema99:
 			signals["ema_alignment"] = "bull"
@@ -34,7 +38,7 @@ func addTrendFeaturesWithContext(values map[string]string, signals map[string]st
 		prev, okPrev := ema(closes[:len(closes)-5], 25)
 		if okRecent && okPrev && prev != 0 {
 			slope := (recent - prev) / prev * 100
-			setValue(values, "ema25_slope5_pct", slope, true)
+			setValueTarget(target, values, "ema25_slope5_pct", slope, true)
 			switch {
 			case slope > 0.15:
 				signals["trend_direction"] = "up"
@@ -52,6 +56,14 @@ func addSupertrend(values map[string]string, signals map[string]string, highs []
 }
 
 func addSupertrendWithState(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, basic *basicIndicatorState) {
+	addSupertrendWithStateToSet(nil, values, signals, highs, lows, closes, period, multiplier, basic)
+}
+
+func addSupertrendWithStateToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, basic *basicIndicatorState) {
+	addSupertrendWithStateAndFeaturesToSet(target, values, signals, highs, lows, closes, period, multiplier, basic, nil)
+}
+
+func addSupertrendWithStateAndFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, basic *basicIndicatorState, features *featureContext) {
 	points, ok := supertrendSeries(highs, lows, closes, period, multiplier)
 	if !ok {
 		return
@@ -59,9 +71,9 @@ func addSupertrendWithState(values map[string]string, signals map[string]string,
 	lastIndex := len(points) - 1
 	lastPoint := points[lastIndex]
 	lastClose := closes[len(closes)-1]
-	setValue(values, "supertrend", lastPoint.value, true)
-	setValue(values, "supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
-	setValue(values, "supertrend_stop_distance_pct", absFloat(percentDistance(lastClose, lastPoint.value)), lastPoint.value != 0)
+	setValueTarget(target, values, "supertrend", lastPoint.value, true)
+	setValueTarget(target, values, "supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValueTarget(target, values, "supertrend_stop_distance_pct", absFloat(percentDistance(lastClose, lastPoint.value)), lastPoint.value != 0)
 	signals["supertrend_direction"] = lastPoint.direction
 	signals["supertrend_flip"] = trendFlip(points[lastIndex-1].direction, lastPoint.direction)
 
@@ -75,34 +87,44 @@ func addSupertrendWithState(values map[string]string, signals map[string]string,
 		{name: "supertrend_10_3_3", period: 10, multiplier: 3.3},
 		{name: "supertrend_14_4", period: 14, multiplier: 4},
 	} {
-		presetValue, presetDirection, presetOK := supertrend(highs, lows, closes, preset.period, preset.multiplier)
+		presetValue, presetDirection, presetOK := 0.0, "", false
+		if preset.period == period && preset.multiplier == multiplier {
+			presetValue, presetDirection, presetOK = lastPoint.value, lastPoint.direction, true
+		} else {
+			presetValue, presetDirection, presetOK = supertrend(highs, lows, closes, preset.period, preset.multiplier)
+		}
 		if !presetOK {
 			continue
 		}
-		setValue(values, preset.name, presetValue, true)
+		setValueTarget(target, values, preset.name, presetValue, true)
 		signals[preset.name+"_direction"] = presetDirection
 	}
 
-	addAdaptiveSupertrendWithState(values, signals, highs, lows, closes, 10, 3, 100, basic)
-	addAISupertrend(values, signals, highs, lows, closes, 10, 1, 5, 0.5, 10)
+	addAdaptiveSupertrendWithStateToSet(target, values, signals, highs, lows, closes, 10, 3, 100, basic)
+	var atr10 []float64
+	var atr10OK bool
+	if features != nil {
+		atr10, atr10OK = features.atrSeries(10)
+	}
+	addAISupertrendWithATRToSet(target, values, signals, highs, lows, closes, 10, 1, 5, 0.5, 10, atr10, atr10OK)
 
 	zone, zoneOK := supertrendZone(highs, lows, closes, points, period, 14, 1.5)
 	if !zoneOK {
 		signals["supertrend_zone_ready"] = "false"
 		return
 	}
-	setValue(values, "supertrend_zone_pivot_high", zone.pivotHigh, true)
-	setValue(values, "supertrend_zone_pivot_low", zone.pivotLow, true)
-	setValue(values, "supertrend_zone_mid", zone.mid, true)
-	setValue(values, "supertrend_zone_fib_236", zone.fib236, true)
-	setValue(values, "supertrend_zone_fib_382", zone.fib382, true)
-	setValue(values, "supertrend_zone_fib_5", zone.fib5, true)
-	setValue(values, "supertrend_zone_fib_618", zone.fib618, true)
-	setValue(values, "supertrend_zone_fib_786", zone.fib786, true)
-	setValue(values, "supertrend_zone_extension_1618", zone.extension, true)
-	setValue(values, "supertrend_zone_premium_band", zone.premiumBand, true)
-	setValue(values, "supertrend_zone_discount_band", zone.discountBand, true)
-	setValue(values, "supertrend_zone_position_pct", zone.positionPct, true)
+	setValueTarget(target, values, "supertrend_zone_pivot_high", zone.pivotHigh, true)
+	setValueTarget(target, values, "supertrend_zone_pivot_low", zone.pivotLow, true)
+	setValueTarget(target, values, "supertrend_zone_mid", zone.mid, true)
+	setValueTarget(target, values, "supertrend_zone_fib_236", zone.fib236, true)
+	setValueTarget(target, values, "supertrend_zone_fib_382", zone.fib382, true)
+	setValueTarget(target, values, "supertrend_zone_fib_5", zone.fib5, true)
+	setValueTarget(target, values, "supertrend_zone_fib_618", zone.fib618, true)
+	setValueTarget(target, values, "supertrend_zone_fib_786", zone.fib786, true)
+	setValueTarget(target, values, "supertrend_zone_extension_1618", zone.extension, true)
+	setValueTarget(target, values, "supertrend_zone_premium_band", zone.premiumBand, true)
+	setValueTarget(target, values, "supertrend_zone_discount_band", zone.discountBand, true)
+	setValueTarget(target, values, "supertrend_zone_position_pct", zone.positionPct, true)
 	signals["supertrend_zone_side"] = zone.side
 	signals["supertrend_zone_area"] = zone.area
 	signals["supertrend_zone_ready"] = "true"
@@ -215,6 +237,10 @@ func supertrendZoneArea(positionPct float64) string {
 }
 
 func addAlphaTrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) {
+	addAlphaTrendToSet(nil, values, signals, highs, lows, closes, volumes, period, multiplier)
+}
+
+func addAlphaTrendToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) {
 	points, lastMFI, ok := alphaTrendSeries(highs, lows, closes, volumes, period, multiplier)
 	if !ok {
 		return
@@ -223,10 +249,10 @@ func addAlphaTrend(values map[string]string, signals map[string]string, highs []
 	lastPoint := points[lastIndex]
 	prevPoint := points[lastIndex-1]
 	lastClose := closes[len(closes)-1]
-	setValue(values, "alphatrend", lastPoint.value, true)
-	setValue(values, "mfi14", lastMFI, true)
-	setValue(values, "alphatrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
-	setValue(values, "alphatrend_slope_pct", percentDistance(lastPoint.value, prevPoint.value), prevPoint.value != 0)
+	setValueTarget(target, values, "alphatrend", lastPoint.value, true)
+	setValueTarget(target, values, "mfi14", lastMFI, true)
+	setValueTarget(target, values, "alphatrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValueTarget(target, values, "alphatrend_slope_pct", percentDistance(lastPoint.value, prevPoint.value), prevPoint.value != 0)
 	signals["alphatrend_direction"] = lastPoint.direction
 	signals["alphatrend_flip"] = trendFlip(prevPoint.direction, lastPoint.direction)
 	cross, signal := alphaTrendSignals(points)
@@ -235,31 +261,39 @@ func addAlphaTrend(values map[string]string, signals map[string]string, highs []
 }
 
 func addPSARFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addPSARFeaturesToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addPSARFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	value, direction, ok := psar(highs, lows, closes, 0.02, 0.2)
 	if !ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "psar", value, true)
-	setValue(values, "psar_distance_pct", percentDistance(last, value), value != 0)
+	setValueTarget(target, values, "psar", value, true)
+	setValueTarget(target, values, "psar_distance_pct", percentDistance(last, value), value != 0)
 	signals["psar_direction"] = direction
 }
 
 func addChandelierExit(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
+	addChandelierExitToSet(nil, values, signals, highs, lows, closes, period, multiplier)
+}
+
+func addChandelierExitToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
 	longStop, shortStop, ok := chandelierExit(highs, lows, closes, period, multiplier)
 	if !ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "chandelier_long", longStop, true)
-	setValue(values, "chandelier_short", shortStop, true)
+	setValueTarget(target, values, "chandelier_long", longStop, true)
+	setValueTarget(target, values, "chandelier_short", shortStop, true)
 	switch {
 	case last >= longStop:
 		signals["chandelier_direction"] = "up"
-		setValue(values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, longStop)), longStop != 0)
+		setValueTarget(target, values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, longStop)), longStop != 0)
 	case last <= shortStop:
 		signals["chandelier_direction"] = "down"
-		setValue(values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, shortStop)), shortStop != 0)
+		setValueTarget(target, values, "chandelier_stop_distance_pct", absFloat(percentDistance(last, shortStop)), shortStop != 0)
 	default:
 		signals["chandelier_direction"] = "neutral"
 	}
@@ -278,12 +312,51 @@ func chandelierExit(highs []float64, lows []float64, closes []float64, period in
 }
 
 func supertrend(highs []float64, lows []float64, closes []float64, period int, multiplier float64) (float64, string, bool) {
-	points, ok := supertrendSeries(highs, lows, closes, period, multiplier)
-	if !ok {
+	if period <= 0 || len(closes) <= period+1 || len(highs) != len(closes) || len(lows) != len(closes) {
 		return 0, "", false
 	}
-	last := points[len(points)-1]
-	return last.value, last.direction, true
+	atrSum := 0.0
+	for index := 1; index <= period; index++ {
+		atrSum += maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+	}
+	atrValue := atrSum / float64(period)
+	mid := (highs[period] + lows[period]) / 2
+	finalUpper := mid + multiplier*atrValue
+	finalLower := mid - multiplier*atrValue
+	direction := "down"
+	if closes[period] >= mid {
+		direction = "up"
+	}
+	for index := period + 1; index < len(closes); index++ {
+		trueRange := maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+		atrValue = (atrValue*float64(period-1) + trueRange) / float64(period)
+		mid = (highs[index] + lows[index]) / 2
+		basicUpper := mid + multiplier*atrValue
+		basicLower := mid - multiplier*atrValue
+		nextUpper := finalUpper
+		if basicUpper < finalUpper || closes[index-1] > finalUpper {
+			nextUpper = basicUpper
+		}
+		nextLower := finalLower
+		if basicLower > finalLower || closes[index-1] < finalLower {
+			nextLower = basicLower
+		}
+		if direction == "down" && closes[index] > nextUpper {
+			direction = "up"
+		} else if direction == "up" && closes[index] < nextLower {
+			direction = "down"
+		}
+		finalUpper, finalLower = nextUpper, nextLower
+	}
+	return supertrendPoint(finalUpper, finalLower, direction).value, direction, true
 }
 
 type trendPoint struct {
@@ -309,7 +382,8 @@ type volatilityCluster struct {
 }
 
 type aiSupertrendState struct {
-	points           []trendPoint
+	previousPoint    trendPoint
+	lastPoint        trendPoint
 	ama              float64
 	targetFactor     float64
 	performanceIndex float64
@@ -336,6 +410,10 @@ func addAdaptiveSupertrend(values map[string]string, signals map[string]string, 
 }
 
 func addAdaptiveSupertrendWithState(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int, basic *basicIndicatorState) {
+	addAdaptiveSupertrendWithStateToSet(nil, values, signals, highs, lows, closes, period, multiplier, trainingPeriod, basic)
+}
+
+func addAdaptiveSupertrendWithStateToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64, trainingPeriod int, basic *basicIndicatorState) {
 	state, ok := adaptiveSupertrendState{}, false
 	if basic != nil && period == 10 && multiplier == 3 && trainingPeriod == 100 {
 		state, ok = basic.adaptiveSupertrendValue()
@@ -349,45 +427,61 @@ func addAdaptiveSupertrendWithState(values map[string]string, signals map[string
 	lastIndex := len(state.points) - 1
 	lastPoint := state.points[lastIndex]
 	lastClose := closes[len(closes)-1]
-	setValue(values, "adaptive_supertrend", lastPoint.value, true)
-	setValue(values, "adaptive_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
-	setValue(values, "adaptive_supertrend_assigned_atr", state.assignedATR, true)
-	setValue(values, "adaptive_supertrend_high_centroid", state.highCentroid, true)
-	setValue(values, "adaptive_supertrend_mid_centroid", state.midCentroid, true)
-	setValue(values, "adaptive_supertrend_low_centroid", state.lowCentroid, true)
+	setValueTarget(target, values, "adaptive_supertrend", lastPoint.value, true)
+	setValueTarget(target, values, "adaptive_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValueTarget(target, values, "adaptive_supertrend_assigned_atr", state.assignedATR, true)
+	setValueTarget(target, values, "adaptive_supertrend_high_centroid", state.highCentroid, true)
+	setValueTarget(target, values, "adaptive_supertrend_mid_centroid", state.midCentroid, true)
+	setValueTarget(target, values, "adaptive_supertrend_low_centroid", state.lowCentroid, true)
 	signals["adaptive_supertrend_direction"] = lastPoint.direction
 	signals["adaptive_supertrend_flip"] = trendFlip(state.points[lastIndex-1].direction, lastPoint.direction)
 	signals["adaptive_supertrend_volatility_cluster"] = state.cluster
 }
 
 func addAISupertrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int) {
-	state, ok := aiSupertrend(highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha)
+	addAISupertrendToSet(nil, values, signals, highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha)
+}
+
+func addAISupertrendToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int) {
+	addAISupertrendWithATRToSet(target, values, signals, highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha, nil, false)
+}
+
+func addAISupertrendWithATRToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int, atrValues []float64, atrOK bool) {
+	state, ok := aiSupertrendWithATR(highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha, atrValues, atrOK)
 	if !ok {
 		return
 	}
-	lastIndex := len(state.points) - 1
-	lastPoint := state.points[lastIndex]
+	lastPoint := state.lastPoint
 	lastClose := closes[len(closes)-1]
-	setValue(values, "ai_supertrend", lastPoint.value, true)
-	setValue(values, "ai_supertrend_ama", state.ama, true)
-	setValue(values, "ai_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
-	setValue(values, "ai_supertrend_target_factor", state.targetFactor, true)
-	setValue(values, "ai_supertrend_performance_index", state.performanceIndex, true)
-	setValue(values, "ai_supertrend_best_centroid", state.bestCentroid, true)
-	setValue(values, "ai_supertrend_average_centroid", state.averageCentroid, true)
-	setValue(values, "ai_supertrend_worst_centroid", state.worstCentroid, true)
+	setValueTarget(target, values, "ai_supertrend", lastPoint.value, true)
+	setValueTarget(target, values, "ai_supertrend_ama", state.ama, true)
+	setValueTarget(target, values, "ai_supertrend_distance_pct", percentDistance(lastClose, lastPoint.value), lastPoint.value != 0)
+	setValueTarget(target, values, "ai_supertrend_target_factor", state.targetFactor, true)
+	setValueTarget(target, values, "ai_supertrend_performance_index", state.performanceIndex, true)
+	setValueTarget(target, values, "ai_supertrend_best_centroid", state.bestCentroid, true)
+	setValueTarget(target, values, "ai_supertrend_average_centroid", state.averageCentroid, true)
+	setValueTarget(target, values, "ai_supertrend_worst_centroid", state.worstCentroid, true)
 	signals["ai_supertrend_direction"] = lastPoint.direction
-	signals["ai_supertrend_flip"] = trendFlip(state.points[lastIndex-1].direction, lastPoint.direction)
+	signals["ai_supertrend_flip"] = trendFlip(state.previousPoint.direction, lastPoint.direction)
 	signals["ai_supertrend_cluster"] = state.cluster
 	signals["ai_supertrend_factor_cluster"] = state.cluster
 }
 
 func aiSupertrend(highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int) (aiSupertrendState, bool) {
+	return aiSupertrendWithATR(highs, lows, closes, period, minFactor, maxFactor, step, perfAlpha, nil, false)
+}
+
+func aiSupertrendWithATR(highs []float64, lows []float64, closes []float64, period int, minFactor float64, maxFactor float64, step float64, perfAlpha int, atrValues []float64, atrOK bool) (aiSupertrendState, bool) {
 	if period <= 0 || minFactor <= 0 || maxFactor < minFactor || step <= 0 || perfAlpha < 2 ||
 		len(closes) <= period+2 || len(highs) != len(closes) || len(lows) != len(closes) {
 		return aiSupertrendState{}, false
 	}
-	atrValues, ok := atrSeries(highs, lows, closes, period)
+	var ok bool
+	if !atrOK {
+		atrValues, ok = atrSeries(highs, lows, closes, period)
+	} else {
+		ok = true
+	}
 	if !ok || len(atrValues) < 2 {
 		return aiSupertrendState{}, false
 	}
@@ -411,18 +505,18 @@ func aiSupertrend(highs []float64, lows []float64, closes []float64, period int,
 		return aiSupertrendState{}, false
 	}
 	targetFactor := averageFloat(best.factors)
-	points, ok := supertrendSeriesWithATRFactor(highs, lows, closes, atrValues, offset, targetFactor)
-	if !ok {
-		return aiSupertrendState{}, false
-	}
 	denominator, ok := aiPerformanceDenominator(closes, perfAlpha)
 	if !ok || denominator <= 0 {
 		return aiSupertrendState{}, false
 	}
 	performanceIndex := maxFloat(averageFloat(best.perfs), 0) / denominator
-	ama := aiSupertrendAMA(points, performanceIndex)
+	previousPoint, lastPoint, ama, ok := supertrendATRFactorSummary(highs, lows, closes, atrValues, offset, targetFactor, performanceIndex)
+	if !ok {
+		return aiSupertrendState{}, false
+	}
 	return aiSupertrendState{
-		points:           points,
+		previousPoint:    previousPoint,
+		lastPoint:        lastPoint,
 		ama:              ama,
 		targetFactor:     targetFactor,
 		performanceIndex: performanceIndex,
@@ -431,6 +525,53 @@ func aiSupertrend(highs []float64, lows []float64, closes []float64, period int,
 		worstCentroid:    clusters[0].centroid,
 		cluster:          best.name,
 	}, true
+}
+
+func supertrendATRFactorSummary(highs []float64, lows []float64, closes []float64, atrValues []float64, offset int, factor float64, amaFactor float64) (trendPoint, trendPoint, float64, bool) {
+	if offset <= 0 || offset >= len(closes)-1 || len(highs) != len(closes) || len(lows) != len(closes) || len(atrValues)+offset != len(closes) || factor <= 0 {
+		return trendPoint{}, trendPoint{}, 0, false
+	}
+	atrValue := atrValues[0] * factor
+	if atrValue <= 0 {
+		return trendPoint{}, trendPoint{}, 0, false
+	}
+	mid := (highs[offset] + lows[offset]) / 2
+	finalUpper := mid + atrValue
+	finalLower := mid - atrValue
+	direction := "down"
+	if closes[offset] >= mid {
+		direction = "up"
+	}
+	lastPoint := supertrendPoint(finalUpper, finalLower, direction)
+	previousPoint := lastPoint
+	ama := lastPoint.value
+	for index := offset + 1; index < len(closes); index++ {
+		atrValue = atrValues[index-offset] * factor
+		if atrValue <= 0 {
+			return trendPoint{}, trendPoint{}, 0, false
+		}
+		mid = (highs[index] + lows[index]) / 2
+		basicUpper := mid + atrValue
+		basicLower := mid - atrValue
+		nextUpper := finalUpper
+		if basicUpper < finalUpper || closes[index-1] > finalUpper {
+			nextUpper = basicUpper
+		}
+		nextLower := finalLower
+		if basicLower > finalLower || closes[index-1] < finalLower {
+			nextLower = basicLower
+		}
+		if direction == "down" && closes[index] > nextUpper {
+			direction = "up"
+		} else if direction == "up" && closes[index] < nextLower {
+			direction = "down"
+		}
+		finalUpper, finalLower = nextUpper, nextLower
+		previousPoint = lastPoint
+		lastPoint = supertrendPoint(finalUpper, finalLower, direction)
+		ama += amaFactor * (lastPoint.value - ama)
+	}
+	return previousPoint, lastPoint, ama, true
 }
 
 func aiSupertrendFactorPerformance(highs []float64, lows []float64, closes []float64, atrValues []float64, offset int, factor float64, perfAlpha int) (aiSupertrendFactorResult, bool) {
@@ -538,14 +679,20 @@ func aiPerformanceClusters(results []aiSupertrendFactorResult) ([]aiPerformanceC
 }
 
 func aiPerformanceDenominator(closes []float64, period int) (float64, bool) {
-	if len(closes) < period+1 {
+	if period <= 0 || len(closes) < period+1 {
 		return 0, false
 	}
-	changes := make([]float64, 0, len(closes)-1)
-	for index := 1; index < len(closes); index++ {
-		changes = append(changes, absFloat(closes[index]-closes[index-1]))
+	seed := 0.0
+	for index := 1; index <= period; index++ {
+		seed += absFloat(closes[index] - closes[index-1])
 	}
-	return ema(changes, period)
+	current := seed / float64(period)
+	multiplier := 2 / float64(period+1)
+	for index := period + 1; index < len(closes); index++ {
+		change := absFloat(closes[index] - closes[index-1])
+		current = (change-current)*multiplier + current
+	}
+	return current, true
 }
 
 func aiSupertrendAMA(points []trendPoint, performanceIndex float64) float64 {
@@ -883,17 +1030,12 @@ func alphaTrendSeriesCompact(highs []float64, lows []float64, closes []float64, 
 	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
 		return nil, 0, false
 	}
-	trs := trueRanges(highs, lows, closes)
-	if len(trs) < period {
-		return nil, 0, false
-	}
-	trend := make([]float64, len(closes))
-	directions := make([]string, len(closes))
+	points := make([]trendPoint, 0, len(closes)-period)
 	atrSum := 0.0
 	positiveFlow := 0.0
 	negativeFlow := 0.0
 	for index := 1; index <= period; index++ {
-		atrSum += trs[index-1]
+		atrSum += trueRangeAt(highs, lows, closes, index)
 		current := (highs[index] + lows[index] + closes[index]) / 3
 		previous := (highs[index-1] + lows[index-1] + closes[index-1]) / 3
 		flow := current * volumes[index]
@@ -910,31 +1052,31 @@ func alphaTrendSeriesCompact(highs []float64, lows []float64, closes []float64, 
 		atrValue := atrSum / float64(period)
 		up := lows[index] - multiplier*atrValue
 		down := highs[index] + multiplier*atrValue
+		point := trendPoint{}
 		if index == period {
 			if mfi >= 50 {
-				trend[index] = up
-				directions[index] = "up"
+				point = trendPoint{value: up, direction: "up"}
 			} else {
-				trend[index] = down
-				directions[index] = "down"
+				point = trendPoint{value: down, direction: "down"}
 			}
 		} else if mfi >= 50 {
-			if up < trend[index-1] {
-				trend[index] = trend[index-1]
+			previous := points[len(points)-1]
+			if up < previous.value {
+				point = trendPoint{value: previous.value, direction: "up"}
 			} else {
-				trend[index] = up
+				point = trendPoint{value: up, direction: "up"}
 			}
-			directions[index] = "up"
 		} else {
-			if down > trend[index-1] {
-				trend[index] = trend[index-1]
+			previous := points[len(points)-1]
+			if down > previous.value {
+				point = trendPoint{value: previous.value, direction: "down"}
 			} else {
-				trend[index] = down
+				point = trendPoint{value: down, direction: "down"}
 			}
-			directions[index] = "down"
 		}
+		points = append(points, point)
 		if index+1 < len(closes) {
-			atrSum += trs[index] - trs[index-period]
+			atrSum += trueRangeAt(highs, lows, closes, index+1) - trueRangeAt(highs, lows, closes, index-period+1)
 			addCurrent := (highs[index+1] + lows[index+1] + closes[index+1]) / 3
 			addPrevious := (highs[index] + lows[index] + closes[index]) / 3
 			addFlow := addCurrent * volumes[index+1]
@@ -953,14 +1095,18 @@ func alphaTrendSeriesCompact(highs []float64, lows []float64, closes []float64, 
 			}
 		}
 	}
-	points := make([]trendPoint, 0, len(closes)-period)
-	for index := period; index < len(closes); index++ {
-		points = append(points, trendPoint{value: trend[index], direction: directions[index]})
-	}
 	if len(points) < 2 {
 		return nil, 0, false
 	}
 	return points, lastMFI, true
+}
+
+func trueRangeAt(highs []float64, lows []float64, closes []float64, index int) float64 {
+	return maxFloat(
+		highs[index]-lows[index],
+		absFloat(highs[index]-closes[index-1]),
+		absFloat(lows[index]-closes[index-1]),
+	)
 }
 
 func moneyFlowIndexFromSums(positive float64, negative float64) float64 {
@@ -1027,33 +1173,54 @@ func alphaTrendSignals(points []trendPoint) (string, string) {
 	if len(points) < 4 {
 		return "none", "none"
 	}
-	buys := make([]bool, len(points))
-	sells := make([]bool, len(points))
-	for index := 3; index < len(points); index++ {
-		current := points[index].value
-		twoBack := points[index-2].value
-		previous := points[index-1].value
-		threeBack := points[index-3].value
-		buys[index] = current > twoBack && previous <= threeBack
-		sells[index] = current < twoBack && previous >= threeBack
-	}
-
 	last := len(points) - 1
+	buy, sell := alphaTrendCrossAt(points, last)
 	cross := "none"
 	signal := "none"
-	if buys[last] {
+	if buy {
 		cross = "buy"
-		if alphaTrendSignalAllowed(previousCrossDistance(buys, last), crossDistance(sells, last)) {
+		if alphaTrendSignalAllowed(alphaTrendPreviousCrossDistance(points, last, true), alphaTrendCrossDistance(points, last, false)) {
 			signal = "buy"
 		}
 	}
-	if sells[last] {
+	if sell {
 		cross = "sell"
-		if alphaTrendSignalAllowed(previousCrossDistance(sells, last), crossDistance(buys, last)) {
+		if alphaTrendSignalAllowed(alphaTrendPreviousCrossDistance(points, last, false), alphaTrendCrossDistance(points, last, true)) {
 			signal = "sell"
 		}
 	}
 	return cross, signal
+}
+
+func alphaTrendCrossAt(points []trendPoint, index int) (bool, bool) {
+	if index < 3 || index >= len(points) {
+		return false, false
+	}
+	current := points[index].value
+	twoBack := points[index-2].value
+	previous := points[index-1].value
+	threeBack := points[index-3].value
+	return current > twoBack && previous <= threeBack, current < twoBack && previous >= threeBack
+}
+
+func alphaTrendCrossDistance(points []trendPoint, current int, buy bool) int {
+	for index := current; index >= 3; index-- {
+		isBuy, isSell := alphaTrendCrossAt(points, index)
+		if (buy && isBuy) || (!buy && isSell) {
+			return current - index
+		}
+	}
+	return -1
+}
+
+func alphaTrendPreviousCrossDistance(points []trendPoint, current int, buy bool) int {
+	for index := current - 1; index >= 3; index-- {
+		isBuy, isSell := alphaTrendCrossAt(points, index)
+		if (buy && isBuy) || (!buy && isSell) {
+			return current - index - 1
+		}
+	}
+	return -1
 }
 
 func alphaTrendSignalAllowed(previousSame int, opposite int) bool {
@@ -1084,24 +1251,28 @@ type livermoreState struct {
 }
 
 func addLivermoreFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, opens []float64) {
+	addLivermoreFeaturesToSet(nil, values, signals, highs, lows, closes, opens)
+}
+
+func addLivermoreFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, opens []float64) {
 	state, ok := livermoreStructure(highs, lows, closes, opens, 365, 4)
 	if !ok {
 		return
 	}
 	if state.hasC {
-		setValue(values, "livermore_key_point", state.c, true)
+		setValueTarget(target, values, "livermore_key_point", state.c, true)
 	}
 	if state.hasF {
-		setValue(values, "livermore_pullback_point", state.f, true)
+		setValueTarget(target, values, "livermore_pullback_point", state.f, true)
 	}
 	if state.hasG {
-		setValue(values, "livermore_breakout_line", state.g, true)
+		setValueTarget(target, values, "livermore_breakout_line", state.g, true)
 	}
 	if state.hasH {
-		setValue(values, "livermore_previous_key_point", state.h, true)
+		setValueTarget(target, values, "livermore_previous_key_point", state.h, true)
 	}
 	if state.keyPoint != 0 {
-		setValue(values, "livermore_active_point", state.keyPoint, true)
+		setValueTarget(target, values, "livermore_active_point", state.keyPoint, true)
 	}
 	switch state.trend {
 	case 1:

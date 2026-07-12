@@ -22,15 +22,19 @@ type dynamicSwingVWAPState struct {
 }
 
 func addDynamicSwingAnchoredVWAP(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64) {
+	addDynamicSwingAnchoredVWAPToSet(nil, values, signals, highs, lows, closes, volumes)
+}
+
+func addDynamicSwingAnchoredVWAPToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64) {
 	state := dynamicSwingAnchoredVWAP(highs, lows, closes, volumes, dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, dynamicSwingVWAPUseAdapt, dynamicSwingVWAPVolBias)
 	if !state.ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "dynamic_swing_vwap", state.value, true)
-	setValue(values, "dynamic_swing_vwap_distance_pct", percentDistance(last, state.value), state.value != 0)
-	setValue(values, "dynamic_swing_vwap_anchor_price", state.anchor, true)
-	setValue(values, "dynamic_swing_vwap_anchor_age", float64(state.anchorAge), true)
+	setValueTarget(target, values, "dynamic_swing_vwap", state.value, true)
+	setValueTarget(target, values, "dynamic_swing_vwap_distance_pct", percentDistance(last, state.value), state.value != 0)
+	setValueTarget(target, values, "dynamic_swing_vwap_anchor_price", state.anchor, true)
+	setValueTarget(target, values, "dynamic_swing_vwap_anchor_age", float64(state.anchorAge), true)
 	signals["dynamic_swing_vwap_direction"] = dynamicSwingVWAPDirection(state.dir)
 	signals["dynamic_swing_vwap_position"] = dynamicSwingVWAPPosition(last, state.value)
 	signals["dynamic_swing_vwap_anchor_type"] = state.anchorType
@@ -42,7 +46,10 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 		return dynamicSwingVWAPState{}
 	}
 
-	aptSeries := dynamicSwingAPTSeries(highs, lows, closes, baseAPT, useAdapt, volBias)
+	var aptSeries []float64
+	if useAdapt {
+		aptSeries = dynamicSwingAPTSeries(highs, lows, closes, baseAPT, true, volBias)
+	}
 	ph := math.NaN()
 	pl := math.NaN()
 	phL := 0
@@ -98,7 +105,7 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 			state.anchorAge = index - anchorIndex
 			state.anchorType = anchorType
 			for cursor := anchorIndex; cursor <= index; cursor++ {
-				p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[cursor], lows[cursor], closes[cursor], volumes[cursor], aptSeries[cursor])
+				p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[cursor], lows[cursor], closes[cursor], volumes[cursor], dynamicSwingAPTAt(aptSeries, baseAPT, cursor))
 			}
 		} else {
 			initializedAnchor := false
@@ -107,7 +114,7 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 				state.swingLabel = "none"
 				initializedAnchor = true
 			}
-			p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[index], lows[index], closes[index], volumes[index], aptSeries[index])
+			p, vol, state.value = dynamicSwingVWAPStep(p, vol, highs[index], lows[index], closes[index], volumes[index], dynamicSwingAPTAt(aptSeries, baseAPT, index))
 			if !initializedAnchor {
 				state.anchorAge++
 			}
@@ -118,6 +125,13 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 	}
 
 	return state
+}
+
+func dynamicSwingAPTAt(series []float64, baseAPT float64, index int) float64 {
+	if index >= 0 && index < len(series) {
+		return series[index]
+	}
+	return baseAPT
 }
 
 func dynamicSwingCurrentAnchor(dir int, ph float64, pl float64, phL int, plL int, index int) (float64, int, string) {

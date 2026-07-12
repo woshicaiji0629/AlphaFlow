@@ -45,6 +45,10 @@ func addNumericSeriesAnalysis(
 func numericSeries(points []point, key string) []float64 {
 	series := make([]float64, 0, len(points))
 	for _, point := range points {
+		if value, ok := point.numericValues[key]; ok {
+			series = append(series, value)
+			continue
+		}
 		value, ok := point.values[key]
 		if !ok {
 			continue

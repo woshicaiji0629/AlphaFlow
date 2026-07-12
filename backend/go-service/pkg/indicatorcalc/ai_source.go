@@ -243,10 +243,14 @@ func defaultAISourceConfig() aiSourceConfig {
 }
 
 func addAISourceSwitchingFeatures(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
-	addAISourceSwitchingFeaturesWithContext(values, signals, opens, highs, lows, closes, nil)
+	addAISourceSwitchingFeaturesWithContextToSet(nil, values, signals, opens, highs, lows, closes, nil)
 }
 
 func addAISourceSwitchingFeaturesWithContext(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, features *featureContext) {
+	addAISourceSwitchingFeaturesWithContextToSet(nil, values, signals, opens, highs, lows, closes, features)
+}
+
+func addAISourceSwitchingFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, features *featureContext) {
 	cfg := defaultAISourceConfig()
 	var atr14, stATR []float64
 	var ok14, okST bool
@@ -259,16 +263,16 @@ func addAISourceSwitchingFeaturesWithContext(values map[string]string, signals m
 		signals["ai_source_ready"] = "false"
 		return
 	}
-	setValue(values, "ai_source_ma", result.ma, true)
-	setValue(values, "ai_source_value", result.sourceValue, true)
-	setValue(values, "ai_source_drive", result.drive, true)
-	setValue(values, "ai_source_score_open", result.scoreOpen, true)
-	setValue(values, "ai_source_score_high", result.scoreHigh, true)
-	setValue(values, "ai_source_score_low", result.scoreLow, true)
-	setValue(values, "ai_source_score_close", result.scoreClose, true)
-	setValue(values, "ai_source_supertrend", result.supertrend, true)
-	setValue(values, "ai_source_supertrend_distance_pct", result.supertrendDist, true)
-	setValue(values, "ai_source_supertrend_adapt_mult", result.adaptMultiplier, true)
+	setValueTarget(target, values, "ai_source_ma", result.ma, true)
+	setValueTarget(target, values, "ai_source_value", result.sourceValue, true)
+	setValueTarget(target, values, "ai_source_drive", result.drive, true)
+	setValueTarget(target, values, "ai_source_score_open", result.scoreOpen, true)
+	setValueTarget(target, values, "ai_source_score_high", result.scoreHigh, true)
+	setValueTarget(target, values, "ai_source_score_low", result.scoreLow, true)
+	setValueTarget(target, values, "ai_source_score_close", result.scoreClose, true)
+	setValueTarget(target, values, "ai_source_supertrend", result.supertrend, true)
+	setValueTarget(target, values, "ai_source_supertrend_distance_pct", result.supertrendDist, true)
+	setValueTarget(target, values, "ai_source_supertrend_adapt_mult", result.adaptMultiplier, true)
 	signals["ai_source_selected"] = result.selected
 	signals["ai_source_changed"] = aiSourceBoolSignal(result.changed)
 	signals["ai_source_supertrend_direction"] = result.direction

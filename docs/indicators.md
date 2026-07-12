@@ -6,10 +6,13 @@
 
 ## 底层指标存储模型
 
-底层指标快照不是一列一个指标，而是两个动态 map：
+底层指标快照不是一列一个指标。计算域和传输边界使用不同表示：
 
-- `values`：数值型字段，统一以字符串存储，策略侧会按需解析为浮点数。
+- `NumericValues`：进程内数值字段，使用 `map[string]float64`；指标窗口、在线策略和回测优先直接读取该通道。
+- `values`：Redis、NATS、JSON 等兼容边界使用的字符串字段，只在需要旧协议时编码。
 - `signals`：枚举或状态型字段，统一以字符串存储。
+
+`pkg/indicatorcalc.CalculateWindow` 同时返回兼容字符串和数值通道，供在线发布与持久化使用；`CalculateWindowNumeric` 不构造字符串 map，供回测等纯进程内消费者使用。新增数值指标应优先写入 `ValueSet`，不要在计算热路径中执行 `FormatFloat` 后再由下游 `ParseFloat`。
 
 新增指标通常不需要改数据库字段。只要 Go 计算端写入新的 `values["key"]` 或 `signals["key"]`，Redis 最新快照和 market snapshot 会随之携带。窗口聚合层会枚举当前计算窗口里的指标 key：
 
@@ -90,6 +93,9 @@
 - VFI 使用 compact 路径，以滚动 VCP 和流式 signal EMA 替代旧实现中的嵌套窗口求和与 signal 序列数组；旧批量实现保留为 fallback。
 - `CalculateWindow` 正常路径复用 `CalculationWindow` 已解析 series 做数据质量检查，解析失败时回退旧质量检查逻辑以保留错误原因。
 - Nadaraya-Watson envelope 复用栈上权重缓存，避免每个点重复构造权重；MoneyFlow 的区间最高/最低扫描已抽成公共 helper。
+- Bollinger 20 和 Donchian 20 复用 `CalculationWindow` 中的滚动 sum/sum² 与单调队列；滚动方差定期全量校正并钳制浮点误差导致的极小负方差。
+- ATR、Supertrend、AlphaTrend、QQE、Heikin Ashi、EMD、MACD divergence、AI Supertrend 和 Dynamic Swing VWAP 的只读末值或共享基础序列路径避免构造不必要的完整临时数组。
+- 回测使用 `CalculateWindowNumeric`，不生成旧字符串值 map；策略读取先查 `NumericValues`，只有旧快照才回退解析 `Values`。
 
 当前可用 benchmark：
 
@@ -97,6 +103,7 @@
 go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTemporaryKlineRealtime -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench 'BenchmarkCalculate(250|300)Bars' -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowStreaming -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowNumericStreaming -benchmem
 ```
 
 它覆盖 realtime open kline 的临时窗口构造和 `CalculateWindow` 完整特征计算。一次本地基线结果为：
@@ -106,6 +113,8 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 ```
 
 早期 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+
+2026-07 的纯数值 streaming 优化基线从约 `255KB/op`、`488 allocs/op` 降至约 `76KB/op`、`146–147 allocs/op`，约 278 个数值字段和 145 个信号保持输出。该数据来自 Intel i7 本地 benchmark，主要用于比较分配趋势；墙钟耗时会受机器负载影响。年度五周期回测仍按时间顺序推进，下一阶段若优化墙钟时间，应优先考虑策略指标依赖裁剪，以及有界内存下各周期独立分批预计算。
 
 年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、每根 K 线重复分析未被策略读取的指标窗口，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。剩余热点主要是 QQE、Volume Flow、普通 Supertrend/ATR 序列和结果 map/字符串分配。
 

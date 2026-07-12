@@ -3,15 +3,19 @@ package indicatorcalc
 import "math"
 
 func addPivotPointFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addPivotPointFeaturesToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addPivotPointFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	pivot, r1, r2, s1, s2, ok := pivotPoints(highs, lows, closes, 20)
 	if !ok {
 		return
 	}
-	setValue(values, "pivot_point", pivot, true)
-	setValue(values, "pivot_r1", r1, true)
-	setValue(values, "pivot_r2", r2, true)
-	setValue(values, "pivot_s1", s1, true)
-	setValue(values, "pivot_s2", s2, true)
+	setValueTarget(target, values, "pivot_point", pivot, true)
+	setValueTarget(target, values, "pivot_r1", r1, true)
+	setValueTarget(target, values, "pivot_r2", r2, true)
+	setValueTarget(target, values, "pivot_s1", s1, true)
+	setValueTarget(target, values, "pivot_s2", s2, true)
 	signals["pivot_zone"] = pivotZone(closes[len(closes)-1], pivot)
 }
 

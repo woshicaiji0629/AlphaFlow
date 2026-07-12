@@ -261,6 +261,24 @@ func TestCalculateIgnoresOpenKline(t *testing.T) {
 	}
 }
 
+func TestCalculateWindowNumericSkipsLegacyEncoding(t *testing.T) {
+	klines := []model.Kline{
+		testKline(1, 100, true),
+		testKline(2, 101, true),
+	}
+	window := NewCalculationWindowFromKlines(klines, 0)
+	result, err := CalculateWindowNumeric(window, Options{SMAPeriods: []int{2}})
+	if err != nil {
+		t.Fatalf("CalculateWindowNumeric: %v", err)
+	}
+	if result.Values != nil {
+		t.Fatalf("legacy values were encoded: %#v", result.Values)
+	}
+	if result.NumericValues["sma2"] != 101.5 {
+		t.Fatalf("numeric sma2 = %v, want 101.5", result.NumericValues["sma2"])
+	}
+}
+
 func TestCalculateReportsInsufficientSamples(t *testing.T) {
 	klines := []model.Kline{
 		testKline(1, 100, true),

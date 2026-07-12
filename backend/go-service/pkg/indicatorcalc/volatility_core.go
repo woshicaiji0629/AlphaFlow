@@ -1,22 +1,30 @@
 package indicatorcalc
 
 func addVolatilityCoreFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
+	addVolatilityCoreFeaturesToSet(nil, values, signals, highs, lows, closes, period)
+}
+
+func addVolatilityCoreFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
 	series, ok := atrSeries(highs, lows, closes, period)
 	if !ok {
 		return
 	}
-	addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, period, series, nil)
+	addVolatilityCoreFeaturesWithATRToSet(target, values, signals, highs, lows, closes, period, series, nil)
 }
 
 func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64, basic *basicIndicatorState) {
+	addVolatilityCoreFeaturesWithATRToSet(nil, values, signals, highs, lows, closes, period, series, basic)
+}
+
+func addVolatilityCoreFeaturesWithATRToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64, basic *basicIndicatorState) {
 	if len(series) == 0 {
 		return
 	}
 	atrValue := series[len(series)-1]
-	setValue(values, "atr14", atrValue, true)
+	setValueTarget(target, values, "atr14", atrValue, true)
 	last := closes[len(closes)-1]
-	setValue(values, "atr_pct14", atrValue/last*100, last != 0)
-	setValue(values, "natr14", atrValue/last*100, last != 0)
+	setValueTarget(target, values, "atr_pct14", atrValue/last*100, last != 0)
+	setValueTarget(target, values, "natr14", atrValue/last*100, last != 0)
 	signals["volatility_state"] = volatilityStateFromATR(series)
 
 	adxValue, plusDI, minusDI, ok := basic.adx14Value()
@@ -24,27 +32,60 @@ func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[stri
 		adxValue, plusDI, minusDI, ok = adx(highs, lows, closes, period)
 	}
 	if ok {
-		setValue(values, "adx14", adxValue, true)
-		setValue(values, "di_plus14", plusDI, true)
-		setValue(values, "di_minus14", minusDI, true)
+		setValueTarget(target, values, "adx14", adxValue, true)
+		setValueTarget(target, values, "di_plus14", plusDI, true)
+		setValueTarget(target, values, "di_minus14", minusDI, true)
 		signals["adx_trend_strength"] = adxTrendStrength(adxValue)
 		signals["di_direction"] = diDirection(plusDI, minusDI)
 	}
 }
 
 func atr(highs []float64, lows []float64, closes []float64, period int) (float64, bool) {
-	series, ok := atrSeries(highs, lows, closes, period)
-	if !ok {
+	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) {
 		return 0, false
 	}
-	return series[len(series)-1], true
+	current := 0.0
+	for index := 1; index <= period; index++ {
+		current += maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+	}
+	current /= float64(period)
+	for index := period + 1; index < len(closes); index++ {
+		trueRange := maxFloat(
+			highs[index]-lows[index],
+			absFloat(highs[index]-closes[index-1]),
+			absFloat(lows[index]-closes[index-1]),
+		)
+		current = (current*float64(period-1) + trueRange) / float64(period)
+	}
+	return current, true
 }
 
 func atrSeries(highs []float64, lows []float64, closes []float64, period int) ([]float64, bool) {
-	if period <= 0 || len(closes) <= period {
+	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) {
 		return nil, false
 	}
-	trs := trueRanges(highs, lows, closes)
+	values := make([]float64, 0, len(closes)-period)
+	current := 0.0
+	for index := 1; index <= period; index++ {
+		current += trueRangeAt(highs, lows, closes, index)
+	}
+	current /= float64(period)
+	values = append(values, current)
+	for index := period + 1; index < len(closes); index++ {
+		current = (current*float64(period-1) + trueRangeAt(highs, lows, closes, index)) / float64(period)
+		values = append(values, current)
+	}
+	return values, true
+}
+
+func atrSeriesFromTrueRanges(trs []float64, period int) ([]float64, bool) {
+	if period <= 0 {
+		return nil, false
+	}
 	if len(trs) < period {
 		return nil, false
 	}

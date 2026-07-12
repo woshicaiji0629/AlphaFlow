@@ -15,6 +15,9 @@ type CalculationWindow struct {
 	aiPrefix  *aiSourceState
 	aiPreview *aiSourceResult
 	stream    bool
+	close20   *rollingWindow
+	high20    *rollingWindow
+	low20     *rollingWindow
 }
 
 func NewCalculationWindow(limit int) *CalculationWindow {
@@ -54,6 +57,9 @@ func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool
 		basic:     w.basic.cloneWithExtraCapacity(extra),
 		aiPreview: w.aiPreview,
 		stream:    w.stream,
+		close20:   w.close20.clone(),
+		high20:    w.high20.clone(),
+		low20:     w.low20.clone(),
 	}
 	if cloneAIPrefix {
 		cloned.aiPrefix = w.aiPrefix
@@ -300,6 +306,9 @@ func (w *CalculationWindow) rebuildSeries() {
 	w.closes = w.closes[:0]
 	w.volumes = w.volumes[:0]
 	w.parseErr = nil
+	w.close20 = newRollingWindow(20)
+	w.high20 = newRollingWindow(20)
+	w.low20 = newRollingWindow(20)
 
 	for _, kline := range w.klines {
 		open, err := parse(kline.Open)
@@ -332,6 +341,9 @@ func (w *CalculationWindow) rebuildSeries() {
 		w.lows = append(w.lows, low)
 		w.closes = append(w.closes, closeValue)
 		w.volumes = append(w.volumes, volume)
+		w.close20.append(closeValue)
+		w.high20.append(high)
+		w.low20.append(low)
 	}
 }
 
@@ -374,4 +386,22 @@ func (w *CalculationWindow) appendSeries(kline model.Kline) {
 	w.lows = append(w.lows, low)
 	w.closes = append(w.closes, closeValue)
 	w.volumes = append(w.volumes, volume)
+	if w.close20 == nil {
+		w.rebuildRollingWindows()
+		return
+	}
+	w.close20.append(closeValue)
+	w.high20.append(high)
+	w.low20.append(low)
+}
+
+func (w *CalculationWindow) rebuildRollingWindows() {
+	w.close20 = newRollingWindow(20)
+	w.high20 = newRollingWindow(20)
+	w.low20 = newRollingWindow(20)
+	for index := range w.closes {
+		w.close20.append(w.closes[index])
+		w.high20.append(w.highs[index])
+		w.low20.append(w.lows[index])
+	}
 }

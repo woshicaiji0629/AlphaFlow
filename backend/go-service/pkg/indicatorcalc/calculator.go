@@ -11,10 +11,11 @@ import (
 )
 
 type Result struct {
-	OpenTime  int64
-	CloseTime int64
-	Values    map[string]string
-	Signals   map[string]string
+	OpenTime      int64
+	CloseTime     int64
+	Values        map[string]string
+	NumericValues map[string]float64
+	Signals       map[string]string
 }
 
 type Options struct {
@@ -96,6 +97,17 @@ func CalculateWindowsContext(
 }
 
 func CalculateWindow(window *CalculationWindow, options Options) (Result, error) {
+	return calculateWindow(window, options, true)
+}
+
+// CalculateWindowNumeric calculates indicators without materializing the
+// legacy string value map. It is intended for in-process consumers such as
+// backtests that read NumericValues directly.
+func CalculateWindowNumeric(window *CalculationWindow, options Options) (Result, error) {
+	return calculateWindow(window, options, false)
+}
+
+func calculateWindow(window *CalculationWindow, options Options, encodeValues bool) (Result, error) {
 	if window == nil {
 		return Result{}, fmt.Errorf("nil calculation window")
 	}
@@ -107,11 +119,15 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		options = DefaultOptions()
 	}
 
-	values := make(map[string]string, resultValuesCapacity)
+	var values map[string]string
+	if encodeValues {
+		values = make(map[string]string, resultValuesCapacity)
+	}
+	numericSet := NewValueSet(resultValuesCapacity)
 	signals := make(map[string]string, resultSignalsCapacity)
 	requiredSamples := requiredSampleCount(options)
-	values["sample_count"] = strconv.Itoa(len(closed))
-	values["required_count"] = strconv.Itoa(requiredSamples)
+	setValueSet(numericSet, "sample_count", float64(len(closed)), true)
+	setValueSet(numericSet, "required_count", float64(requiredSamples), true)
 	opens, highs, lows, closes, volumes, err := window.Series()
 	if err != nil {
 		quality, reason := assessDataQuality(closed, requiredSamples)
@@ -121,11 +137,13 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 		}
 		if quality == dataQualityInvalidOHLC {
 			last := closed[len(closed)-1]
+			encodedValues, numericValues := finalizeValueSet(numericSet, values, encodeValues)
 			return Result{
-				OpenTime:  last.OpenTime,
-				CloseTime: last.CloseTime,
-				Values:    values,
-				Signals:   signals,
+				OpenTime:      last.OpenTime,
+				CloseTime:     last.CloseTime,
+				Values:        encodedValues,
+				NumericValues: numericValues,
+				Signals:       signals,
 			}, nil
 		}
 		return Result{}, err
@@ -137,95 +155,110 @@ func CalculateWindow(window *CalculationWindow, options Options) (Result, error)
 	}
 	last := closed[len(closed)-1]
 	if quality == dataQualityInvalidOHLC {
+		encodedValues, numericValues := finalizeValueSet(numericSet, values, encodeValues)
 		return Result{
-			OpenTime:  last.OpenTime,
-			CloseTime: last.CloseTime,
-			Values:    values,
-			Signals:   signals,
+			OpenTime:      last.OpenTime,
+			CloseTime:     last.CloseTime,
+			Values:        encodedValues,
+			NumericValues: numericValues,
+			Signals:       signals,
 		}, nil
 	}
 	basic := window.basic
 	if window.aiPreview == nil {
 		window.prepareAISourcePrefix()
 	}
-	features := newFeatureContext(highs, lows, closes, basic)
+	features := newFeatureContextWithWindow(highs, lows, closes, basic, window)
 
 	for _, period := range options.SMAPeriods {
 		value, ok := basic.sma(period)
 		if !ok {
 			value, ok = sma(closes, period)
 		}
-		setValue(values, fmt.Sprintf("sma%d", period), value, ok)
+		setValueSet(numericSet, fmt.Sprintf("sma%d", period), value, ok)
 	}
 	for _, period := range options.EMAPeriods {
 		value, ok := basic.emaValue(period)
 		if !ok {
 			value, ok = ema(closes, period)
 		}
-		setValue(values, fmt.Sprintf("ema%d", period), value, ok)
+		setValueSet(numericSet, fmt.Sprintf("ema%d", period), value, ok)
 	}
 	for _, period := range options.WMAPeriods {
 		value, ok := wma(closes, period)
-		setValue(values, fmt.Sprintf("wma%d", period), value, ok)
+		setValueSet(numericSet, fmt.Sprintf("wma%d", period), value, ok)
 	}
-	addMovingAverageFeatures(values, signals, closes, volumes, basic)
+	addMovingAverageFeaturesToSet(numericSet, values, signals, closes, volumes, basic)
 
 	rsi14Series, ok := basic.rsiSeries14()
 	if !ok {
 		rsi14Series, _ = rsiSeries(closes, 14)
 	}
-	addRSIFeaturesFromSeries(values, signals, closes, rsi14Series)
+	addRSIFeaturesFromSeriesToSet(numericSet, values, signals, closes, rsi14Series)
 	if series, ok := basic.macdSeries(macdConfig{fast: 12, slow: 26, signal: 9}); ok {
-		addMACDSeriesFeatures(values, signals, closes, series, "macd")
+		addMACDSeriesFeaturesToSet(numericSet, values, signals, closes, series, "macd")
 	} else if series, ok := macdSeries(closes, 12, 26, 9); ok {
-		addMACDSeriesFeatures(values, signals, closes, series, "macd")
+		addMACDSeriesFeaturesToSet(numericSet, values, signals, closes, series, "macd")
 	}
 	if series, ok := basic.macdSeries(macdConfig{fast: 7, slow: 19, signal: 9}); ok {
-		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
+		addMACDSeriesFeaturesToSet(numericSet, values, signals, closes, series, "macd_fast")
 	} else if series, ok := macdSeries(closes, 7, 19, 9); ok {
-		addMACDSeriesFeatures(values, signals, closes, series, "macd_fast")
+		addMACDSeriesFeaturesToSet(numericSet, values, signals, closes, series, "macd_fast")
 	}
-	addOscillatorFeaturesWithRSI(values, signals, highs, lows, closes, rsi14Series, basic)
+	addOscillatorFeaturesWithRSIToSet(numericSet, values, signals, highs, lows, closes, rsi14Series, basic)
 	if atr14Series, ok := features.atrSeries(14); ok {
-		addVolatilityCoreFeaturesWithATR(values, signals, highs, lows, closes, 14, atr14Series, basic)
+		addVolatilityCoreFeaturesWithATRToSet(numericSet, values, signals, highs, lows, closes, 14, atr14Series, basic)
 	} else {
-		addVolatilityCoreFeatures(values, signals, highs, lows, closes, 14)
+		addVolatilityCoreFeaturesToSet(numericSet, values, signals, highs, lows, closes, 14)
 	}
 	upper, middle, lower, ok := features.bollinger(20, 2)
 	if ok {
-		setValue(values, "bb_upper", upper, true)
-		setValue(values, "bb_middle", middle, true)
-		setValue(values, "bb_lower", lower, true)
+		setValueSet(numericSet, "bb_upper", upper, true)
+		setValueSet(numericSet, "bb_middle", middle, true)
+		setValueSet(numericSet, "bb_lower", lower, true)
 	}
 	volumeMA, ok := basic.volumeSMAValue(20)
 	if !ok {
 		volumeMA, ok = sma(volumes, 20)
 	}
-	setValue(values, "volume_ma20", volumeMA, ok)
+	setValueSet(numericSet, "volume_ma20", volumeMA, ok)
 	if obvValue, ok := basic.obvValue(); ok {
-		setValue(values, "obv", obvValue, true)
+		setValueSet(numericSet, "obv", obvValue, true)
 	} else {
-		setValue(values, "obv", obv(closes, volumes), true)
+		setValueSet(numericSet, "obv", obv(closes, volumes), true)
 	}
 	donchianHigh, donchianLow, ok := features.donchian(20)
 	if ok {
-		setValue(values, "donchian_high20", donchianHigh, true)
-		setValue(values, "donchian_low20", donchianLow, true)
+		setValueSet(numericSet, "donchian_high20", donchianHigh, true)
+		setValueSet(numericSet, "donchian_low20", donchianLow, true)
 	}
 	if vwapValue, ok := basic.vwapValue(closes[len(closes)-1]); ok {
-		setValue(values, "vwap", vwapValue, true)
+		setValueSet(numericSet, "vwap", vwapValue, true)
 	} else {
-		setValue(values, "vwap", vwap(highs, lows, closes, volumes), true)
+		setValueSet(numericSet, "vwap", vwap(highs, lows, closes, volumes), true)
 	}
-	addDerived(values, opens, highs, lows, closes, volumes)
-	addEnhanced(values, signals, opens, highs, lows, closes, volumes, basic, features, window.aiPreview)
+	addDerivedToSet(numericSet, values, opens, highs, lows, closes, volumes)
+	addEnhancedToSet(numericSet, values, signals, opens, highs, lows, closes, volumes, basic, features, window.aiPreview)
 
+	encodedValues, numericResult := finalizeValueSet(numericSet, values, encodeValues)
 	return Result{
-		OpenTime:  last.OpenTime,
-		CloseTime: last.CloseTime,
-		Values:    values,
-		Signals:   signals,
+		OpenTime:      last.OpenTime,
+		CloseTime:     last.CloseTime,
+		Values:        encodedValues,
+		NumericValues: numericResult,
+		Signals:       signals,
 	}, nil
+}
+
+func finalizeValueSet(values *ValueSet, legacy map[string]string, encode bool) (map[string]string, map[string]float64) {
+	if !encode && len(legacy) == 0 {
+		return nil, values.Numeric()
+	}
+	return values.MergeLegacy(legacy)
+}
+
+func numericValues(values map[string]string) map[string]float64 {
+	return ValueSetFromStrings(values).Numeric()
 }
 
 func requiredSampleCount(options Options) int {
@@ -450,26 +483,30 @@ func vwap(highs []float64, lows []float64, closes []float64, volumes []float64) 
 }
 
 func addDerived(values map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64) {
+	addDerivedToSet(nil, values, opens, highs, lows, closes, volumes)
+}
+
+func addDerivedToSet(target *ValueSet, values map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64) {
 	last := len(closes) - 1
 	open := opens[last]
 	high := highs[last]
 	low := lows[last]
 	closeValue := closes[last]
 	if open != 0 {
-		setValue(values, "change_pct", (closeValue-open)/open*100, true)
+		setValueTarget(target, values, "change_pct", (closeValue-open)/open*100, true)
 	}
 	if closeValue != 0 {
-		setValue(values, "amplitude_pct", (high-low)/closeValue*100, true)
+		setValueTarget(target, values, "amplitude_pct", (high-low)/closeValue*100, true)
 	}
 	rangeValue := high - low
 	if rangeValue != 0 {
-		setValue(values, "body_ratio", math.Abs(closeValue-open)/rangeValue, true)
-		setValue(values, "upper_shadow_ratio", (high-math.Max(open, closeValue))/rangeValue, true)
-		setValue(values, "lower_shadow_ratio", (math.Min(open, closeValue)-low)/rangeValue, true)
+		setValueTarget(target, values, "body_ratio", math.Abs(closeValue-open)/rangeValue, true)
+		setValueTarget(target, values, "upper_shadow_ratio", (high-math.Max(open, closeValue))/rangeValue, true)
+		setValueTarget(target, values, "lower_shadow_ratio", (math.Min(open, closeValue)-low)/rangeValue, true)
 	}
 	volumeMA, ok := sma(volumes, 20)
 	if ok && volumeMA != 0 {
-		setValue(values, "volume_ratio20", volumes[last]/volumeMA, true)
+		setValueTarget(target, values, "volume_ratio20", volumes[last]/volumeMA, true)
 	}
 }
 
@@ -503,6 +540,21 @@ func setValue(values map[string]string, name string, value float64, ok bool) {
 		return
 	}
 	values[name] = format(value)
+}
+
+func setValueSet(values *ValueSet, name string, value float64, ok bool) {
+	if !ok {
+		return
+	}
+	values.Set(name, value)
+}
+
+func setValueTarget(target *ValueSet, legacy map[string]string, name string, value float64, ok bool) {
+	if target != nil {
+		setValueSet(target, name, value, ok)
+		return
+	}
+	setValue(legacy, name, value, ok)
 }
 
 func sum(values []float64) float64 {

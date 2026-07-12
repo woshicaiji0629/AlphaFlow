@@ -89,16 +89,17 @@ func NewRealtimeEnvelope(
 	ttl time.Duration,
 ) SnapshotEnvelope {
 	indicator := marketmodel.IndicatorSnapshot{
-		Exchange:  snapshot.Exchange,
-		Market:    snapshot.Market,
-		Symbol:    snapshot.Symbol,
-		Interval:  snapshot.Interval,
-		OpenTime:  snapshot.OpenTime,
-		CloseTime: snapshot.CloseTime,
-		Values:    snapshot.Values,
-		Signals:   snapshot.Signals,
-		Feature:   snapshot.Feature,
-		UpdatedAt: snapshot.UpdatedAt,
+		Exchange:      snapshot.Exchange,
+		Market:        snapshot.Market,
+		Symbol:        snapshot.Symbol,
+		Interval:      snapshot.Interval,
+		OpenTime:      snapshot.OpenTime,
+		CloseTime:     snapshot.CloseTime,
+		Values:        snapshot.Values,
+		NumericValues: snapshot.NumericValues,
+		Signals:       snapshot.Signals,
+		Feature:       snapshot.Feature,
+		UpdatedAt:     snapshot.UpdatedAt,
 	}
 	envelope := SnapshotEnvelope{
 		Type: SnapshotTypeRealtime,

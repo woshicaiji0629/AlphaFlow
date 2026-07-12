@@ -3,18 +3,22 @@ package indicatorcalc
 import "math"
 
 func addMoneyFlowFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
+	addMoneyFlowFeaturesToSet(nil, values, signals, highs, lows, closes, volumes, basic)
+}
+
+func addMoneyFlowFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
 	if len(closes) < 20 || len(volumes) != len(closes) {
 		return
 	}
 	last := len(closes) - 1
 	mfi := moneyFlowIndex(highs, lows, closes, volumes, 14)
-	setValue(values, "mfi14", mfi, true)
+	setValueTarget(target, values, "mfi14", mfi, true)
 
 	vwapValue := vwap(highs, lows, closes, volumes)
-	setValue(values, "vwap_distance_pct", percentDistance(closes[last], vwapValue), vwapValue != 0)
+	setValueTarget(target, values, "vwap_distance_pct", percentDistance(closes[last], vwapValue), vwapValue != 0)
 	rollingVWAP, ok := rollingVWAP(highs, lows, closes, volumes, 20)
-	setValue(values, "rolling_vwap20", rollingVWAP, ok)
-	setValue(values, "rolling_vwap_distance_pct", percentDistance(closes[last], rollingVWAP), ok && rollingVWAP != 0)
+	setValueTarget(target, values, "rolling_vwap20", rollingVWAP, ok)
+	setValueTarget(target, values, "rolling_vwap_distance_pct", percentDistance(closes[last], rollingVWAP), ok && rollingVWAP != 0)
 
 	obvSlope, pvt, pvtSlope, adLine, adLineSlope, streamMoneyFlowOK := moneyFlowStateValues(basic, closes)
 	if !streamMoneyFlowOK {
@@ -30,26 +34,26 @@ func addMoneyFlowFeatures(values map[string]string, signals map[string]string, h
 	} else {
 		signals["price_volume_confirmation"] = priceVolumeConfirmationFromSlopes(closes, obvSlope, pvtSlope)
 	}
-	setValue(values, "obv_slope5", obvSlope, len(closes) >= 5)
+	setValueTarget(target, values, "obv_slope5", obvSlope, len(closes) >= 5)
 
 	volumeZScore, ok := zScore(volumes, 20)
-	setValue(values, "volume_zscore20", volumeZScore, ok)
+	setValueTarget(target, values, "volume_zscore20", volumeZScore, ok)
 	volumeRatio5, ok5 := volumeRatio(volumes, 5)
-	setValue(values, "volume_ratio5", volumeRatio5, ok5)
+	setValueTarget(target, values, "volume_ratio5", volumeRatio5, ok5)
 	volumeRatio10, ok10 := volumeRatio(volumes, 10)
-	setValue(values, "volume_ratio10", volumeRatio10, ok10)
+	setValueTarget(target, values, "volume_ratio10", volumeRatio10, ok10)
 	volumeBreakoutRatio, okBreakout := volumeBreakoutRatio(volumes, 20)
-	setValue(values, "volume_breakout_ratio", volumeBreakoutRatio, okBreakout)
-	setValue(values, "volume_trend5", slope(volumes, 5), len(volumes) >= 5)
-	setValue(values, "volume_divergence_score", volumeDivergenceScore(closes, volumes, 20), len(closes) >= 20)
+	setValueTarget(target, values, "volume_breakout_ratio", volumeBreakoutRatio, okBreakout)
+	setValueTarget(target, values, "volume_trend5", slope(volumes, 5), len(volumes) >= 5)
+	setValueTarget(target, values, "volume_divergence_score", volumeDivergenceScore(closes, volumes, 20), len(closes) >= 20)
 	pressure := volumePressure(closes, volumes, 20)
-	setValue(values, "volume_pressure20", pressure, true)
+	setValueTarget(target, values, "volume_pressure20", pressure, true)
 
-	setValue(values, "price_volume_trend", pvt, true)
+	setValueTarget(target, values, "price_volume_trend", pvt, true)
 	cmfValue, ok := chaikinMoneyFlow(highs, lows, closes, volumes, 20)
-	setValue(values, "cmf20", cmfValue, ok)
-	setValue(values, "ad_line", adLine, true)
-	setValue(values, "ad_line_slope5", adLineSlope, len(closes) >= 5)
+	setValueTarget(target, values, "cmf20", cmfValue, ok)
+	setValueTarget(target, values, "ad_line", adLine, true)
+	setValueTarget(target, values, "ad_line_slope5", adLineSlope, len(closes) >= 5)
 
 	signals["money_flow"] = moneyFlowSignal(mfi, pressure)
 	signals["volume_state"] = volumeState(volumeZScore, ok)
@@ -59,9 +63,9 @@ func addMoneyFlowFeatures(values map[string]string, signals map[string]string, h
 	signals["breakout_volume_strength"] = breakoutVolumeStrength(volumeBreakoutRatio, okBreakout)
 	signals["volume_divergence"] = volumeDivergence(closes, volumes, 20)
 	signals["volume_phase"] = volumePhase(pressure, cmfValue, ok)
-	addVolumeFlowIndicatorFeatures(values, signals, highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
-	addVolumeProfileFeatures(values, signals, highs, lows, closes, volumes, 200, 100, 68)
-	addSupplyDemandRangeFeatures(values, signals, highs, lows, closes, volumes, 120, 50, 10)
+	addVolumeFlowIndicatorFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
+	addVolumeProfileFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 200, 100, 68)
+	addSupplyDemandRangeFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 120, 50, 10)
 }
 
 type volumeFlowIndicatorResult struct {
@@ -86,6 +90,10 @@ func addVolumeFlowIndicatorFeatures(
 	volumeCoef float64,
 	signalLength int,
 ) {
+	addVolumeFlowIndicatorFeaturesToSet(nil, values, signals, highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+}
+
+func addVolumeFlowIndicatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs, lows, closes, volumes []float64, length int, coef, volumeCoef float64, signalLength int) {
 	result, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
 	if !ok {
 		result, ok = volumeFlowIndicator(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
@@ -93,11 +101,11 @@ func addVolumeFlowIndicatorFeatures(
 	if !ok {
 		return
 	}
-	setValue(values, "vfi", result.value, true)
-	setValue(values, "vfi_signal", result.signal, true)
-	setValue(values, "vfi_hist", result.hist, true)
-	setValue(values, "vfi_volume_cutoff", result.volumeCutoff, true)
-	setValue(values, "vfi_price_cutoff", result.priceCutoff, true)
+	setValueTarget(target, values, "vfi", result.value, true)
+	setValueTarget(target, values, "vfi_signal", result.signal, true)
+	setValueTarget(target, values, "vfi_hist", result.hist, true)
+	setValueTarget(target, values, "vfi_volume_cutoff", result.volumeCutoff, true)
+	setValueTarget(target, values, "vfi_price_cutoff", result.priceCutoff, true)
 	signals["vfi_state"] = vfiState(result.value)
 	signals["vfi_cross"] = crossSignal(result.previousValue, result.previousSignal, result.value, result.signal)
 	signals["vfi_momentum"] = vfiMomentum(result.hist)
@@ -495,20 +503,24 @@ func addVolumeProfileFeatures(
 	bins int,
 	valueAreaPct float64,
 ) {
+	addVolumeProfileFeaturesToSet(nil, values, signals, highs, lows, closes, volumes, lookback, bins, valueAreaPct)
+}
+
+func addVolumeProfileFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs, lows, closes, volumes []float64, lookback, bins int, valueAreaPct float64) {
 	profile, ok := volumeProfile(highs, lows, closes, volumes, lookback, bins, valueAreaPct)
 	if !ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "volume_profile_poc", profile.poc, true)
-	setValue(values, "volume_profile_vah", profile.vah, true)
-	setValue(values, "volume_profile_val", profile.val, true)
-	setValue(values, "volume_profile_range_high", profile.rangeHigh, true)
-	setValue(values, "volume_profile_range_low", profile.rangeLow, true)
-	setValue(values, "volume_profile_value_area_pct", valueAreaPct, true)
-	setValue(values, "volume_profile_poc_distance_pct", percentDistance(last, profile.poc), profile.poc != 0)
-	setValue(values, "volume_profile_vah_distance_pct", percentDistance(last, profile.vah), profile.vah != 0)
-	setValue(values, "volume_profile_val_distance_pct", percentDistance(last, profile.val), profile.val != 0)
+	setValueTarget(target, values, "volume_profile_poc", profile.poc, true)
+	setValueTarget(target, values, "volume_profile_vah", profile.vah, true)
+	setValueTarget(target, values, "volume_profile_val", profile.val, true)
+	setValueTarget(target, values, "volume_profile_range_high", profile.rangeHigh, true)
+	setValueTarget(target, values, "volume_profile_range_low", profile.rangeLow, true)
+	setValueTarget(target, values, "volume_profile_value_area_pct", valueAreaPct, true)
+	setValueTarget(target, values, "volume_profile_poc_distance_pct", percentDistance(last, profile.poc), profile.poc != 0)
+	setValueTarget(target, values, "volume_profile_vah_distance_pct", percentDistance(last, profile.vah), profile.vah != 0)
+	setValueTarget(target, values, "volume_profile_val_distance_pct", percentDistance(last, profile.val), profile.val != 0)
 	signals["volume_profile_position"] = volumeProfilePosition(last, profile.vah, profile.val)
 	signals["volume_profile_poc_side"] = volumeProfilePOCSide(last, profile.poc)
 	signals["volume_profile_value_area_state"] = volumeProfileValueAreaState(last, profile.vah, profile.val)
@@ -525,21 +537,25 @@ func addSupplyDemandRangeFeatures(
 	bins int,
 	thresholdPct float64,
 ) {
+	addSupplyDemandRangeFeaturesToSet(nil, values, signals, highs, lows, closes, volumes, lookback, bins, thresholdPct)
+}
+
+func addSupplyDemandRangeFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs, lows, closes, volumes []float64, lookback, bins int, thresholdPct float64) {
 	zone, ok := supplyDemandRange(highs, lows, closes, volumes, lookback, bins, thresholdPct)
 	if !ok {
 		return
 	}
 	last := closes[len(closes)-1]
-	setValue(values, "supply_zone_top", zone.supplyTop, true)
-	setValue(values, "supply_zone_bottom", zone.supplyBottom, true)
-	setValue(values, "supply_zone_avg", zone.supplyAvg, true)
-	setValue(values, "supply_zone_wavg", zone.supplyWAvg, true)
-	setValue(values, "demand_zone_top", zone.demandTop, true)
-	setValue(values, "demand_zone_bottom", zone.demandBottom, true)
-	setValue(values, "demand_zone_avg", zone.demandAvg, true)
-	setValue(values, "demand_zone_wavg", zone.demandWAvg, true)
-	setValue(values, "supply_demand_equilibrium", zone.equilibrium, true)
-	setValue(values, "supply_demand_weighted_equilibrium", zone.weightedEquilibrium, true)
+	setValueTarget(target, values, "supply_zone_top", zone.supplyTop, true)
+	setValueTarget(target, values, "supply_zone_bottom", zone.supplyBottom, true)
+	setValueTarget(target, values, "supply_zone_avg", zone.supplyAvg, true)
+	setValueTarget(target, values, "supply_zone_wavg", zone.supplyWAvg, true)
+	setValueTarget(target, values, "demand_zone_top", zone.demandTop, true)
+	setValueTarget(target, values, "demand_zone_bottom", zone.demandBottom, true)
+	setValueTarget(target, values, "demand_zone_avg", zone.demandAvg, true)
+	setValueTarget(target, values, "demand_zone_wavg", zone.demandWAvg, true)
+	setValueTarget(target, values, "supply_demand_equilibrium", zone.equilibrium, true)
+	setValueTarget(target, values, "supply_demand_weighted_equilibrium", zone.weightedEquilibrium, true)
 	signals["supply_demand_position"] = supplyDemandPosition(last, zone)
 }
 

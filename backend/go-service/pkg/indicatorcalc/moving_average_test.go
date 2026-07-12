@@ -244,3 +244,28 @@ func TestMovingAverageStructureHelpers(t *testing.T) {
 		t.Fatalf("movingAverageBreakout = %q", got)
 	}
 }
+
+func TestEMDLastTwoMatchesSeries(t *testing.T) {
+	closes := linearValues(80, 100, 0.5)
+	avgSeries, ok := smmaSeries(closes, 25)
+	if !ok {
+		t.Fatal("smmaSeries returned false")
+	}
+	offset := len(closes) - len(avgSeries)
+	deviations := make([]float64, len(avgSeries))
+	for index, avg := range avgSeries {
+		deviations[index] = absFloat(closes[index+offset] - avg)
+	}
+	emdSeries, ok := emaSeries(deviations, 25)
+	if !ok || len(emdSeries) < 2 {
+		t.Fatal("emaSeries returned insufficient values")
+	}
+	avg, previousAvg, emd, previousEMD, ok := emdLastTwo(closes, 25)
+	if !ok {
+		t.Fatal("emdLastTwo returned false")
+	}
+	if avg != avgSeries[len(avgSeries)-1] || previousAvg != avgSeries[len(avgSeries)-2] ||
+		emd != emdSeries[len(emdSeries)-1] || previousEMD != emdSeries[len(emdSeries)-2] {
+		t.Fatalf("streaming values differ: avg=%v prevAvg=%v emd=%v prevEMD=%v", avg, previousAvg, emd, previousEMD)
+	}
+}

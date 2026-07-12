@@ -21,6 +21,20 @@ func TestATRAndADXUseTradingViewScriptSmoothing(t *testing.T) {
 	}
 }
 
+func TestATRSeriesFromTrueRangesMatchesDirectCalculation(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(80, 100, 1)
+	direct, directOK := atrSeries(highs, lows, closes, 14)
+	shared, sharedOK := atrSeriesFromTrueRanges(trueRanges(highs, lows, closes), 14)
+	if directOK != sharedOK || len(direct) != len(shared) {
+		t.Fatalf("result shape differs: direct=%v/%d shared=%v/%d", directOK, len(direct), sharedOK, len(shared))
+	}
+	for index := range direct {
+		if direct[index] != shared[index] {
+			t.Fatalf("value[%d] = %v, want %v", index, shared[index], direct[index])
+		}
+	}
+}
+
 func TestDirectionalMovementMatchesTradingViewFormula(t *testing.T) {
 	plus := directionalMovementPlus(12, 10, 8, 9)
 	minus := directionalMovementMinus(12, 10, 8, 9)

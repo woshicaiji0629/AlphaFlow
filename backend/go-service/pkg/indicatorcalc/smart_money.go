@@ -33,6 +33,10 @@ type momentumSupplyDemandState struct {
 }
 
 func addSmartMoney(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
+	addSmartMoneyToSet(nil, values, signals, opens, highs, lows, closes)
+}
+
+func addSmartMoneyToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
 	period := minInt(60, len(closes))
 	if period < 7 {
 		return
@@ -50,10 +54,10 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 		swingLow = priceLevel{price: low, recency: last - start - 1}
 	}
 
-	setValue(values, "swing_high", swingHigh.price, swingHigh.price > 0)
-	setValue(values, "swing_low", swingLow.price, swingLow.price > 0)
-	setValue(values, "swing_high_distance_pct", percentDistance(closes[last], swingHigh.price), swingHigh.price != 0)
-	setValue(values, "swing_low_distance_pct", percentDistance(closes[last], swingLow.price), swingLow.price != 0)
+	setValueTarget(target, values, "swing_high", swingHigh.price, swingHigh.price > 0)
+	setValueTarget(target, values, "swing_low", swingLow.price, swingLow.price > 0)
+	setValueTarget(target, values, "swing_high_distance_pct", percentDistance(closes[last], swingHigh.price), swingHigh.price != 0)
+	setValueTarget(target, values, "swing_low_distance_pct", percentDistance(closes[last], swingLow.price), swingLow.price != 0)
 
 	trend := detectSwingTrend(pivotHighs, pivotLows)
 	direction := ""
@@ -95,10 +99,10 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 		signals["market_structure"] = "range"
 	}
 	if sweep, ok := detectLiquiditySweep(windowHighs, windowLows, closes[start:], pivotHighs, pivotLows); ok {
-		setValue(values, "liquidity_sweep_level", sweep.level, true)
-		setValue(values, "liquidity_sweep_top", sweep.top, true)
-		setValue(values, "liquidity_sweep_bottom", sweep.bottom, true)
-		setValue(values, "liquidity_sweep_age", float64(sweep.age), true)
+		setValueTarget(target, values, "liquidity_sweep_level", sweep.level, true)
+		setValueTarget(target, values, "liquidity_sweep_top", sweep.top, true)
+		setValueTarget(target, values, "liquidity_sweep_bottom", sweep.bottom, true)
+		setValueTarget(target, values, "liquidity_sweep_age", float64(sweep.age), true)
 		signals["liquidity_sweep_type"] = sweep.kind
 		if structureEvent == "none" {
 			if liquiditySweepIsHigh(sweep.kind) {
@@ -113,35 +117,35 @@ func addSmartMoney(values map[string]string, signals map[string]string, opens []
 		signals["liquidity_sweep_type"] = "none"
 	}
 	if momentumSD, ok := detectMomentumSupplyDemandZones(opens, highs, lows, closes, 120, 4, 4, 0.5, 20, 1.5); ok {
-		addMomentumSupplyDemandValues(values, signals, momentumSD, last)
+		addMomentumSupplyDemandValues(target, values, signals, momentumSD, last)
 	}
 	signals["structure_event"] = structureEvent
 	signals["structure_bias"] = structureBias
 
 	blockHigh, blockLow, ok := orderBlock(opens, highs, lows, closes, start, last, direction)
 	if ok {
-		setValue(values, "order_block_high", blockHigh, true)
-		setValue(values, "order_block_low", blockLow, true)
-		setValue(values, "order_block_mid", (blockHigh+blockLow)/2, true)
+		setValueTarget(target, values, "order_block_high", blockHigh, true)
+		setValueTarget(target, values, "order_block_low", blockLow, true)
+		setValueTarget(target, values, "order_block_mid", (blockHigh+blockLow)/2, true)
 	}
-	addInternalSmartMoney(values, signals, highs, lows, closes)
-	addEqualHighLow(values, signals, highs, lows, closes, period)
-	addFairValueGap(values, signals, highs, lows, closes)
-	addPremiumDiscountZones(values, signals, closes[last], swingHigh.price, swingLow.price)
+	addInternalSmartMoney(target, values, signals, highs, lows, closes)
+	addEqualHighLow(target, values, signals, highs, lows, closes, period)
+	addFairValueGap(target, values, signals, highs, lows, closes)
+	addPremiumDiscountZones(target, values, signals, closes[last], swingHigh.price, swingLow.price)
 }
 
-func addMomentumSupplyDemandValues(values map[string]string, signals map[string]string, state momentumSupplyDemandState, last int) {
+func addMomentumSupplyDemandValues(target *ValueSet, values map[string]string, signals map[string]string, state momentumSupplyDemandState, last int) {
 	if state.supply.ok {
-		setValue(values, "momentum_supply_top", state.supply.top, true)
-		setValue(values, "momentum_supply_bottom", state.supply.bottom, true)
-		setValue(values, "momentum_supply_mid", (state.supply.top+state.supply.bottom)/2, true)
-		setValue(values, "momentum_supply_age", float64(last-state.supply.startIndex), true)
+		setValueTarget(target, values, "momentum_supply_top", state.supply.top, true)
+		setValueTarget(target, values, "momentum_supply_bottom", state.supply.bottom, true)
+		setValueTarget(target, values, "momentum_supply_mid", (state.supply.top+state.supply.bottom)/2, true)
+		setValueTarget(target, values, "momentum_supply_age", float64(last-state.supply.startIndex), true)
 	}
 	if state.demand.ok {
-		setValue(values, "momentum_demand_top", state.demand.top, true)
-		setValue(values, "momentum_demand_bottom", state.demand.bottom, true)
-		setValue(values, "momentum_demand_mid", (state.demand.top+state.demand.bottom)/2, true)
-		setValue(values, "momentum_demand_age", float64(last-state.demand.startIndex), true)
+		setValueTarget(target, values, "momentum_demand_top", state.demand.top, true)
+		setValueTarget(target, values, "momentum_demand_bottom", state.demand.bottom, true)
+		setValueTarget(target, values, "momentum_demand_mid", (state.demand.top+state.demand.bottom)/2, true)
+		setValueTarget(target, values, "momentum_demand_age", float64(last-state.demand.startIndex), true)
 	}
 	signals["momentum_sd_position"] = state.position
 	signals["momentum_sd_retest"] = state.retestEvent
@@ -461,7 +465,7 @@ func orderBlock(opens []float64, highs []float64, lows []float64, closes []float
 	return highs[last-1], lows[last-1], true
 }
 
-func addInternalSmartMoney(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+func addInternalSmartMoney(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	period := minInt(25, len(closes))
 	if period < 7 {
 		return
@@ -474,10 +478,10 @@ func addInternalSmartMoney(values map[string]string, signals map[string]string, 
 	if !okHigh || !okLow {
 		return
 	}
-	setValue(values, "internal_swing_high", internalHigh.price, true)
-	setValue(values, "internal_swing_low", internalLow.price, true)
-	setValue(values, "internal_swing_high_distance_pct", percentDistance(closes[last], internalHigh.price), internalHigh.price != 0)
-	setValue(values, "internal_swing_low_distance_pct", percentDistance(closes[last], internalLow.price), internalLow.price != 0)
+	setValueTarget(target, values, "internal_swing_high", internalHigh.price, true)
+	setValueTarget(target, values, "internal_swing_low", internalLow.price, true)
+	setValueTarget(target, values, "internal_swing_high_distance_pct", percentDistance(closes[last], internalHigh.price), internalHigh.price != 0)
+	setValueTarget(target, values, "internal_swing_low_distance_pct", percentDistance(closes[last], internalLow.price), internalLow.price != 0)
 
 	trend := detectSwingTrend(pivotHighs, pivotLows)
 	bias := structureBias(trend)
@@ -520,17 +524,17 @@ func swingStrengthLabels(trend swingTrend) (string, string) {
 	}
 }
 
-func addEqualHighLow(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
+func addEqualHighLow(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
 	pivotHighs, pivotLows := pivots(highs[len(highs)-period:], lows[len(lows)-period:], 2)
 	tolerance := equalHighLowTolerance(highs, lows, closes, period)
 	if level, ok := recentEqualLevel(pivotHighs, tolerance); ok {
-		setValue(values, "equal_high", level, true)
-		setValue(values, "equal_high_distance_pct", percentDistance(closes[len(closes)-1], level), level != 0)
+		setValueTarget(target, values, "equal_high", level, true)
+		setValueTarget(target, values, "equal_high_distance_pct", percentDistance(closes[len(closes)-1], level), level != 0)
 		signals["equal_high_low"] = "equal_high"
 	}
 	if level, ok := recentEqualLevel(pivotLows, tolerance); ok {
-		setValue(values, "equal_low", level, true)
-		setValue(values, "equal_low_distance_pct", percentDistance(closes[len(closes)-1], level), level != 0)
+		setValueTarget(target, values, "equal_low", level, true)
+		setValueTarget(target, values, "equal_low_distance_pct", percentDistance(closes[len(closes)-1], level), level != 0)
 		if signals["equal_high_low"] == "equal_high" {
 			signals["equal_high_low"] = "both"
 		} else {
@@ -563,7 +567,7 @@ func recentEqualLevel(levels []priceLevel, tolerance float64) (float64, bool) {
 	return 0, false
 }
 
-func addFairValueGap(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+func addFairValueGap(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	if len(closes) < 3 {
 		return
 	}
@@ -574,23 +578,23 @@ func addFairValueGap(values map[string]string, signals map[string]string, highs 
 	case bullish:
 		top := lows[last]
 		bottom := highs[last-2]
-		setFairValueGap(values, signals, top, bottom, closes[last], "bull")
+		setFairValueGap(target, values, signals, top, bottom, closes[last], "bull")
 	case bearish:
 		top := lows[last-2]
 		bottom := highs[last]
-		setFairValueGap(values, signals, top, bottom, closes[last], "bear")
+		setFairValueGap(target, values, signals, top, bottom, closes[last], "bear")
 	default:
 		signals["fvg_direction"] = "none"
 		signals["fvg_position"] = "none"
 	}
 }
 
-func setFairValueGap(values map[string]string, signals map[string]string, top float64, bottom float64, last float64, direction string) {
+func setFairValueGap(target *ValueSet, values map[string]string, signals map[string]string, top float64, bottom float64, last float64, direction string) {
 	mid := (top + bottom) / 2
-	setValue(values, "fvg_top", top, true)
-	setValue(values, "fvg_bottom", bottom, true)
-	setValue(values, "fvg_mid", mid, true)
-	setValue(values, "fvg_distance_pct", percentDistance(last, mid), mid != 0)
+	setValueTarget(target, values, "fvg_top", top, true)
+	setValueTarget(target, values, "fvg_bottom", bottom, true)
+	setValueTarget(target, values, "fvg_mid", mid, true)
+	setValueTarget(target, values, "fvg_distance_pct", percentDistance(last, mid), mid != 0)
 	signals["fvg_direction"] = direction
 	switch {
 	case last > top:
@@ -602,16 +606,16 @@ func setFairValueGap(values map[string]string, signals map[string]string, top fl
 	}
 }
 
-func addPremiumDiscountZones(values map[string]string, signals map[string]string, last float64, swingHigh float64, swingLow float64) {
+func addPremiumDiscountZones(target *ValueSet, values map[string]string, signals map[string]string, last float64, swingHigh float64, swingLow float64) {
 	if swingHigh <= swingLow || swingHigh == 0 || swingLow == 0 {
 		return
 	}
 	premium := 0.95*swingHigh + 0.05*swingLow
 	discount := 0.95*swingLow + 0.05*swingHigh
 	equilibrium := (swingHigh + swingLow) / 2
-	setValue(values, "premium_level", premium, true)
-	setValue(values, "discount_level", discount, true)
-	setValue(values, "equilibrium_level", equilibrium, true)
+	setValueTarget(target, values, "premium_level", premium, true)
+	setValueTarget(target, values, "discount_level", discount, true)
+	setValueTarget(target, values, "equilibrium_level", equilibrium, true)
 	switch {
 	case last >= premium:
 		signals["premium_discount_zone"] = "premium"

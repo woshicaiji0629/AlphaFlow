@@ -1,14 +1,18 @@
 package indicatorcalc
 
 func addIchimokuFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addIchimokuFeaturesToSet(nil, values, signals, highs, lows, closes)
+}
+
+func addIchimokuFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
 	current, previous, ok := ichimoku(highs, lows, closes)
 	if !ok {
 		return
 	}
-	setValue(values, "ichimoku_tenkan", current.tenkan, true)
-	setValue(values, "ichimoku_kijun", current.kijun, true)
-	setValue(values, "ichimoku_span_a", current.spanA, true)
-	setValue(values, "ichimoku_span_b", current.spanB, true)
+	setValueTarget(target, values, "ichimoku_tenkan", current.tenkan, true)
+	setValueTarget(target, values, "ichimoku_kijun", current.kijun, true)
+	setValueTarget(target, values, "ichimoku_span_a", current.spanA, true)
+	setValueTarget(target, values, "ichimoku_span_b", current.spanB, true)
 	last := closes[len(closes)-1]
 	signals["ichimoku_trend"] = ichimokuTrend(current)
 	signals["ichimoku_cloud"] = ichimokuCloud(last, current)

@@ -123,6 +123,29 @@ func TestMACDDivergence(t *testing.T) {
 	}
 }
 
+func TestMACDHistPivotsMatchValuePivots(t *testing.T) {
+	hist := []float64{1, 3, 2, 4, 1, 2, 0, 3, 1}
+	points := make([]macdPoint, len(hist))
+	for index := range hist {
+		points[index].hist = hist[index]
+	}
+	wantHighs, wantLows := valuePivots(hist, 2)
+	gotHighs, gotLows := macdHistPivots(points, 2)
+	if len(gotHighs) != len(wantHighs) || len(gotLows) != len(wantLows) {
+		t.Fatalf("pivot lengths differ: got %d/%d want %d/%d", len(gotHighs), len(gotLows), len(wantHighs), len(wantLows))
+	}
+	for index := range wantHighs {
+		if gotHighs[index] != wantHighs[index] {
+			t.Fatalf("high[%d] = %#v, want %#v", index, gotHighs[index], wantHighs[index])
+		}
+	}
+	for index := range wantLows {
+		if gotLows[index] != wantLows[index] {
+			t.Fatalf("low[%d] = %#v, want %#v", index, gotLows[index], wantLows[index])
+		}
+	}
+}
+
 func linearValues(length int, start float64, step float64) []float64 {
 	values := make([]float64, 0, length)
 	for index := 0; index < length; index++ {

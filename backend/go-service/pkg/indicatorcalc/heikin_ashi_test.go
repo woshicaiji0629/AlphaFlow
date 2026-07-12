@@ -31,3 +31,21 @@ func TestHeikinAshiSeriesRejectsMismatchedInput(t *testing.T) {
 		t.Fatal("heikinAshiSeries returned true for mismatched input")
 	}
 }
+
+func TestHeikinAshiLastMatchesSeries(t *testing.T) {
+	opens := []float64{100, 102, 101, 105}
+	highs := []float64{103, 104, 106, 108}
+	lows := []float64{99, 100, 100, 103}
+	closes := []float64{102, 101, 105, 107}
+	series, ok := heikinAshiSeries(opens, highs, lows, closes)
+	if !ok {
+		t.Fatal("heikinAshiSeries returned false")
+	}
+	last, ok := heikinAshiLast(opens, highs, lows, closes)
+	if !ok {
+		t.Fatal("heikinAshiLast returned false")
+	}
+	if last != series[len(series)-1] {
+		t.Fatalf("last = %#v, want %#v", last, series[len(series)-1])
+	}
+}

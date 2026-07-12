@@ -164,16 +164,17 @@ func (r *Runner) calculateRealtimeIndicators(
 
 func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result, feature model.FeatureMetadata, updatedAt int64) model.IndicatorSnapshot {
 	return model.IndicatorSnapshot{
-		Exchange:  kline.Exchange,
-		Market:    kline.Market,
-		Symbol:    kline.Symbol,
-		Interval:  kline.Interval,
-		OpenTime:  result.OpenTime,
-		CloseTime: result.CloseTime,
-		Values:    result.Values,
-		Signals:   result.Signals,
-		Feature:   feature,
-		UpdatedAt: updatedAt,
+		Exchange:      kline.Exchange,
+		Market:        kline.Market,
+		Symbol:        kline.Symbol,
+		Interval:      kline.Interval,
+		OpenTime:      result.OpenTime,
+		CloseTime:     result.CloseTime,
+		Values:        result.Values,
+		NumericValues: result.NumericValues,
+		Signals:       result.Signals,
+		Feature:       feature,
+		UpdatedAt:     updatedAt,
 	}
 }
 
@@ -231,16 +232,17 @@ func (r *Runner) calculatedIndicatorSnapshotsForWindow(
 			continue
 		}
 		snapshots = append(snapshots, model.IndicatorSnapshot{
-			Exchange:  kline.Exchange,
-			Market:    kline.Market,
-			Symbol:    kline.Symbol,
-			Interval:  kline.Interval,
-			OpenTime:  result.OpenTime,
-			CloseTime: result.CloseTime,
-			Values:    result.Values,
-			Signals:   result.Signals,
-			Feature:   featureMetadata(r.options.CalculateOptions),
-			UpdatedAt: r.now().UnixMilli(),
+			Exchange:      kline.Exchange,
+			Market:        kline.Market,
+			Symbol:        kline.Symbol,
+			Interval:      kline.Interval,
+			OpenTime:      result.OpenTime,
+			CloseTime:     result.CloseTime,
+			Values:        result.Values,
+			NumericValues: result.NumericValues,
+			Signals:       result.Signals,
+			Feature:       featureMetadata(r.options.CalculateOptions),
+			UpdatedAt:     r.now().UnixMilli(),
 		})
 	}
 	return snapshots, nil

@@ -21,22 +21,32 @@ func BenchmarkCalculate300Bars(b *testing.B) {
 }
 
 func BenchmarkCalculateWindowStreaming(b *testing.B) {
+	benchmarkCalculateWindowStreaming(b, CalculateWindow)
+}
+
+func BenchmarkCalculateWindowNumericStreaming(b *testing.B) {
+	benchmarkCalculateWindowStreaming(b, CalculateWindowNumeric)
+}
+
+func benchmarkCalculateWindowStreaming(b *testing.B, calculate func(*CalculationWindow, Options) (Result, error)) {
 	klines := benchmarkKlines(4396)
 	window := NewCalculationWindowFromKlines(klines[:300], 268)
 	window.EnableBasicState()
-	if _, err := CalculateWindow(window, DefaultOptions()); err != nil {
+	if _, err := calculate(window, DefaultOptions()); err != nil {
 		b.Fatalf("seed CalculateWindow: %v", err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
 		window.Append([]model.Kline{klines[300+index%4096]})
-		result, err := CalculateWindow(window, DefaultOptions())
+		result, err := calculate(window, DefaultOptions())
 		if err != nil {
 			b.Fatalf("CalculateWindow: %v", err)
 		}
 		benchmarkCalculateResult = result
 	}
+	b.ReportMetric(float64(len(benchmarkCalculateResult.NumericValues)), "values/op")
+	b.ReportMetric(float64(len(benchmarkCalculateResult.Signals)), "signals/op")
 }
 
 func benchmarkCalculate(b *testing.B, bars int) {

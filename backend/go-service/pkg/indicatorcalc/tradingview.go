@@ -3,53 +3,68 @@ package indicatorcalc
 import "math"
 
 func addTradingViewFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
-	addTradingViewFeaturesWithContext(values, signals, highs, lows, closes, nil)
+	addTradingViewFeaturesWithContextToSet(nil, values, signals, highs, lows, closes, nil)
 }
 
 func addTradingViewFeaturesWithContext(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
-	addQQEModFeatures(values, signals, closes, 6, 5, 3)
-	addQQEModEnhancedFeatures(values, signals, closes)
-	if features != nil {
-		if atrValues, ok := features.atrSeries(10); ok {
-			addUTBotFeaturesWithATR(values, signals, closes, 10, 1, atrValues)
-		} else {
-			addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
-		}
-	} else {
-		addUTBotFeatures(values, signals, highs, lows, closes, 10, 1)
-	}
-	addSSLChannelFeatures(values, signals, highs, lows, closes, 10)
-	addRangeFilterFeatures(values, signals, closes, 100, 3)
-	addWilliamsVixFixFeatures(values, signals, highs, lows, closes, 22, 20, 2, 50, 0.85)
-	addTDSequentialFeatures(values, signals, closes)
-	addNadarayaWatsonEnvelopeFeatures(values, signals, closes, 50, 8, 3)
+	addTradingViewFeaturesWithContextToSet(nil, values, signals, highs, lows, closes, features)
 }
 
-func addQQEModFeatures(values map[string]string, signals map[string]string, closes []float64, rsiPeriod int, smoothing int, factor float64) {
-	line, signal, previousLine, previousSignal, ok := qqeMod(closes, rsiPeriod, smoothing, factor)
+func addTradingViewFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
+	rsi6, rsi6OK := rsiSeries(closes, 6)
+	addQQEModFeaturesWithRSI(target, values, signals, rsi6, rsi6OK, 6, 5, 3)
+	addQQEModEnhancedFeaturesWithRSI(target, values, signals, rsi6, rsi6OK)
+	if features != nil {
+		if atrValues, ok := features.atrSeries(10); ok {
+			addUTBotFeaturesWithATR(target, values, signals, closes, 10, 1, atrValues)
+		} else {
+			addUTBotFeatures(target, values, signals, highs, lows, closes, 10, 1)
+		}
+	} else {
+		addUTBotFeatures(target, values, signals, highs, lows, closes, 10, 1)
+	}
+	addSSLChannelFeatures(target, values, signals, highs, lows, closes, 10)
+	addRangeFilterFeatures(target, values, signals, closes, 100, 3)
+	addWilliamsVixFixFeatures(target, values, signals, highs, lows, closes, 22, 20, 2, 50, 0.85)
+	addTDSequentialFeatures(target, values, signals, closes)
+	addNadarayaWatsonEnvelopeFeatures(target, values, signals, closes, 50, 8, 3)
+}
+
+func addQQEModFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, rsiPeriod int, smoothing int, factor float64) {
+	rsiValues, rsiOK := rsiSeries(closes, rsiPeriod)
+	addQQEModFeaturesWithRSI(target, values, signals, rsiValues, rsiOK, rsiPeriod, smoothing, factor)
+}
+
+func addQQEModFeaturesWithRSI(target *ValueSet, values map[string]string, signals map[string]string, rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, factor float64) {
+	line, signal, previousLine, previousSignal, ok := qqeModWithRSI(rsiValues, rsiOK, rsiPeriod, smoothing, factor)
 	if !ok {
 		return
 	}
-	setValue(values, "qqe_line", line, true)
-	setValue(values, "qqe_signal", signal, true)
-	setValue(values, "qqe_hist", line-signal, true)
+	setValueTarget(target, values, "qqe_line", line, true)
+	setValueTarget(target, values, "qqe_signal", signal, true)
+	setValueTarget(target, values, "qqe_hist", line-signal, true)
 	signals["qqe_trend"] = thresholdTrend(line, signal, 50)
 	signals["qqe_cross"] = crossSignal(previousLine, previousSignal, line, signal)
 }
 
-func addQQEModEnhancedFeatures(values map[string]string, signals map[string]string, closes []float64) {
-	result, ok := qqeModEnhanced(closes, 6, 5, 3, 1.61, 50, 0.35, 3)
+func addQQEModEnhancedFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64) {
+	rsiValues, rsiOK := rsiSeries(closes, 6)
+	addQQEModEnhancedFeaturesWithRSI(target, values, signals, rsiValues, rsiOK)
+}
+
+func addQQEModEnhancedFeaturesWithRSI(target *ValueSet, values map[string]string, signals map[string]string, rsiValues []float64, rsiOK bool) {
+	result, ok := qqeModEnhancedWithRSI(rsiValues, rsiOK, 6, 5, 3, 1.61, 50, 0.35, 3)
 	if !ok {
 		return
 	}
-	setValue(values, "qqe_primary_line", result.primaryLine, true)
-	setValue(values, "qqe_primary_trend", result.primaryTrend, true)
-	setValue(values, "qqe_secondary_line", result.secondaryLine, true)
-	setValue(values, "qqe_secondary_trend", result.secondaryTrend, true)
-	setValue(values, "qqe_bb_upper", result.bbUpper, true)
-	setValue(values, "qqe_bb_lower", result.bbLower, true)
-	setValue(values, "qqe_primary_hist", result.primaryHist, true)
-	setValue(values, "qqe_secondary_hist", result.secondaryHist, true)
+	setValueTarget(target, values, "qqe_primary_line", result.primaryLine, true)
+	setValueTarget(target, values, "qqe_primary_trend", result.primaryTrend, true)
+	setValueTarget(target, values, "qqe_secondary_line", result.secondaryLine, true)
+	setValueTarget(target, values, "qqe_secondary_trend", result.secondaryTrend, true)
+	setValueTarget(target, values, "qqe_bb_upper", result.bbUpper, true)
+	setValueTarget(target, values, "qqe_bb_lower", result.bbLower, true)
+	setValueTarget(target, values, "qqe_primary_hist", result.primaryHist, true)
+	setValueTarget(target, values, "qqe_secondary_hist", result.secondaryHist, true)
 	signals["qqe_mod_signal"] = result.signal
 	signals["qqe_primary_zero_cross"] = result.zeroCross
 }
@@ -77,8 +92,18 @@ func qqeModEnhanced(
 	bbMultiplier float64,
 	secondaryThreshold float64,
 ) (qqeModEnhancedResult, bool) {
-	primaryTrend, primaryLine, okPrimary := qqeModTrendSeries(closes, rsiPeriod, smoothing, primaryFactor)
-	secondaryTrend, secondaryLine, okSecondary := qqeModTrendSeries(closes, rsiPeriod, smoothing, secondaryFactor)
+	rsiValues, rsiOK := rsiSeries(closes, rsiPeriod)
+	return qqeModEnhancedWithRSI(rsiValues, rsiOK, rsiPeriod, smoothing, primaryFactor, secondaryFactor, bbPeriod, bbMultiplier, secondaryThreshold)
+}
+
+func qqeModEnhancedWithRSI(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, primaryFactor float64, secondaryFactor float64, bbPeriod int, bbMultiplier float64, secondaryThreshold float64) (qqeModEnhancedResult, bool) {
+	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, rsiPeriod, smoothing)
+	if !foundationOK {
+		return qqeModEnhancedResult{}, false
+	}
+	primaryTrend, primaryLine, okPrimary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, primaryFactor, true)
+	secondaryTrend, _, okSecondary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, secondaryFactor, false)
+	secondaryLine := primaryLine
 	if !okPrimary || !okSecondary || len(primaryTrend) < bbPeriod || len(primaryLine) < 2 || len(secondaryLine) == 0 {
 		return qqeModEnhancedResult{}, false
 	}
@@ -118,12 +143,24 @@ func qqeModEnhanced(
 
 func qqeModTrendSeries(closes []float64, rsiPeriod int, smoothing int, factor float64) ([]float64, []float64, bool) {
 	rsiValues, ok := rsiSeries(closes, rsiPeriod)
-	if !ok || len(rsiValues) < smoothing*3 || factor <= 0 {
+	return qqeModTrendSeriesWithRSI(rsiValues, ok, rsiPeriod, smoothing, factor)
+}
+
+func qqeModTrendSeriesWithRSI(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, factor float64) ([]float64, []float64, bool) {
+	smoothed, smoothedDeltas, offset, ok := qqeModTrendFoundation(rsiValues, rsiOK, rsiPeriod, smoothing)
+	if !ok {
 		return nil, nil, false
+	}
+	return qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, factor, true)
+}
+
+func qqeModTrendFoundation(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int) ([]float64, []float64, int, bool) {
+	if !rsiOK || len(rsiValues) < smoothing*3 {
+		return nil, nil, 0, false
 	}
 	smoothed, ok := emaSeries(rsiValues, smoothing)
 	if !ok || len(smoothed) < 3 {
-		return nil, nil, false
+		return nil, nil, 0, false
 	}
 	deltas := make([]float64, 0, len(smoothed)-1)
 	for index := 1; index < len(smoothed); index++ {
@@ -132,17 +169,27 @@ func qqeModTrendSeries(closes []float64, rsiPeriod int, smoothing int, factor fl
 	wildersPeriod := rsiPeriod*2 - 1
 	smoothedDeltas, ok := emaSeries(deltas, wildersPeriod)
 	if !ok || len(smoothedDeltas) < 2 {
-		return nil, nil, false
+		return nil, nil, 0, false
 	}
 	offset := len(smoothed) - len(smoothedDeltas)
 	if offset <= 0 {
+		return nil, nil, 0, false
+	}
+	return smoothed, smoothedDeltas, offset, true
+}
+
+func qqeModTrendSeriesFromFoundation(smoothed []float64, smoothedDeltas []float64, offset int, factor float64, collectLines bool) ([]float64, []float64, bool) {
+	if factor <= 0 || offset <= 0 || len(smoothedDeltas) < 2 || offset+len(smoothedDeltas) > len(smoothed) {
 		return nil, nil, false
 	}
 	longBand := smoothed[offset] - smoothedDeltas[0]*factor
 	shortBand := smoothed[offset] + smoothedDeltas[0]*factor
 	trendDirection := 1
 	trendValues := make([]float64, 0, len(smoothedDeltas))
-	lineValues := make([]float64, 0, len(smoothedDeltas))
+	var lineValues []float64
+	if collectLines {
+		lineValues = make([]float64, 0, len(smoothedDeltas))
+	}
 	for index := offset; index < len(smoothed); index++ {
 		rangeValue := smoothedDeltas[index-offset] * factor
 		line := smoothed[index]
@@ -174,9 +221,11 @@ func qqeModTrendSeries(closes []float64, rsiPeriod int, smoothing int, factor fl
 		} else {
 			trendValues = append(trendValues, shortBand)
 		}
-		lineValues = append(lineValues, line)
+		if collectLines {
+			lineValues = append(lineValues, line)
+		}
 	}
-	if len(trendValues) < 2 || len(lineValues) < 2 {
+	if len(trendValues) < 2 || (collectLines && len(lineValues) < 2) {
 		return nil, nil, false
 	}
 	return trendValues, lineValues, true
@@ -214,7 +263,11 @@ func crossesBelow(previousValue float64, currentValue float64, previousLevel flo
 
 func qqeMod(closes []float64, rsiPeriod int, smoothing int, factor float64) (float64, float64, float64, float64, bool) {
 	rsiValues, ok := rsiSeries(closes, rsiPeriod)
-	if !ok || len(rsiValues) < smoothing*3 || factor <= 0 {
+	return qqeModWithRSI(rsiValues, ok, rsiPeriod, smoothing, factor)
+}
+
+func qqeModWithRSI(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, factor float64) (float64, float64, float64, float64, bool) {
+	if !rsiOK || len(rsiValues) < smoothing*3 || factor <= 0 {
 		return 0, 0, 0, 0, false
 	}
 	smoothed, ok := emaSeries(rsiValues, smoothing)
@@ -274,21 +327,21 @@ func qqeMod(closes []float64, rsiPeriod int, smoothing int, factor float64) (flo
 	return smoothed[len(smoothed)-1], trailing, smoothed[len(smoothed)-2], previousTrailing, true
 }
 
-func addUTBotFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
+func addUTBotFeatures(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, multiplier float64) {
 	atrValues, ok := atrSeries(highs, lows, closes, period)
 	if !ok {
 		return
 	}
-	addUTBotFeaturesWithATR(values, signals, closes, period, multiplier, atrValues)
+	addUTBotFeaturesWithATR(target, values, signals, closes, period, multiplier, atrValues)
 }
 
-func addUTBotFeaturesWithATR(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64, atrValues []float64) {
+func addUTBotFeaturesWithATR(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64, atrValues []float64) {
 	stop, direction, previousDirection, ok := utBotWithATR(closes, period, multiplier, atrValues)
 	if !ok {
 		return
 	}
-	setValue(values, "ut_stop", stop, true)
-	setValue(values, "ut_stop_distance_pct", absFloat(percentDistance(closes[len(closes)-1], stop)), stop != 0)
+	setValueTarget(target, values, "ut_stop", stop, true)
+	setValueTarget(target, values, "ut_stop_distance_pct", absFloat(percentDistance(closes[len(closes)-1], stop)), stop != 0)
 	signals["ut_direction"] = direction
 	signals["ut_signal"] = directionFlipSignal(previousDirection, direction)
 }
@@ -333,14 +386,14 @@ func utBotWithATR(closes []float64, period int, multiplier float64, atrValues []
 	return stop, direction, previousDirection, true
 }
 
-func addSSLChannelFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
+func addSSLChannelFeatures(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
 	upper, lower, direction, previousDirection, ok := sslChannel(highs, lows, closes, period)
 	if !ok {
 		return
 	}
-	setValue(values, "ssl_upper", upper, true)
-	setValue(values, "ssl_lower", lower, true)
-	setValue(values, "ssl_width_pct", (upper-lower)/closes[len(closes)-1]*100, closes[len(closes)-1] != 0)
+	setValueTarget(target, values, "ssl_upper", upper, true)
+	setValueTarget(target, values, "ssl_lower", lower, true)
+	setValueTarget(target, values, "ssl_width_pct", (upper-lower)/closes[len(closes)-1]*100, closes[len(closes)-1] != 0)
 	signals["ssl_direction"] = direction
 	signals["ssl_cross"] = directionFlipCross(previousDirection, direction)
 }
@@ -377,7 +430,7 @@ func sslChannel(highs []float64, lows []float64, closes []float64, period int) (
 	return upper, lower, direction, previousDirection, true
 }
 
-func addRangeFilterFeatures(values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
+func addRangeFilterFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
 	filter, upper, lower, direction, ok := rangeFilterCompact(closes, period, multiplier)
 	if !ok {
 		filter, upper, lower, direction, ok = rangeFilter(closes, period, multiplier)
@@ -385,10 +438,10 @@ func addRangeFilterFeatures(values map[string]string, signals map[string]string,
 	if !ok {
 		return
 	}
-	setValue(values, "range_filter", filter, true)
-	setValue(values, "range_filter_upper", upper, true)
-	setValue(values, "range_filter_lower", lower, true)
-	setValue(values, "range_filter_distance_pct", percentDistance(closes[len(closes)-1], filter), filter != 0)
+	setValueTarget(target, values, "range_filter", filter, true)
+	setValueTarget(target, values, "range_filter_upper", upper, true)
+	setValueTarget(target, values, "range_filter_lower", lower, true)
+	setValueTarget(target, values, "range_filter_distance_pct", percentDistance(closes[len(closes)-1], filter), filter != 0)
 	signals["range_filter_direction"] = direction
 }
 
@@ -461,7 +514,7 @@ func rangeFilter(closes []float64, period int, multiplier float64) (float64, flo
 	return filter, filter + smoothRange, filter - smoothRange, direction, true
 }
 
-func addWilliamsVixFixFeatures(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) {
+func addWilliamsVixFixFeatures(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) {
 	result, ok := williamsVixFixCompact(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
 	if !ok {
 		result, ok = williamsVixFix(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
@@ -469,12 +522,12 @@ func addWilliamsVixFixFeatures(values map[string]string, signals map[string]stri
 	if !ok {
 		return
 	}
-	setValue(values, "wvf", result.value, true)
-	setValue(values, "wvf_mid_line", result.mid, true)
-	setValue(values, "wvf_upper_band", result.upperBand, true)
-	setValue(values, "wvf_lower_band", result.lowerBand, true)
-	setValue(values, "wvf_range_high", result.rangeHigh, true)
-	setValue(values, "wvf_range_low", result.rangeLow, true)
+	setValueTarget(target, values, "wvf", result.value, true)
+	setValueTarget(target, values, "wvf_mid_line", result.mid, true)
+	setValueTarget(target, values, "wvf_upper_band", result.upperBand, true)
+	setValueTarget(target, values, "wvf_lower_band", result.lowerBand, true)
+	setValueTarget(target, values, "wvf_range_high", result.rangeHigh, true)
+	setValueTarget(target, values, "wvf_range_low", result.rangeLow, true)
 	signals["wvf_state"] = williamsVixFixState(result.value, result.upperBand, result.rangeHigh)
 	signals["wvf_zone"] = williamsVixFixZone(result.value, result.upperBand, result.lowerBand, result.rangeHigh, result.rangeLow)
 }
@@ -594,10 +647,10 @@ func williamsVixFixZone(value float64, upperBand float64, lowerBand float64, ran
 	return "normal"
 }
 
-func addTDSequentialFeatures(values map[string]string, signals map[string]string, closes []float64) {
+func addTDSequentialFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64) {
 	buyCount, sellCount, exhaustion := tdSequential(closes)
-	setValue(values, "td_buy_setup_count", float64(buyCount), buyCount > 0)
-	setValue(values, "td_sell_setup_count", float64(sellCount), sellCount > 0)
+	setValueTarget(target, values, "td_buy_setup_count", float64(buyCount), buyCount > 0)
+	setValueTarget(target, values, "td_sell_setup_count", float64(sellCount), sellCount > 0)
 	signals["td_exhaustion"] = exhaustion
 }
 
@@ -636,7 +689,7 @@ func tdSequential(closes []float64) (int, int, string) {
 	}
 }
 
-func addNadarayaWatsonEnvelopeFeatures(values map[string]string, signals map[string]string, closes []float64, length int, bandwidth float64, multiplier float64) {
+func addNadarayaWatsonEnvelopeFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, length int, bandwidth float64, multiplier float64) {
 	middle, mae, previousMiddle, ok := nadarayaWatsonEnvelope(closes, length, bandwidth)
 	if !ok {
 		return
@@ -644,11 +697,11 @@ func addNadarayaWatsonEnvelopeFeatures(values map[string]string, signals map[str
 	upper := middle + mae*multiplier
 	lower := middle - mae*multiplier
 	last := closes[len(closes)-1]
-	setValue(values, "nw_middle", middle, true)
-	setValue(values, "nw_upper", upper, true)
-	setValue(values, "nw_lower", lower, true)
-	setValue(values, "nw_width_pct", (upper-lower)/middle*100, middle != 0)
-	setValue(values, "nw_position", (last-lower)/(upper-lower), upper != lower)
+	setValueTarget(target, values, "nw_middle", middle, true)
+	setValueTarget(target, values, "nw_upper", upper, true)
+	setValueTarget(target, values, "nw_lower", lower, true)
+	setValueTarget(target, values, "nw_width_pct", (upper-lower)/middle*100, middle != 0)
+	setValueTarget(target, values, "nw_position", (last-lower)/(upper-lower), upper != lower)
 	signals["nw_trend"] = slopeTrend(percentDistance(middle, previousMiddle))
 	signals["nw_position_state"] = channelBreakout(last, upper, lower)
 }

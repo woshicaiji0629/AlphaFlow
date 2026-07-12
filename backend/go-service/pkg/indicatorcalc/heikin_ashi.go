@@ -10,17 +10,44 @@ type heikinAshiCandle struct {
 }
 
 func addHeikinAshiFeatures(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
-	series, ok := heikinAshiSeries(opens, highs, lows, closes)
+	addHeikinAshiFeaturesToSet(nil, values, signals, opens, highs, lows, closes)
+}
+
+func addHeikinAshiFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
+	last, ok := heikinAshiLast(opens, highs, lows, closes)
 	if !ok {
 		return
 	}
-	last := series[len(series)-1]
-	setValue(values, "ha_open", last.open, true)
-	setValue(values, "ha_high", last.high, true)
-	setValue(values, "ha_low", last.low, true)
-	setValue(values, "ha_close", last.close, true)
-	signals["ha_trend"] = heikinAshiTrend(series)
+	setValueTarget(target, values, "ha_open", last.open, true)
+	setValueTarget(target, values, "ha_high", last.high, true)
+	setValueTarget(target, values, "ha_low", last.low, true)
+	setValueTarget(target, values, "ha_close", last.close, true)
+	signals["ha_trend"] = heikinAshiTrend([]heikinAshiCandle{last})
 	signals["ha_strength"] = heikinAshiStrength(last)
+}
+
+func heikinAshiLast(opens []float64, highs []float64, lows []float64, closes []float64) (heikinAshiCandle, bool) {
+	if len(closes) == 0 || len(opens) != len(closes) || len(highs) != len(closes) || len(lows) != len(closes) {
+		return heikinAshiCandle{}, false
+	}
+	previousOpen := 0.0
+	previousClose := 0.0
+	last := heikinAshiCandle{}
+	for index := range closes {
+		closeValue := (opens[index] + highs[index] + lows[index] + closes[index]) / 4
+		openValue := (opens[index] + closes[index]) / 2
+		if index > 0 {
+			openValue = (previousOpen + previousClose) / 2
+		}
+		last = heikinAshiCandle{
+			open:  openValue,
+			high:  maxFloat(highs[index], openValue, closeValue),
+			low:   minFloat(lows[index], openValue, closeValue),
+			close: closeValue,
+		}
+		previousOpen, previousClose = openValue, closeValue
+	}
+	return last, true
 }
 
 func heikinAshiSeries(opens []float64, highs []float64, lows []float64, closes []float64) ([]heikinAshiCandle, bool) {

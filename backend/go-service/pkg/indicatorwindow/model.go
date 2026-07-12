@@ -16,17 +16,19 @@ type Result struct {
 }
 
 type point struct {
-	openTime  int64
-	closeTime int64
-	values    map[string]string
-	signals   map[string]string
+	openTime      int64
+	closeTime     int64
+	values        map[string]string
+	numericValues map[string]float64
+	signals       map[string]string
 }
 
 func pointFromSnapshot(snapshot model.IndicatorSnapshot) point {
 	return point{
-		openTime:  snapshot.OpenTime,
-		closeTime: snapshot.CloseTime,
-		values:    snapshot.Values,
-		signals:   snapshot.Signals,
+		openTime:      snapshot.OpenTime,
+		closeTime:     snapshot.CloseTime,
+		values:        snapshot.Values,
+		numericValues: snapshot.NumericValues,
+		signals:       snapshot.Signals,
 	}
 }

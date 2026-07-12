@@ -12,11 +12,12 @@ import (
 
 func IndicatorView(snapshot marketmodel.IndicatorSnapshot) strategy.IndicatorView {
 	return strategy.IndicatorView{
-		OpenTime:  snapshot.OpenTime,
-		CloseTime: snapshot.CloseTime,
-		Values:    snapshot.Values,
-		Signals:   snapshot.Signals,
-		UpdatedAt: snapshot.UpdatedAt,
+		OpenTime:      snapshot.OpenTime,
+		CloseTime:     snapshot.CloseTime,
+		Values:        snapshot.Values,
+		NumericValues: snapshot.NumericValues,
+		Signals:       snapshot.Signals,
+		UpdatedAt:     snapshot.UpdatedAt,
 	}
 }
 
