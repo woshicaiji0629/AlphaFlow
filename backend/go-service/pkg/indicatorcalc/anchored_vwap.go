@@ -60,15 +60,24 @@ func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64,
 	p := ((highs[0] + lows[0] + closes[0]) / 3) * volumes[0]
 	vol := volumes[0]
 	state := dynamicSwingVWAPState{}
+	highWindow := newFloatMonotonicWindow(true)
+	lowWindow := newFloatMonotonicWindow(false)
 
 	for index := range closes {
 		prevPh := ph
 		prevPl := pl
-		if isHighestAt(highs, period, index) {
+		highWindow.push(index, highs[index])
+		lowWindow.push(index, lows[index])
+		oldestIndex := index - period + 1
+		highWindow.expireBefore(oldestIndex)
+		lowWindow.expireBefore(oldestIndex)
+		windowHigh, highOK := highWindow.value()
+		windowLow, lowOK := lowWindow.value()
+		if highOK && highs[index] == windowHigh {
 			ph = highs[index]
 			phL = index
 		}
-		if isLowestAt(lows, period, index) {
+		if lowOK && lows[index] == windowLow {
 			pl = lows[index]
 			plL = index
 		}

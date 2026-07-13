@@ -96,7 +96,7 @@
 - `CalculateWindow` 正常路径复用 `CalculationWindow` 已解析 series 做数据质量检查，解析失败时回退旧质量检查逻辑以保留错误原因。
 - Nadaraya-Watson envelope 复用栈上权重缓存，避免每个点重复构造权重；MoneyFlow 的区间最高/最低扫描已抽成公共 helper。
 - Bollinger 20 和 Donchian 20 复用 `CalculationWindow` 中的滚动 sum/sum² 与单调队列；滚动方差定期全量校正并钳制浮点误差导致的极小负方差。
-- ATR、Supertrend、AlphaTrend、QQE、Heikin Ashi、EMD、MACD divergence、AI Supertrend 和 Dynamic Swing VWAP 的只读末值或共享基础序列路径避免构造不必要的完整临时数组。Dynamic Swing VWAP 在非 adaptive 模式下只计算一次固定 APT alpha，避免每个点重复调用 `Log/Exp`。
+- ATR、Supertrend、AlphaTrend、QQE、Heikin Ashi、EMD、MACD divergence、AI Supertrend 和 Dynamic Swing VWAP 的只读末值或共享基础序列路径避免构造不必要的完整临时数组。Dynamic Swing VWAP 在非 adaptive 模式下只计算一次固定 APT alpha，并用单调队列维护滚动 swing high/low，避免每个点重复调用 `Log/Exp` 和扫描整个 swing period；相等极值及窗口未填满时的语义保持不变。
 - 回测使用 `CalculateWindowNumeric`，不生成旧字符串值 map；策略读取先查 `NumericValues`，只有旧快照才回退解析 `Values`。
 
 当前可用 benchmark：
@@ -124,7 +124,7 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 
 本地年度真实路径试验表明，完整指标结果包含大量 map，过大的批次会显著放大常驻内存和 GC 压力。`512` 批次曾出现约 `5GB` 物理内存、约 `8.2GB` 峰值；在同一环境的短时对比中，无缓冲 `30` 批次优于 `20`、`40`、`50` 和 `512`。这些数据用于选择安全默认值，不是生产 SLA；机器负载、指标集合或结果结构变化后应重新 profile。
 
-年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、窗口分析排序和临时 numeric/signal series、VFI 的 30 点双遍标准差扫描，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。2026-07 本地 profile 中，VFI 优化后 `standardDeviationRing` 已退出热点列表；Dynamic Swing VWAP 缓存固定 alpha 后累计占比从约 `11.7%` 降至约 `5.0%`。这些占比只用于同机 profile 前后比较，不是生产 SLA。
+年度回测性能排查应使用真实滚动路径和 CPU profile，不能只用单次 `Calculate(300 bars)` 外推。当前已经消除的主要平方级或重复路径包括：整段历史预处理、窗口裁剪后重建基础状态、每根 K 线重建 AI Source、窗口分析排序和临时 numeric/signal series、VFI 的 30 点双遍标准差扫描，以及 Adaptive Supertrend 对历史 ATR 窗口的重复聚类。2026-07 本地 profile 中，VFI 优化后 `standardDeviationRing` 已退出热点列表；Dynamic Swing VWAP 缓存固定 alpha 后累计占比从约 `11.7%` 降至约 `5.0%`。进一步将 swing 极值扫描改为单调队列后，定向 benchmark 从约 `34.6µs/op` 降至约 `10.1µs/op`，约提升 `3.4x`，该函数在同机 CPU profile 中的累计占比从约 `6.5%` 降至约 `2.6%`。3 小时和 7 天真实回测的标准化报告与优化前逐字节一致；墙钟耗时受本机后台负载影响较大，因此不作为本次收益结论。这些数据只用于同机 profile 前后比较，不是生产 SLA。
 
 已否决的实验也应保留结论：将指标并发度固定为 `1` 会降低五周期回放吞吐；把 AI Supertrend 的 `factor -> bar` 循环交换为 `bar -> factor state` 没有稳定 CPU 收益且增加分配；窗口结果 typed 快速路径若只覆盖通用 `*_win_*` 字段会遗漏 pump、SMC、资金流等适配语义，不能局部上线。AI Supertrend 若继续优化，需要随 `CalculationWindow` 推进的真正增量状态和逐 bar batch 对照测试。
 

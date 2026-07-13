@@ -528,6 +528,41 @@ func TestDynamicSwingVWAPPrecomputedAlphaMatchesAPTStep(t *testing.T) {
 	assertFloatClose(t, "dynamic swing value", gotValue, wantValue)
 }
 
+func TestDynamicSwingRollingExtremaMatchReference(t *testing.T) {
+	testCases := []struct {
+		name   string
+		values []float64
+		period int
+	}{
+		{name: "oscillating", values: []float64{3, 1, 4, 2, 5, 0, 6, 2}, period: 4},
+		{name: "equal extrema", values: []float64{3, 3, 2, 2, 3, 3, 1, 1}, period: 3},
+		{name: "partial window", values: []float64{2, 1, 3}, period: 5},
+		{name: "increasing", values: []float64{1, 2, 3, 4, 5}, period: 3},
+		{name: "decreasing", values: []float64{5, 4, 3, 2, 1}, period: 3},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			highWindow := newFloatMonotonicWindow(true)
+			lowWindow := newFloatMonotonicWindow(false)
+			for index, value := range testCase.values {
+				highWindow.push(index, value)
+				lowWindow.push(index, value)
+				oldestIndex := index - testCase.period + 1
+				highWindow.expireBefore(oldestIndex)
+				lowWindow.expireBefore(oldestIndex)
+				windowHigh, highOK := highWindow.value()
+				windowLow, lowOK := lowWindow.value()
+				if got, want := highOK && value == windowHigh, isHighestAt(testCase.values, testCase.period, index); got != want {
+					t.Fatalf("highest index %d = %t, want %t", index, got, want)
+				}
+				if got, want := lowOK && value == windowLow, isLowestAt(testCase.values, testCase.period, index); got != want {
+					t.Fatalf("lowest index %d = %t, want %t", index, got, want)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkDynamicSwingAnchoredVWAP(b *testing.B) {
 	highs, lows, closes, volumes := trendingSeries(268, 100, 0.3)
 	b.ReportAllocs()
