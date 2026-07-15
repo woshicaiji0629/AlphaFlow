@@ -8,7 +8,7 @@ import (
 
 func validateListFilter(filter Filter) error {
 	switch filter.Scope {
-	case strategy.PositionScopePaper:
+	case strategy.PositionScopePaper, strategy.PositionScopeTestnet, strategy.PositionScopeLive:
 		return nil
 	case strategy.PositionScopeBacktest:
 		if filter.RunID == "" {

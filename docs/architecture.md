@@ -22,7 +22,7 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 - NATS JetStream market snapshot bus，用于 `market-data -> strategy-engine` 的实时特征同步。
 - Go `strategy-engine` 在线策略服务。
 - Go `backtest-engine` 回测入口、滚动 snapshot、模拟成交和结果持久化。
-- Go `position-engine` 仓位/执行路由服务，已接入 paper route 和 testnet/live 账户无关仓位计划发布。
+- Go `position-engine` 仓位/执行路由服务，已接入 paper route、testnet/live 仓位计划发布、成交回报归因和持仓退出规则扫描。
 - Go `execution-engine` 订单执行服务，支持 paper、testnet、live、多账户 fan-out、交易所 REST 适配和私有状态同步。
 - 策略决策通过 NATS JetStream 从 `strategy-engine` 进入 `position-engine`。
 - 基于 Redis 的当前活跃 paper 仓位存储。
@@ -116,7 +116,7 @@ Go `market-data` 服务当前包含以下内部职责：
 
 ## 当前策略流程
 
-在线策略主路径已经迁移到 Go。`strategy-engine` 启动时从 Redis 读取 Go 已聚合的特征快照作为恢复初始态；启动后消费 NATS JetStream market snapshot，更新进程内市场态，对每个目标交易对执行已配置策略，并把策略决策发布到 NATS JetStream。`position-engine` 长驻消费决策消息，当前接入 paper route，并把当前仓位写入 Redis、事件写入 ClickHouse。
+在线策略主路径已经迁移到 Go。`strategy-engine` 启动时从 Redis 读取 Go 已聚合的特征快照作为恢复初始态；启动后消费 NATS JetStream market snapshot，更新进程内市场态，对每个目标交易对执行已配置策略，并把策略决策发布到 NATS JetStream。`position-engine` 长驻消费决策消息：paper route 直接维护本地策略仓位，testnet/live route 发布执行计划；`execution-engine` 按账户生成和执行订单意图，再由成交回报驱动 `position-engine` 更新策略归因仓位。
 
 ```text
 NATS JetStream market.snapshot.closed / market.snapshot.realtime
@@ -125,7 +125,9 @@ NATS JetStream market.snapshot.closed / market.snapshot.realtime
   -> strategy.Engine
   -> NATS JetStream strategy.decision
   -> position-engine
-  -> Redis paper 当前仓位 + ClickHouse strategy_events
+  -> paper: Redis 当前仓位 + ClickHouse strategy_events
+  -> testnet/live: execution.intent -> execution-engine -> execution.report
+  -> position-engine Redis 策略归因仓位
 ```
 
 - Redis `indwin` / `indrt` / health 在策略引擎启动时用于恢复初始态；如果恢复数据缺失或过期，策略引擎会等待 NATS market snapshot 补齐。
@@ -178,6 +180,9 @@ Redis 当前用于：
 - 当前 K 线实时指标特征存储。
 - `strategy-engine` 启动恢复和故障恢复缓存。
 - 当前活跃 paper 仓位存储。
+- testnet/live 当前策略归因仓位、执行意图恢复状态和成交回报幂等标记。
+
+testnet/live 策略归因仓位 key 包含 scope、账户、交易所、市场、交易对、策略和方向。旧版未包含策略名的 key 仅作为兼容读取入口；读取或列举时会校验归因并惰性迁移，新写入只使用新格式。
 
 Redis 不是队列，也不是最终的长期历史行情存储。ClickHouse 负责存储已闭合 K 线，供分析类消费者、回测和指标重算使用。指标和窗口特征都属于可重算的二级数据。在线策略启动后主要消费 NATS market snapshot 并维护内存态，Redis 特征 hash 主要用于恢复、观测和兼容。
 
@@ -187,6 +192,7 @@ NATS JetStream 当前用于：
 
 - 服务间策略决策通信：`strategy-engine -> position-engine`。
 - 服务间行情快照通信：`market-data -> strategy-engine`，默认 stream 为 `ALPHAFLOW_MARKET`，subject 为 `market.snapshot.closed` / `market.snapshot.realtime`。
+- 服务间执行通信：`position-engine -> execution-engine -> position-engine`，包含订单意图、成交回报以及各自的 dead-letter subject。
 - `market-data` 内部 ClickHouse pending 重试队列。
 - `market-data` 内部 K 线 backfill 异步任务队列。
 

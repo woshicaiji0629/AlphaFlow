@@ -54,6 +54,28 @@ func TestParseSinkRejectsUnsupportedSink(t *testing.T) {
 	}
 }
 
+func TestDispatchToSinkOnlyCallsRequestedRoute(t *testing.T) {
+	paper := &captureHandler{}
+	live := &captureHandler{}
+	dispatcher, err := NewDispatcher(DispatcherOptions{
+		Routes: []Route{
+			{StrategyName: "supertrend", Sink: SinkPaper, Enabled: true},
+			{StrategyName: "supertrend", Sink: SinkLive, Enabled: true},
+		},
+		Handlers: map[Sink]ResultHandler{SinkPaper: paper, SinkLive: live},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := strategy.Decision{Results: []strategy.Result{{StrategyName: "supertrend"}}}
+	if err := dispatcher.DispatchToSink(context.Background(), strategy.Context{}, decision, SinkLive); err != nil {
+		t.Fatal(err)
+	}
+	if paper.count != 0 || live.count != 1 {
+		t.Fatalf("paper=%d live=%d", paper.count, live.count)
+	}
+}
+
 type captureHandler struct {
 	count int
 }

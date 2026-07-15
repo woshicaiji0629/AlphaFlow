@@ -18,14 +18,16 @@ type Config struct {
 	Accounts  []Account `toml:"accounts"`
 }
 type NATS struct {
-	URL           string `toml:"url"`
-	Stream        string `toml:"stream"`
-	IntentSubject string `toml:"intent_subject"`
-	ReportSubject string `toml:"report_subject"`
-	Durable       string `toml:"durable"`
-	Block         string `toml:"block"`
-	AckWait       string `toml:"ack_wait"`
-	Batch         int    `toml:"batch"`
+	URL               string `toml:"url"`
+	Stream            string `toml:"stream"`
+	IntentSubject     string `toml:"intent_subject"`
+	ReportSubject     string `toml:"report_subject"`
+	Durable           string `toml:"durable"`
+	Block             string `toml:"block"`
+	AckWait           string `toml:"ack_wait"`
+	Batch             int    `toml:"batch"`
+	DeadLetterSubject string `toml:"dead_letter_subject"`
+	MaxDeliveries     int    `toml:"max_deliveries"`
 }
 type Redis struct {
 	Addr         string `toml:"addr"`
@@ -60,13 +62,19 @@ type Account struct {
 }
 
 func Load(path string) (Config, error) {
-	cfg := Config{NATS: NATS{URL: "nats://localhost:4222", Stream: executionbus.DefaultStream, IntentSubject: executionbus.DefaultIntentSubject, ReportSubject: executionbus.DefaultReportSubject, Durable: "execution-engine", Block: "1s", AckWait: "30s", Batch: 10}, Redis: Redis{Addr: "localhost:6380", PoolSize: 20, MinIdleConns: 5}, Execution: Execution{Mode: "paper"}}
+	cfg := Config{NATS: NATS{URL: "nats://localhost:4222", Stream: executionbus.DefaultStream, IntentSubject: executionbus.DefaultIntentSubject, ReportSubject: executionbus.DefaultReportSubject, Durable: "execution-engine", Block: "1s", AckWait: "30s", Batch: 10, DeadLetterSubject: executionbus.DefaultIntentSubject + ".dead", MaxDeliveries: 5}, Redis: Redis{Addr: "localhost:6380", PoolSize: 20, MinIdleConns: 5}, Execution: Execution{Mode: "paper"}}
 	if err := configutil.DecodeTOMLFileStrict(path, &cfg); err != nil {
 		return Config{}, err
 	}
 	cfg.NATS.URL = envOrValue("ALPHAFLOW_NATS_URL", cfg.NATS.URL)
 	cfg.Redis.Addr = envOrValue("ALPHAFLOW_REDIS_ADDR", cfg.Redis.Addr)
 	cfg.Redis.Password = envOrValue("ALPHAFLOW_REDIS_PASSWORD", cfg.Redis.Password)
+	if strings.TrimSpace(cfg.NATS.DeadLetterSubject) == "" {
+		return Config{}, fmt.Errorf("nats.dead_letter_subject cannot be empty")
+	}
+	if cfg.NATS.MaxDeliveries <= 0 {
+		return Config{}, fmt.Errorf("nats.max_deliveries must be positive")
+	}
 	if cfg.Execution.Mode != "paper" && cfg.Execution.Mode != "testnet" && cfg.Execution.Mode != "live" {
 		return Config{}, fmt.Errorf("unsupported execution mode %q", cfg.Execution.Mode)
 	}

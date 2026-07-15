@@ -76,3 +76,29 @@ func TestAccountFanoutClosesOppositePositionFirst(t *testing.T) {
 		t.Fatalf("intents=%#v", publisher.intents)
 	}
 }
+
+func TestAccountFanoutPrepareUsesRealPositionForPartialExit(t *testing.T) {
+	runtime := accountRuntime{
+		adapter: fanoutAdapter{positions: []strategy.Position{{Symbol: "BTCUSDT", PositionSide: strategy.ExchangePositionSideLong, Size: 4}}},
+		account: executionaccount.Account{ID: "a", Exchange: "binance", Environment: "live", Market: "um"},
+		config:  config.Account{Strategies: []string{"supertrend"}, Symbols: []string{"BTCUSDT"}, MarginQuote: 100, Leverage: 1},
+	}
+	intent := execution.OrderIntent{
+		IntentID:      "risk-exit",
+		StrategyName:  "supertrend",
+		Exchange:      "binance",
+		Account:       "a",
+		Symbol:        "BTCUSDT",
+		Action:        execution.OrderActionReduce,
+		PositionSide:  "long",
+		TriggeredRule: &strategy.ExitRule{SizePct: 0.25},
+	}
+
+	prepared, ok, err := newAccountFanout([]accountRuntime{runtime}, &capturePublisher{}).Prepare(context.Background(), intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || prepared.Quantity != 1 || prepared.Account != "a" {
+		t.Fatalf("prepared=%#v ok=%v", prepared, ok)
+	}
+}

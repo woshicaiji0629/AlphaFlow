@@ -18,6 +18,9 @@ func TestLoadPaperConfig(t *testing.T) {
 	if cfg.NATS.IntentSubject != "execution.intent" {
 		t.Fatalf("config = %#v", cfg)
 	}
+	if cfg.NATS.DeadLetterSubject != "execution.intent.dead" || cfg.NATS.MaxDeliveries != 5 {
+		t.Fatalf("dead-letter config = %#v", cfg.NATS)
+	}
 }
 func TestLoadRejectsLiveModeWithoutAccounts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "execution.toml")

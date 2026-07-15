@@ -88,6 +88,27 @@ func (d *Dispatcher) Dispatch(ctx context.Context, input strategy.Context, decis
 	return nil
 }
 
+func (d *Dispatcher) DispatchToSink(ctx context.Context, input strategy.Context, decision strategy.Decision, sink Sink) error {
+	if d == nil {
+		return nil
+	}
+	for _, result := range decision.Results {
+		for _, route := range d.matchingRoutes(result.StrategyName) {
+			if route.Sink != sink {
+				continue
+			}
+			handler := d.handlers[route.Sink]
+			if handler == nil {
+				return fmt.Errorf("handler for sink %q is not configured", route.Sink)
+			}
+			if err := handler.HandleResult(ctx, input, result, route); err != nil {
+				return fmt.Errorf("handle strategy %s route %s: %w", result.StrategyName, route.Sink, err)
+			}
+		}
+	}
+	return nil
+}
+
 func (d *Dispatcher) matchingRoutes(strategyName string) []Route {
 	if d == nil {
 		return nil

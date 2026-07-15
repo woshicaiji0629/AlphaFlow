@@ -34,13 +34,20 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	if route.Sink != strategyroute.SinkTestnet && route.Sink != strategyroute.SinkLive {
 		return nil
 	}
-	plan := h.manager.Plan(result, nil)
+	targetScope := strategy.PositionScope(route.Sink)
+	var currentPosition *strategy.Position
+	if input.Target.Scope == targetScope {
+		currentPosition = input.Positions[result.StrategyName]
+	}
+	plan := h.manager.PlanWithPrice(result, currentPosition, currentPrice(input))
 	if plan == nil || plan.Action == strategy.PositionActionHold {
 		return nil
 	}
 	target := input.Target
-	target.Scope = strategy.PositionScope(route.Sink)
-	target.Account = ""
+	target.Scope = targetScope
+	if input.Target.Scope != targetScope {
+		target.Account = ""
+	}
 	intent, ok, err := execution.BuildOrderIntent(execution.IntentRequest{Target: target, StrategyName: result.StrategyName, Plan: *plan, BarOpenTime: result.Signal.OpenTime, ReferencePrice: currentPrice(input), CreatedAt: h.now()})
 	if err != nil {
 		return err

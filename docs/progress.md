@@ -75,11 +75,13 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 - `position-engine` 已支持 NATS JetStream 长驻消费、dead-letter 和 result-level 幂等。
 - paper route 已接入公共 paper handler，支持开仓、平仓、减仓、止盈、止损、移动止损和分批退出。
-- paper 当前持仓 scanner 已接入，可按最新价格滚动检查退出规则。
+- paper、testnet 和 live 当前持仓 scanner 已接入，可按最新价格滚动检查退出规则；testnet/live 由策略归因仓位触发退出计划，执行前按账户真实仓位重新校验方向和数量。
 - paper 和 backtest 使用本地策略仓位，不依赖交易所账户仓位。
 - `pkg/executionadapter` 已提供 Binance、Bitget、Gate、WEEX、Deepcoin、Hotcoin 的统一执行适配器，覆盖账户、仓位、挂单、合约能力、下单、撤单和按客户端订单号恢复。WEEX 支持官方 demo 路由；Deepcoin 和 Hotcoin 官方 API 未提供独立测试网，适配器会拒绝 `testnet` 环境，避免误连实盘。
 - `execution-engine` 已支持 `paper` / `testnet` / `live`、环境变量凭证、多账户执行路由、启动连接检查、客户端订单号反查、submitted 意图恢复和私有状态 Redis 当前态。WEEX live 与 Deepcoin live 接入私有 WebSocket，包含重连、重新鉴权/订阅和心跳处理；所有账户同时运行周期 REST 账户、仓位、挂单对账。Hotcoin 官方合约 API 未公开私有 WebSocket，按配置 symbol 使用 REST 对账。
-- position-engine 的 testnet/live route 会发布账户无关仓位计划；execution-engine 按账户 `strategies`、`symbols` / `symbol_map`、固定保证金或权益比例、杠杆、最大仓位、最大保证金占用和禁空规则生成独立账户意图。反向信号会先读取各账户真实仓位，已有同向仓位跳过，反向仓位先平仓；单账户执行失败不会停止其他账户。
+- position-engine 的 testnet/live route 会发布账户无关仓位计划；execution-engine 按账户 `strategies`、`symbols` / `symbol_map`、固定保证金或权益比例、杠杆、最大仓位、最大保证金占用和禁空规则生成独立账户意图。反向信号会先读取各账户真实仓位，已有同向仓位跳过，反向仓位先平仓且不在同批次反手；单账户执行失败不会停止其他账户。
+- execution-engine 会发布带成交状态、累计成交量和更新时间的执行回报；position-engine 只用最终成交回报更新 testnet/live 策略归因仓位，中间状态直接确认。意图和回报均按配置的最大投递次数进入独立 dead-letter subject；dead-letter 发布失败时保留原消息重试。
+- testnet/live 策略归因仓位 Redis key 已加入策略名，兼容旧 key 的读取、去重和惰性迁移，避免同账户同交易对的多策略仓位互相覆盖。
 
 ### 持久化
 
@@ -107,7 +109,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 策略算法由 Go 代码实现并注册；后台只维护参数、版本、可见范围和发布状态，不执行任意代码。
 - 已发布策略版本不可修改，新配置从已发布版本复制为独立草稿。
 - 回测仓位应独立于在线 paper 仓位，使用 `bt` scope 和 run id 隔离。
-- `paper` / `bt` 是本地策略仓位；`testnet` / `live` 后续应按交易所账户级仓位处理，并通过内部账本做策略归因。
+- `paper` / `bt` 是本地策略仓位；`testnet` / `live` 使用交易所账户真实仓位约束订单，并通过内部账本维护策略归因。
 
 ## 已知问题
 
@@ -119,7 +121,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - position-engine 还没有独立 `backtest` / `notify` handler；testnet/live 已通过账户无关计划接入 execution-engine。
 - 真实执行代码已装配，但尚未使用用户真实凭证完成交易所端到端联调；不能把 mock 测试视为实盘验收。
 - 交易所 symbol capability 目前来自静态配置，尚未接交易所 API 自动同步。
-- 订单服务级幂等落库和重复订单意图拦截尚未实现。
+- 执行意图恢复和成交回报幂等已落 Redis；成交应用与幂等标记仍不是单个原子事务，进程在两步之间异常时需要依赖重复投递恢复，后续应补事务化边界。
 - 账户级实时风控尚未实现。
 - HTTP 健康检查接口尚未实现。
 - Control API 和前端基础链路已实现；账户挂载、订阅、订单、用户管理和审计查询页面仍待补齐。
@@ -148,5 +150,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 ```sh
 GOCACHE=/private/tmp/alphaflow-go-cache GO111MODULE=on go test ./...
 ```
+
+最近一轮还通过了 `go vet ./...` 和执行链关键包的 race 测试。本地 Redis/NATS 集成验证覆盖了旧仓位 key 迁移、部分成交回报去重、意图/回报 dead-letter、异常 JSON，以及实际 position-engine 消费最终成交回报并写入策略归因仓位。该验证未连接交易所或发送真实订单，不能替代 demo/testnet 和 live 验收。
 
 最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查和多周期流式回放。相关 Go 测试已通过，短区间真实数据回测已完成并落库；年度回测配置和数据已经就绪，但最终报告尚未产出。

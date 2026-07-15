@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"alphaflow/go-service/pkg/execution"
+	"alphaflow/go-service/pkg/executionbus"
 	"alphaflow/go-service/pkg/idempotency"
 	"alphaflow/go-service/pkg/position"
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
@@ -870,3 +871,74 @@ func (s *fakeIdempotencyStore) Fail(ctx context.Context, key string) error {
 }
 
 var _ idempotency.Store = (*fakeIdempotencyStore)(nil)
+
+func TestProcessExecutionReportAppliesFilledIntentOnce(t *testing.T) {
+	ctx := context.Background()
+	intentStore := execution.NewMemoryIntentStore()
+	intent := execution.OrderIntent{IntentID: "intent-filled", Action: execution.OrderActionOpen}
+	if err := intentStore.SaveIntent(ctx, execution.IntentRecord{Intent: intent}); err != nil {
+		t.Fatal(err)
+	}
+	acker := &fakeReportAcker{}
+	applier := &fakeFillApplier{}
+	idem := newFakeIdempotencyStore(idempotency.StatusStarted)
+	idem.statusByKey = map[string]idempotency.Status{}
+	message := executionbus.ReportMessage{Report: execution.ExecutionReport{
+		IntentID:       intent.IntentID,
+		Status:         execution.ExecutionStatusFilled,
+		FilledQuantity: 1,
+	}}
+
+	if err := processExecutionReport(ctx, acker, intentStore, applier, idem, message); err != nil {
+		t.Fatal(err)
+	}
+	idem.statusByKey["filled:"+intent.IntentID] = idempotency.StatusCompleted
+	if err := processExecutionReport(ctx, acker, intentStore, applier, idem, message); err != nil {
+		t.Fatal(err)
+	}
+	if applier.calls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applier.calls)
+	}
+	if acker.calls != 2 {
+		t.Fatalf("ack calls = %d, want 2", acker.calls)
+	}
+}
+
+func TestProcessExecutionReportAcknowledgesIntermediateStatusWithoutApplying(t *testing.T) {
+	acker := &fakeReportAcker{}
+	applier := &fakeFillApplier{}
+	message := executionbus.ReportMessage{Report: execution.ExecutionReport{
+		IntentID: "intent-partial",
+		Status:   execution.ExecutionStatusPartial,
+	}}
+
+	if err := processExecutionReport(context.Background(), acker, execution.NewMemoryIntentStore(), applier, newFakeIdempotencyStore(idempotency.StatusStarted), message); err != nil {
+		t.Fatal(err)
+	}
+	if applier.calls != 0 || acker.calls != 1 {
+		t.Fatalf("apply calls = %d, ack calls = %d", applier.calls, acker.calls)
+	}
+}
+
+func TestShouldDeadLetterReportAtConfiguredLimit(t *testing.T) {
+	if shouldDeadLetterReport(executionbus.ReportMessage{Delivery: 4}, 5) {
+		t.Fatal("report below delivery limit must remain retryable")
+	}
+	if !shouldDeadLetterReport(executionbus.ReportMessage{Delivery: 5}, 5) {
+		t.Fatal("report at delivery limit must be dead-lettered")
+	}
+}
+
+type fakeReportAcker struct{ calls int }
+
+func (f *fakeReportAcker) AckReport(context.Context, executionbus.ReportMessage) error {
+	f.calls++
+	return nil
+}
+
+type fakeFillApplier struct{ calls int }
+
+func (f *fakeFillApplier) Apply(context.Context, execution.OrderIntent, execution.ExecutionReport) error {
+	f.calls++
+	return nil
+}

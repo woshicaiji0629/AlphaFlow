@@ -24,6 +24,35 @@ type accountFanout struct {
 func newAccountFanout(runtimes []accountRuntime, publisher intentPublisher) *accountFanout {
 	return &accountFanout{runtimes: runtimes, publisher: publisher}
 }
+
+func (f *accountFanout) Prepare(ctx context.Context, intent execution.OrderIntent) (execution.OrderIntent, bool, error) {
+	for _, runtime := range f.runtimes {
+		if runtime.account.ID != intent.Account || !strings.EqualFold(runtime.account.Exchange, intent.Exchange) {
+			continue
+		}
+		if intent.Action == execution.OrderActionOpen && !subscribes(runtime, intent) {
+			return execution.OrderIntent{}, false, nil
+		}
+		aligned, err := alignAccountAction(ctx, runtime, &intent)
+		if err != nil {
+			return execution.OrderIntent{}, false, err
+		}
+		if !aligned {
+			return execution.OrderIntent{}, false, nil
+		}
+		quantity, err := accountQuantity(ctx, runtime, intent)
+		if err != nil {
+			return execution.OrderIntent{}, false, err
+		}
+		if quantity <= 0 {
+			return execution.OrderIntent{}, false, fmt.Errorf("calculated quantity is not positive")
+		}
+		intent.Quantity = quantity
+		return intent, true, nil
+	}
+	return execution.OrderIntent{}, false, fmt.Errorf("execution account %s:%s is not configured", intent.Exchange, intent.Account)
+}
+
 func (f *accountFanout) Publish(ctx context.Context, template execution.OrderIntent) error {
 	for _, runtime := range f.runtimes {
 		if !subscribes(runtime, template) {

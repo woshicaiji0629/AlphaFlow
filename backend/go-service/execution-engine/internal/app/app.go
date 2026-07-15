@@ -16,6 +16,7 @@ type bus interface {
 	ReadIntents(context.Context) ([]executionbus.IntentMessage, error)
 	PublishReport(context.Context, execution.ExecutionReport) error
 	Ack(context.Context, executionbus.IntentMessage) error
+	DeadLetterIntent(context.Context, executionbus.IntentMessage, string) error
 	PublishIntent(context.Context, execution.OrderIntent) error
 }
 
@@ -32,7 +33,7 @@ func Run(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	b, err := executionbus.NewNATSBus(executionbus.Options{URL: cfg.NATS.URL, Stream: cfg.NATS.Stream, IntentSubject: cfg.NATS.IntentSubject, ReportSubject: cfg.NATS.ReportSubject, Durable: cfg.NATS.Durable, Batch: cfg.NATS.Batch, Block: block, AckWait: ackWait})
+	b, err := executionbus.NewNATSBus(executionbus.Options{URL: cfg.NATS.URL, Stream: cfg.NATS.Stream, IntentSubject: cfg.NATS.IntentSubject, ReportSubject: cfg.NATS.ReportSubject, DeadLetterSubject: cfg.NATS.DeadLetterSubject, Durable: cfg.NATS.Durable, Batch: cfg.NATS.Batch, MaxDeliver: cfg.NATS.MaxDeliveries, Block: block, AckWait: ackWait})
 	if err != nil {
 		return err
 	}
@@ -44,7 +45,7 @@ func Run(ctx context.Context, path string) error {
 	defer redisclient.Close(redis)
 	store := execution.NewRedisIntentStore(redis, "execution-engine:intent")
 	if cfg.Execution.Mode == "paper" {
-		return run(ctx, b, store, execution.NewPaperBroker(cfg.Execution.PaperPrice, func() int64 { return time.Now().UnixMilli() }))
+		return run(ctx, b, store, execution.NewPaperBroker(cfg.Execution.PaperPrice, func() int64 { return time.Now().UnixMilli() }), cfg.NATS.MaxDeliveries)
 	}
 	registry, err := executionadapters.NewDefaultRegistry()
 	if err != nil {
@@ -74,13 +75,13 @@ func Run(ctx context.Context, path string) error {
 	}
 	handler := privateEventHandler{redis: redis, bus: b, store: store}
 	startAccountStates(ctx, runtimes, handler.Handle)
-	return runWithFanout(ctx, b, store, trackedBroker{router: router, redis: redis}, newAccountFanout(runtimes, b))
+	return runWithFanout(ctx, b, store, trackedBroker{router: router, redis: redis}, newAccountFanout(runtimes, b), cfg.NATS.MaxDeliveries)
 }
 
-func run(ctx context.Context, b bus, store execution.IntentStore, broker execution.Broker) error {
-	return runWithFanout(ctx, b, store, broker, nil)
+func run(ctx context.Context, b bus, store execution.IntentStore, broker execution.Broker, maxDeliveries int) error {
+	return runWithFanout(ctx, b, store, broker, nil, maxDeliveries)
 }
-func runWithFanout(ctx context.Context, b bus, store execution.IntentStore, broker execution.Broker, fanout *accountFanout) error {
+func runWithFanout(ctx context.Context, b bus, store execution.IntentStore, broker execution.Broker, fanout *accountFanout, maxDeliveries int) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -93,16 +94,43 @@ func runWithFanout(ctx context.Context, b bus, store execution.IntentStore, brok
 			return err
 		}
 		for _, message := range messages {
-			if fanout != nil && message.Intent.Account == "" {
-				if err := fanout.Publish(ctx, message.Intent); err != nil {
-					return err
+			if fanout != nil {
+				if message.Intent.Account == "" {
+					if err := fanout.Publish(ctx, message.Intent); err != nil {
+						return err
+					}
+					if err := b.Ack(ctx, message); err != nil {
+						return err
+					}
+					continue
 				}
-				if err := b.Ack(ctx, message); err != nil {
-					return err
+				prepared, ok, err := fanout.Prepare(ctx, message.Intent)
+				if err != nil {
+					if shouldDeadLetter(message, maxDeliveries) {
+						if deadErr := b.DeadLetterIntent(ctx, message, err.Error()); deadErr != nil {
+							return fmt.Errorf("dead-letter execution intent %s: %w", message.Intent.IntentID, deadErr)
+						}
+						continue
+					}
+					slog.Error("prepare account execution intent failed; leaving message unacked for retry", "intent_id", message.Intent.IntentID, "exchange", message.Intent.Exchange, "account", message.Intent.Account, "error", err)
+					continue
 				}
-				continue
+				if !ok {
+					if err := b.Ack(ctx, message); err != nil {
+						return err
+					}
+					continue
+				}
+				message.Intent = prepared
 			}
 			if err := process(ctx, b, store, broker, message); err != nil {
+				if shouldDeadLetter(message, maxDeliveries) {
+					if deadErr := b.DeadLetterIntent(ctx, message, err.Error()); deadErr != nil {
+						return fmt.Errorf("dead-letter execution intent %s: %w", message.Intent.IntentID, deadErr)
+					}
+					slog.Error("execution account intent dead-lettered", "intent_id", message.Intent.IntentID, "delivery", message.Delivery, "error", err)
+					continue
+				}
 				slog.Error("execution account intent failed; leaving message unacked for retry", "intent_id", message.Intent.IntentID, "exchange", message.Intent.Exchange, "account", message.Intent.Account, "error", err)
 				continue
 			}
@@ -112,6 +140,11 @@ func runWithFanout(ctx context.Context, b bus, store execution.IntentStore, brok
 		}
 	}
 }
+
+func shouldDeadLetter(message executionbus.IntentMessage, maxDeliveries int) bool {
+	return maxDeliveries > 0 && message.Delivery >= int64(maxDeliveries)
+}
+
 func process(ctx context.Context, b bus, store execution.IntentStore, broker execution.Broker, message executionbus.IntentMessage) error {
 	intent := message.Intent
 	if intent.IntentID == "" {

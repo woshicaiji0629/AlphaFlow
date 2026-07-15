@@ -97,3 +97,40 @@ func TestEvaluateOpenPositionsSkipsWhenPriceMissing(t *testing.T) {
 		t.Fatalf("results len = %d, want 0", len(results))
 	}
 }
+
+func TestEvaluateOpenPositionsSupportsLiveAccountPositions(t *testing.T) {
+	store := position.NewMemoryStore()
+	currentPosition := strategy.Position{
+		Scope:        strategy.PositionScopeLive,
+		Account:      "account-1",
+		Exchange:     "binance",
+		Market:       "um",
+		Symbol:       "ETHUSDT",
+		StrategyName: "supertrend",
+		PositionSide: strategy.ExchangePositionSideLong,
+		Side:         strategy.PositionSideLong,
+		Size:         1,
+		ExitRules: []strategy.ExitRule{{
+			Type:         strategy.ExitReasonTakeProfit,
+			Reason:       "take profit",
+			TriggerPrice: "110",
+		}},
+	}
+	if err := store.SavePosition(context.Background(), currentPosition); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := evaluateOpenPositions(
+		context.Background(),
+		store,
+		fakePriceReader{price: strategy.PriceView{MarkPrice: "111"}},
+		position.NewManager(position.ManagerConfig{}),
+		position.Filter{Scope: strategy.PositionScopeLive},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Plan.Action != strategy.PositionActionCloseLong {
+		t.Fatalf("results=%#v", results)
+	}
+}

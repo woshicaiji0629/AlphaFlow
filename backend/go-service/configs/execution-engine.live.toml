@@ -7,6 +7,8 @@ durable = "execution-engine-live"
 block = "1s"
 ack_wait = "30s"
 batch = 10
+dead_letter_subject = "execution.intent.dead"
+max_deliveries = 5
 
 [redis]
 addr = "localhost:6380"

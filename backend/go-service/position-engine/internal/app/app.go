@@ -12,6 +12,7 @@ import (
 	"alphaflow/go-service/pkg/logger"
 	"alphaflow/go-service/pkg/position"
 	executionroute "alphaflow/go-service/pkg/positionhandler/executionroute"
+	fillhandler "alphaflow/go-service/pkg/positionhandler/fill"
 	paperhandler "alphaflow/go-service/pkg/positionhandler/paper"
 	"alphaflow/go-service/pkg/redisclient"
 	"alphaflow/go-service/pkg/strategy"
@@ -34,6 +35,10 @@ type decisionProcessor interface {
 
 type positionScanner interface {
 	ScanPositions(ctx context.Context) (int, error)
+}
+
+type executionReportConsumer interface {
+	RunExecutionReports(ctx context.Context)
 }
 
 var buildDecisionReader = buildNATSDecisionReader
@@ -68,6 +73,20 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer closeProcessor()
+	reportCtx, stopReports := context.WithCancel(ctx)
+	reportsDone := make(chan struct{})
+	if consumer, ok := processor.(executionReportConsumer); ok {
+		go func() {
+			defer close(reportsDone)
+			consumer.RunExecutionReports(reportCtx)
+		}()
+	} else {
+		close(reportsDone)
+	}
+	defer func() {
+		stopReports()
+		<-reportsDone
+	}()
 	idempotencyStore, closeIdempotencyStore, err := buildIdempotencyStore(ctx, cfg)
 	if err != nil {
 		return err
@@ -449,13 +468,17 @@ func buildRedisIdempotencyStore(ctx context.Context, cfg config.Config) (idempot
 }
 
 type paperDecisionProcessor struct {
-	dispatcher     *strategyroute.Dispatcher
-	positionStore  position.Store
-	prices         priceReader
-	defaultScope   strategy.PositionScope
-	defaultAccount string
-	defaultTTL     time.Duration
-	now            func() int64
+	dispatcher          *strategyroute.Dispatcher
+	positionStore       position.Store
+	intentStore         execution.IntentStore
+	executionBus        *executionbus.NATSBus
+	reportIdem          idempotency.Store
+	reportMaxDeliveries int
+	prices              priceReader
+	defaultScope        strategy.PositionScope
+	defaultAccount      string
+	defaultTTL          time.Duration
+	now                 func() int64
 }
 
 func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes []strategyroute.Route) (decisionProcessor, func(), error) {
@@ -463,7 +486,17 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect redis position store: %w", err)
 	}
-	executionBus, err := executionbus.NewNATSBus(executionbus.Options{URL: cfg.NATS.URL, Durable: "position-engine-execution-publisher"})
+	reportBlock, err := config.InputBlock(cfg)
+	if err != nil {
+		redisclient.Close(redisClient)
+		return nil, nil, err
+	}
+	reportAckWait, err := config.InputAckWait(cfg)
+	if err != nil {
+		redisclient.Close(redisClient)
+		return nil, nil, err
+	}
+	executionBus, err := executionbus.NewNATSBus(executionbus.Options{URL: cfg.NATS.URL, Durable: "position-engine-execution", Block: reportBlock, AckWait: reportAckWait, MaxDeliver: cfg.Input.MaxDeliveries})
 	if err != nil {
 		redisclient.Close(redisClient)
 		return nil, nil, err
@@ -477,6 +510,16 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 		}
 	}
 	positionStore := position.NewRedisStore(redisClient, position.RedisStoreOptions{})
+	intentStore := execution.NewRedisIntentStore(redisClient, "execution-engine:intent")
+	reportIdem, err := idempotency.NewRedisStore(redisClient, idempotency.RedisOptions{
+		Prefix:        "position:execution-report:idempotency",
+		ProcessingTTL: 10 * time.Minute,
+		CompletedTTL:  7 * 24 * time.Hour,
+	})
+	if err != nil {
+		closeProcessor()
+		return nil, nil, err
+	}
 	positionManager := position.NewManager(position.ManagerConfig{
 		MaxPositionSize:      cfg.Sizing.MaxPositionSize,
 		MarginQuote:          cfg.Sizing.MarginQuote,
@@ -527,14 +570,105 @@ func buildPaperDecisionProcessor(ctx context.Context, cfg config.Config, routes 
 		return nil, nil, err
 	}
 	return &paperDecisionProcessor{
-		dispatcher:     dispatcher,
-		positionStore:  positionStore,
-		prices:         newRedisPriceReader(redisClient),
-		defaultScope:   config.PositionScope(cfg),
-		defaultAccount: cfg.Position.Account,
-		defaultTTL:     defaultTTL,
-		now:            now,
+		dispatcher:          dispatcher,
+		positionStore:       positionStore,
+		intentStore:         intentStore,
+		executionBus:        executionBus,
+		reportIdem:          reportIdem,
+		reportMaxDeliveries: cfg.Input.MaxDeliveries,
+		prices:              newRedisPriceReader(redisClient),
+		defaultScope:        config.PositionScope(cfg),
+		defaultAccount:      cfg.Position.Account,
+		defaultTTL:          defaultTTL,
+		now:                 now,
 	}, closeProcessor, nil
+}
+
+func (p *paperDecisionProcessor) RunExecutionReports(ctx context.Context) {
+	applier, err := fillhandler.NewApplier(p.positionStore)
+	if err != nil {
+		slog.Error("build execution report applier failed", "error", err)
+		return
+	}
+	for ctx.Err() == nil {
+		messages, err := p.executionBus.ReadReports(ctx, "position-engine-execution")
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("read execution reports failed", "error", err)
+			_ = sleepContext(ctx, time.Second)
+			continue
+		}
+		for _, message := range messages {
+			if err := processExecutionReport(ctx, p.executionBus, p.intentStore, applier, p.reportIdem, message); err != nil {
+				if shouldDeadLetterReport(message, p.reportMaxDeliveries) {
+					if deadErr := p.executionBus.DeadLetterReport(ctx, message, err.Error()); deadErr != nil {
+						slog.Error("dead-letter execution report failed", "intent_id", message.Report.IntentID, "error", deadErr)
+					}
+					continue
+				}
+				slog.Error("apply execution report failed; leaving message unacked for retry", "intent_id", message.Report.IntentID, "status", message.Report.Status, "error", err)
+			}
+		}
+	}
+}
+
+func shouldDeadLetterReport(message executionbus.ReportMessage, maxDeliveries int) bool {
+	return maxDeliveries > 0 && message.Delivery >= int64(maxDeliveries)
+}
+
+type reportAcker interface {
+	AckReport(context.Context, executionbus.ReportMessage) error
+}
+
+type fillApplier interface {
+	Apply(context.Context, execution.OrderIntent, execution.ExecutionReport) error
+}
+
+func processExecutionReport(
+	ctx context.Context,
+	acker reportAcker,
+	intentStore execution.IntentStore,
+	applier fillApplier,
+	idem idempotency.Store,
+	message executionbus.ReportMessage,
+) error {
+	report := message.Report
+	if report.IntentID == "" {
+		return fmt.Errorf("execution report intent_id is required")
+	}
+	if report.Status != execution.ExecutionStatusFilled {
+		return acker.AckReport(ctx, message)
+	}
+	key := "filled:" + report.IntentID
+	status, err := idem.Begin(ctx, key)
+	if err != nil {
+		return err
+	}
+	if status == idempotency.StatusCompleted {
+		return acker.AckReport(ctx, message)
+	}
+	if status == idempotency.StatusProcessing {
+		return nil
+	}
+	record, err := intentStore.GetIntent(ctx, report.IntentID)
+	if err != nil {
+		_ = idem.Fail(ctx, key)
+		return err
+	}
+	if record == nil {
+		_ = idem.Fail(ctx, key)
+		return fmt.Errorf("execution intent %s not found", report.IntentID)
+	}
+	if err := applier.Apply(ctx, record.Intent, report); err != nil {
+		_ = idem.Fail(ctx, key)
+		return err
+	}
+	if err := idem.Complete(ctx, key); err != nil {
+		return err
+	}
+	return acker.AckReport(ctx, message)
 }
 
 func (p *paperDecisionProcessor) ProcessDecision(ctx context.Context, message strategybus.DecisionMessage) (bool, error) {
@@ -564,10 +698,23 @@ func (p *paperDecisionProcessor) ScanPositions(ctx context.Context) (int, error)
 	if p == nil {
 		return 0, nil
 	}
-	return scanOpenPositions(ctx, p.positionStore, p.prices, p.dispatcher, position.Filter{
-		Scope:   p.defaultScope,
-		Account: p.defaultAccount,
-	})
+	total := 0
+	for _, scope := range []strategy.PositionScope{
+		strategy.PositionScopePaper,
+		strategy.PositionScopeTestnet,
+		strategy.PositionScopeLive,
+	} {
+		account := ""
+		if scope == p.defaultScope {
+			account = p.defaultAccount
+		}
+		scanned, err := scanOpenPositions(ctx, p.positionStore, p.prices, p.dispatcher, position.Filter{Scope: scope, Account: account})
+		if err != nil {
+			return total, err
+		}
+		total += scanned
+	}
+	return total, nil
 }
 
 func (p *paperDecisionProcessor) normalizeTarget(target strategy.Target) strategy.Target {

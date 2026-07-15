@@ -48,6 +48,15 @@ func TestProcessKeepsAcceptedExchangeOrderSubmitted(t *testing.T) {
 	}
 }
 
+func TestShouldDeadLetterAtConfiguredDeliveryLimit(t *testing.T) {
+	if shouldDeadLetter(executionbus.IntentMessage{Delivery: 4}, 5) {
+		t.Fatal("delivery below limit must remain retryable")
+	}
+	if !shouldDeadLetter(executionbus.IntentMessage{Delivery: 5}, 5) {
+		t.Fatal("delivery at limit must be dead-lettered")
+	}
+}
+
 type acceptedBroker struct{}
 
 func (acceptedBroker) Execute(context.Context, execution.OrderIntent) (execution.ExecutionReport, error) {
@@ -70,5 +79,8 @@ func (b *fakeBus) PublishReport(_ context.Context, r execution.ExecutionReport) 
 	b.reports = append(b.reports, r)
 	return nil
 }
-func (*fakeBus) Ack(context.Context, executionbus.IntentMessage) error      { return nil }
+func (*fakeBus) Ack(context.Context, executionbus.IntentMessage) error { return nil }
+func (*fakeBus) DeadLetterIntent(context.Context, executionbus.IntentMessage, string) error {
+	return nil
+}
 func (*fakeBus) PublishIntent(context.Context, execution.OrderIntent) error { return nil }

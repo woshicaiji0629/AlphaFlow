@@ -42,6 +42,22 @@ func TestRedisKeyLive(t *testing.T) {
 		Exchange:     "binance",
 		Market:       "um",
 		Symbol:       "ETHUSDT",
+		StrategyName: "supertrend",
+		PositionSide: strategy.ExchangePositionSideLong,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEqual(t, key, "st:pos:live:main:binance:um:ETHUSDT:supertrend:long")
+}
+
+func TestLegacyRedisKeyLive(t *testing.T) {
+	key, err := legacyRedisKey(Key{
+		Scope:        strategy.PositionScopeLive,
+		Account:      "main",
+		Exchange:     "binance",
+		Market:       "um",
+		Symbol:       "ETHUSDT",
 		PositionSide: strategy.ExchangePositionSideLong,
 	})
 	if err != nil {

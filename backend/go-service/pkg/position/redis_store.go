@@ -36,6 +36,15 @@ func (s *RedisStore) GetPosition(ctx context.Context, key Key) (*strategy.Positi
 		return nil, err
 	}
 	payload, err := s.client.Get(ctx, positionKey).Bytes()
+	legacy := false
+	if errors.Is(err, redis.Nil) && isAccountScope(key.Scope) {
+		legacyKey, legacyErr := legacyRedisKey(key)
+		if legacyErr != nil {
+			return nil, legacyErr
+		}
+		payload, err = s.client.Get(ctx, legacyKey).Bytes()
+		legacy = err == nil
+	}
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
 	}
@@ -45,6 +54,14 @@ func (s *RedisStore) GetPosition(ctx context.Context, key Key) (*strategy.Positi
 	currentPosition, err := decodePosition(payload)
 	if err != nil {
 		return nil, err
+	}
+	if legacy {
+		if currentPosition.StrategyName != key.StrategyName {
+			return nil, nil
+		}
+		if err := s.migrateLegacyPosition(ctx, currentPosition); err != nil {
+			return nil, err
+		}
 	}
 	return &currentPosition, nil
 }
@@ -95,7 +112,15 @@ func (s *RedisStore) DeletePosition(ctx context.Context, key Key) error {
 	if err != nil {
 		return err
 	}
-	if err := s.client.Del(ctx, positionKey).Err(); err != nil {
+	keys := []string{positionKey}
+	if isAccountScope(key.Scope) {
+		legacyKey, err := legacyRedisKey(key)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, legacyKey)
+	}
+	if err := s.client.Del(ctx, keys...).Err(); err != nil {
 		return fmt.Errorf("delete redis position: %w", err)
 	}
 	return nil
@@ -112,7 +137,12 @@ func (s *RedisStore) ListPositions(ctx context.Context, filter Filter) ([]strate
 	if err != nil {
 		return nil, err
 	}
-	positions := make([]strategy.Position, 0, len(keys))
+	type candidate struct {
+		position strategy.Position
+		source   string
+	}
+	selected := make(map[string]candidate, len(keys))
+	order := make([]string, 0, len(keys))
 	for _, key := range keys {
 		payload, err := s.client.Get(ctx, key).Bytes()
 		if errors.Is(err, redis.Nil) {
@@ -128,15 +158,61 @@ func (s *RedisStore) ListPositions(ctx context.Context, filter Filter) ([]strate
 		if !positionMatchesFilter(currentPosition, filter) {
 			continue
 		}
-		positions = append(positions, copyPosition(currentPosition))
+		identity, err := RedisKey(KeyFromPosition(currentPosition))
+		if err != nil {
+			return nil, err
+		}
+		current, exists := selected[identity]
+		if !exists {
+			order = append(order, identity)
+		}
+		if !exists || key == identity || current.source != identity {
+			selected[identity] = candidate{position: currentPosition, source: key}
+		}
+	}
+	positions := make([]strategy.Position, 0, len(selected))
+	for _, identity := range order {
+		current := selected[identity]
+		if current.source != identity && isAccountScope(current.position.Scope) {
+			if err := s.migrateLegacyPosition(ctx, current.position); err != nil {
+				return nil, err
+			}
+		}
+		positions = append(positions, copyPosition(current.position))
 	}
 	return positions, nil
 }
 
+func (s *RedisStore) migrateLegacyPosition(ctx context.Context, currentPosition strategy.Position) error {
+	newKey, err := RedisKey(KeyFromPosition(currentPosition))
+	if err != nil {
+		return err
+	}
+	oldKey, err := legacyRedisKey(KeyFromPosition(currentPosition))
+	if err != nil {
+		return err
+	}
+	payload, err := encodePosition(currentPosition)
+	if err != nil {
+		return err
+	}
+	pipe := s.client.TxPipeline()
+	pipe.SetNX(ctx, newKey, payload, 0)
+	pipe.Del(ctx, oldKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("migrate legacy redis position: %w", err)
+	}
+	return nil
+}
+
+func isAccountScope(scope strategy.PositionScope) bool {
+	return scope == strategy.PositionScopeTestnet || scope == strategy.PositionScopeLive
+}
+
 func (s *RedisStore) positionKeys(ctx context.Context, filter Filter) ([]string, error) {
 	switch filter.Scope {
-	case strategy.PositionScopePaper:
-		return s.scanKeys(ctx, joinKey(redisKeyPrefix, "pos", string(strategy.PositionScopePaper), "*"))
+	case strategy.PositionScopePaper, strategy.PositionScopeTestnet, strategy.PositionScopeLive:
+		return s.scanKeys(ctx, joinKey(redisKeyPrefix, "pos", string(filter.Scope), "*"))
 	case strategy.PositionScopeBacktest:
 		if filter.RunID == "" {
 			return nil, fmt.Errorf("run_id is required for backtest position listing")

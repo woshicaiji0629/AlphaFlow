@@ -49,14 +49,31 @@ func RedisKey(item Key) (string, error) {
 			"exchange":      item.Exchange,
 			"market":        item.Market,
 			"symbol":        item.Symbol,
+			"strategy_name": item.StrategyName,
 			"position_side": string(item.PositionSide),
 		}); err != nil {
 			return "", err
 		}
-		return joinKey(redisKeyPrefix, "pos", string(item.Scope), item.Account, item.Exchange, item.Market, item.Symbol, string(item.PositionSide)), nil
+		return joinKey(redisKeyPrefix, "pos", string(item.Scope), item.Account, item.Exchange, item.Market, item.Symbol, item.StrategyName, string(item.PositionSide)), nil
 	default:
 		return "", fmt.Errorf("unsupported position scope %q", item.Scope)
 	}
+}
+
+func legacyRedisKey(item Key) (string, error) {
+	if item.Scope != strategy.PositionScopeTestnet && item.Scope != strategy.PositionScopeLive {
+		return "", fmt.Errorf("legacy position key is unsupported for scope %q", item.Scope)
+	}
+	if err := requireFields(map[string]string{
+		"account":       item.Account,
+		"exchange":      item.Exchange,
+		"market":        item.Market,
+		"symbol":        item.Symbol,
+		"position_side": string(item.PositionSide),
+	}); err != nil {
+		return "", err
+	}
+	return joinKey(redisKeyPrefix, "pos", string(item.Scope), item.Account, item.Exchange, item.Market, item.Symbol, string(item.PositionSide)), nil
 }
 
 func BacktestTempKeysKey(runID string) (string, error) {

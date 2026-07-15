@@ -39,7 +39,7 @@ func scanOpenPositions(
 				result.Position.StrategyName: &result.Position,
 			},
 		}
-		if err := dispatcher.Dispatch(ctx, input, decision); err != nil {
+		if err := dispatcher.DispatchToSink(ctx, input, decision, strategyroute.Sink(result.Position.Scope)); err != nil {
 			return 0, err
 		}
 	}
