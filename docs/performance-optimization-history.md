@@ -40,6 +40,8 @@ ClickHouse K 线
 - `CalculationWindow` 持有基础指标和高成本指标的连续状态；固定窗口只保留所需 K 线，递归状态不会因窗口裁剪重建。
 - DEMA 和 TEMA 共享同一组流式 EMA 递推，HMA slope 复用本轮已经得到的 HMA。
 - QQE Mod 与增强 QQE 共享 RSI smoothing 和 delta foundation，避免同一窗口重复生成基础序列。
+- 完整 `CalculateWindow` 只在 `ValueSet` 中构建一次数值 map，旧字符串 map 在最终输出边界统一编码，不再预分配一张始终为空的中间 map。
+- 增强 QQE 直接从已有 smoothing 序列读取末值，并在 primary trend 尾部窗口上计算 histogram 均值和标准差，不再复制完整 primary line 和 histogram；参考实现测试保证浮点结果逐字段精确一致。
 - 趋势特征优先读取 `featureContext` 中已经计算的 EMA；Supertrend/AlphaTrend 内部方向改为紧凑枚举，只在输出边界转换为字符串。
 - VFI、Dynamic Swing VWAP、Bollinger、Donchian、Nadaraya-Watson、ATR 和多种趋势指标移除了已确认的重复扫描或完整临时序列。
 
@@ -99,6 +101,8 @@ ClickHouse K 线
 - signal 计数继续使用完整 `int`。`DenseSignalSeries` 是 `SignalSeries` 的别名，避免为追求表面压缩而引入整数截断或转换复制。
 - `WindowViewBuilder` 的 scratch 本身就是紧凑结构，生成 view 时执行整结构赋值。
 - `Numeric`、`Signal` 和 `Empty` Getter 屏蔽底层 map/array 差异；Supertrend 策略只通过 Getter 读取窗口。
+- 在线 `strategy-engine` 按 exchange/market/symbol/interval key 复用 `WindowViewBuilder`，收到 market snapshot 时直接生成紧凑窗口 view，不再把字符串窗口 map 长期保留在 market state 中。
+- `WindowViewBuilder` 的 scratch 不是并发安全结构；在线路径对同一 key 串行使用 builder，不同 key 仍可并发处理，避免为复用 scratch 引入数据竞争。
 
 主要实现位于：
 
@@ -132,6 +136,15 @@ ClickHouse K 线
 | grouped WindowViewBuilder | 7–8µs/op | 6.45–7.30µs/op | 15,384 -> 13,336 B/op |
 
 紧凑 view 的分配下降约 13.3%，分配次数保持 4 allocs/op。微基准必须和完整年度回测一起看，不能用单函数结果直接外推端到端吞吐。
+
+### 指标计算微基准
+
+| 路径 | 优化前 | 优化后 | 确定收益 |
+| --- | ---: | ---: | ---: |
+| 完整 `CalculateWindow` | 约 106.9 KiB/op，431 allocs/op | 约 84.2 KiB/op，425 allocs/op | 分配字节下降约 21.2% |
+| QQE shared foundation | 16,896 B/op，8 allocs/op | 12,800 B/op，6 allocs/op | 分配字节下降约 24.2% |
+
+完整指标结果继续同时保留字符串和数值表示：在线存储、发布协议需要字符串字段，窗口和策略内部优先消费数值字段。若要继续消除其中一张结果 map，需要先调整存储和消息协议边界，不能仅在计算器内部删除。CPU 和 market-data 冷启动墙钟结果在本机波动较大，本轮只把分配下降和输出一致性作为确定结论。
 
 ### ETHUSDT 一年回测
 
@@ -185,6 +198,8 @@ go test ./...
 - 合法零值与缺失字段。
 - 动态新增和同数量字段替换。
 - schema 扩展后历史 view 不暴露未来字段。
+- 在线 market state 使用按 key 复用的 builder 后仍保持最新消息顺序，并通过 race 测试覆盖同一 key 并发更新。
+- 增强 QQE 紧凑路径与原始临时序列路径在多种窗口长度下逐字段精确一致。
 - ordered analyzer 与旧批量 analyzer 输出等价。
 - context 取消、worker 退出和数据读取错误。
 - 3 小时、7 天标准化报告与优化前逐字节一致。
@@ -203,6 +218,15 @@ go test ./pkg/indicatorwindow -run '^$' \
 go test ./pkg/strategyframe -run '^$' \
   -bench 'BenchmarkWindowViewBuilderFrom(Grouped|Typed)Result$' \
   -benchmem -count=5
+
+go test ./pkg/indicatorcalc -run '^$' \
+  -bench '^(BenchmarkQQESharedFoundation|BenchmarkCalculateWindowStreaming)$' \
+  -benchmem -count=5
+
+go run ./market-data/cmd/market-data-indicator-loadtest \
+  -symbols 2 -lookback 310 -warmup 250 \
+  -window-lookback 50 -snapshot-cache-limit 60 \
+  -runs 2 -advance-each-run
 ```
 
 年度数据检查和回测：
@@ -229,5 +253,6 @@ go run ./backtest-engine/cmd/backtest-engine \
 2. 175,200 个 contexts/events/results 是否存在重复长期驻留。
 3. 约 103 MiB 报告构建和结果持久化是否可以流式化或分批落盘。
 4. GC 是否已经超过指标计算本身成为主耗时。
+5. market-data 冷启动应在代表性 symbol 数量下单独采集 CPU/alloc profile；当前小样本 loadtest 主要验证计算次数和缓存路径，不作为吞吐结论。
 
 这里的第 2、3 项是根据报告体积和常驻内存增长做出的待验证推断，不是已确认瓶颈。后续仍需遵守“不裁剪指标字段”和“结果语义不变”的约束。

@@ -117,6 +117,17 @@ func (b *WindowViewBuilder) FromResult(result indicatorwindow.Result, updatedAt 
 	return windowViewFromResult(result, updatedAt, b)
 }
 
+func (b *WindowViewBuilder) FromSnapshot(snapshot marketmodel.IndicatorWindowSnapshot) (strategy.IndicatorWindowView, error) {
+	return b.FromResult(indicatorwindow.Result{
+		OpenTime:      snapshot.OpenTime,
+		CloseTime:     snapshot.CloseTime,
+		Version:       snapshot.Version,
+		Values:        snapshot.Values,
+		NumericValues: snapshot.NumericValues,
+		Signals:       snapshot.Signals,
+	}, snapshot.UpdatedAt)
+}
+
 func windowViewFromResult(result indicatorwindow.Result, updatedAt int64, builder *WindowViewBuilder) (strategy.IndicatorWindowView, error) {
 	if updatedAt == 0 {
 		updatedAt = result.CloseTime

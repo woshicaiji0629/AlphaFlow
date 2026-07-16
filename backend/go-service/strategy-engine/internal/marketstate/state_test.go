@@ -2,8 +2,10 @@ package marketstate
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,6 +165,107 @@ func TestStoreKeepsClosedIndicatorSeparateFromRealtime(t *testing.T) {
 	}
 }
 
+func TestStoreApplyBuildsDenseWindowView(t *testing.T) {
+	store := New(Options{Now: func() int64 { return 5000 }, MaxMessageAge: time.Minute, ClosedStaleFactor: 100})
+	closed := marketbus.NewClosedEnvelope(
+		marketmodel.IndicatorSnapshot{
+			Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m",
+			OpenTime: 1000, CloseTime: 2000, UpdatedAt: 2000,
+		},
+		marketmodel.IndicatorWindowSnapshot{
+			Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m",
+			OpenTime: 1000, CloseTime: 2000, UpdatedAt: 2000, Version: "fixture-v1",
+			Values: map[string]string{
+				"window_sample_count": "20",
+				"rsi_win_latest":      "55.5",
+				"rsi_win_previous":    "54",
+			},
+			Signals: map[string]string{"trend_win_latest": "bullish"},
+		},
+		2000,
+		time.Minute,
+	)
+	if applied, err := store.Apply(closed); err != nil || !applied {
+		t.Fatalf("Apply(closed) applied=%v error=%v", applied, err)
+	}
+
+	context, _, _, err := store.BuildContext(testTarget(), nil)
+	if err != nil {
+		t.Fatalf("BuildContext() error = %v", err)
+	}
+	window := context.Snapshots["3m"].Window
+	if window.Schema == nil || len(window.Values) != 0 || len(window.Signals) != 0 {
+		t.Fatalf("window storage is not dense: %#v", window)
+	}
+	if rsi, ok := window.Numeric("rsi"); !ok || rsi.Latest != 55.5 || rsi.Previous != 54 {
+		t.Fatalf("rsi = %#v/%v", rsi, ok)
+	}
+	if trend, ok := window.Signal("trend"); !ok || trend.Latest != "bullish" {
+		t.Fatalf("trend = %#v/%v", trend, ok)
+	}
+	if window.SampleCount != 20 {
+		t.Fatalf("sample count = %d, want 20", window.SampleCount)
+	}
+}
+
+func TestStoreApplyClosedConcurrentlyKeepsLatestDenseWindow(t *testing.T) {
+	const updateCount = 32
+	const base = int64(1_000_000)
+	store := New(Options{
+		Now:               func() int64 { return base + updateCount*1000 },
+		MaxMessageAge:     time.Hour,
+		ClosedStaleFactor: 100,
+	})
+
+	errors := make(chan error, updateCount)
+	var wait sync.WaitGroup
+	for index := range updateCount {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			openTime := base + int64(index)*1000
+			closeTime := openTime + 999
+			envelope := marketbus.NewClosedEnvelope(
+				marketmodel.IndicatorSnapshot{
+					Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m",
+					OpenTime: openTime, CloseTime: closeTime, UpdatedAt: closeTime,
+				},
+				marketmodel.IndicatorWindowSnapshot{
+					Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m",
+					OpenTime: openTime, CloseTime: closeTime, UpdatedAt: closeTime,
+					Values: map[string]string{
+						"window_sample_count": "20",
+						"rsi_win_latest":      fmt.Sprintf("%d", index),
+					},
+				},
+				closeTime,
+				time.Hour,
+			)
+			if _, err := store.Apply(envelope); err != nil {
+				errors <- err
+			}
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	context, _, _, err := store.BuildContext(testTarget(), nil)
+	if err != nil {
+		t.Fatalf("BuildContext() error = %v", err)
+	}
+	window := context.Snapshots["3m"].Window
+	wantOpenTime := base + (updateCount-1)*1000
+	if window.OpenTime != wantOpenTime {
+		t.Fatalf("window open time = %d, want %d", window.OpenTime, wantOpenTime)
+	}
+	if rsi, ok := window.Numeric("rsi"); !ok || rsi.Latest != updateCount-1 {
+		t.Fatalf("latest rsi = %#v/%v, want %d", rsi, ok, updateCount-1)
+	}
+}
+
 func TestEntryCloseReplayMatchesHistoricalContextAndDecision(t *testing.T) {
 	now := int64(0)
 	store := New(Options{
@@ -204,7 +307,7 @@ func TestEntryCloseReplayMatchesHistoricalContextAndDecision(t *testing.T) {
 		if err != nil {
 			t.Fatalf("frame %d historical context error = %v", index, err)
 		}
-		if !reflect.DeepEqual(online, historical) {
+		if !reflect.DeepEqual(canonicalParityContext(online), canonicalParityContext(historical)) {
 			t.Fatalf("frame %d context mismatch\nonline=%#v\nhistorical=%#v", index, online, historical)
 		}
 
@@ -219,6 +322,38 @@ func TestEntryCloseReplayMatchesHistoricalContextAndDecision(t *testing.T) {
 		if !reflect.DeepEqual(onlineDecision, historicalDecision) {
 			t.Fatalf("frame %d decision mismatch\nonline=%#v\nhistorical=%#v", index, onlineDecision, historicalDecision)
 		}
+	}
+}
+
+func canonicalParityContext(input strategy.Context) strategy.Context {
+	snapshots := make(map[string]strategy.Snapshot, len(input.Snapshots))
+	for interval, snapshot := range input.Snapshots {
+		snapshot.Window = canonicalParityWindow(snapshot.Window)
+		timeframes := make(map[string]strategy.TimeframeSnapshot, len(snapshot.Timeframes))
+		for timeframeInterval, timeframe := range snapshot.Timeframes {
+			timeframe.Window = canonicalParityWindow(timeframe.Window)
+			timeframes[timeframeInterval] = timeframe
+		}
+		snapshot.Timeframes = timeframes
+		snapshots[interval] = snapshot
+	}
+	input.Snapshots = snapshots
+	return input
+}
+
+func canonicalParityWindow(window strategy.IndicatorWindowView) strategy.IndicatorWindowView {
+	signals := map[string]strategy.SignalSeries{}
+	if trend, ok := window.Signal("trend"); ok {
+		signals["trend"] = trend
+	}
+	return strategy.IndicatorWindowView{
+		OpenTime:    window.OpenTime,
+		CloseTime:   window.CloseTime,
+		Version:     window.Version,
+		SampleCount: window.SampleCount,
+		Values:      map[string]strategy.NumericSeries{},
+		Signals:     signals,
+		UpdatedAt:   window.UpdatedAt,
 	}
 }
 
@@ -320,8 +455,16 @@ func (parityStrategy) Evaluate(ctx context.Context, snapshot strategy.Snapshot, 
 	if err := ctx.Err(); err != nil {
 		return strategy.Result{}, err
 	}
-	entryTrend := snapshot.Window.Signals["trend"].Latest
-	confirmTrend := snapshot.Timeframes["5m"].Window.Signals["trend"].Latest
+	entrySeries, ok := snapshot.Window.Signal("trend")
+	if !ok {
+		return strategy.Result{}, fmt.Errorf("entry trend missing")
+	}
+	confirmSeries, ok := snapshot.Timeframes["5m"].Window.Signal("trend")
+	if !ok {
+		return strategy.Result{}, fmt.Errorf("confirmation trend missing")
+	}
+	entryTrend := entrySeries.Latest
+	confirmTrend := confirmSeries.Latest
 	side := strategy.SignalSideHold
 	if entryTrend == confirmTrend {
 		if entryTrend == "bullish" {

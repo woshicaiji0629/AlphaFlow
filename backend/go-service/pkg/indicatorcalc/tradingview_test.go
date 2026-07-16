@@ -87,6 +87,64 @@ func TestQQEModEnhancedOutputsSignalFields(t *testing.T) {
 	}
 }
 
+func TestQQEModEnhancedCompactMatchesReference(t *testing.T) {
+	for _, count := range []int{120, 180, 268, 320} {
+		closes := oscillatingCloses(count)
+		rsiValues, rsiOK := rsiSeries(closes, 6)
+		smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, 6, 5)
+
+		got, gotOK := qqeModEnhancedFromFoundation(smoothed, smoothedDeltas, offset, 3, 1.61, 50, 0.35, 3, foundationOK)
+		want, wantOK := qqeModEnhancedReference(smoothed, smoothedDeltas, offset, 3, 1.61, 50, 0.35, 3, foundationOK)
+
+		if gotOK != wantOK || got != want {
+			t.Fatalf("count %d: compact QQE = (%#v, %t), want (%#v, %t)", count, got, gotOK, want, wantOK)
+		}
+	}
+}
+
+func qqeModEnhancedReference(smoothed []float64, smoothedDeltas []float64, offset int, primaryFactor float64, secondaryFactor float64, bbPeriod int, bbMultiplier float64, secondaryThreshold float64, foundationOK bool) (qqeModEnhancedResult, bool) {
+	if !foundationOK {
+		return qqeModEnhancedResult{}, false
+	}
+	primaryTrend, primaryLine, okPrimary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, primaryFactor, true)
+	secondaryTrend, _, okSecondary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, secondaryFactor, false)
+	secondaryLine := primaryLine
+	if !okPrimary || !okSecondary || len(primaryTrend) < bbPeriod || len(primaryLine) < 2 || len(secondaryLine) == 0 {
+		return qqeModEnhancedResult{}, false
+	}
+	primaryTrendHist := make([]float64, 0, len(primaryTrend))
+	for _, value := range primaryTrend {
+		primaryTrendHist = append(primaryTrendHist, value-50)
+	}
+	basis, ok := sma(primaryTrendHist, bbPeriod)
+	if !ok {
+		return qqeModEnhancedResult{}, false
+	}
+	deviation, ok := standardDeviation(primaryTrendHist, bbPeriod)
+	if !ok {
+		return qqeModEnhancedResult{}, false
+	}
+	lastPrimary := primaryLine[len(primaryLine)-1]
+	previousPrimary := primaryLine[len(primaryLine)-2]
+	lastSecondary := secondaryLine[len(secondaryLine)-1]
+	lastPrimaryHist := lastPrimary - 50
+	lastSecondaryHist := lastSecondary - 50
+	upper := basis + deviation*bbMultiplier
+	lower := basis - deviation*bbMultiplier
+	return qqeModEnhancedResult{
+		primaryLine:    lastPrimary,
+		primaryTrend:   primaryTrend[len(primaryTrend)-1],
+		secondaryLine:  lastSecondary,
+		secondaryTrend: secondaryTrend[len(secondaryTrend)-1],
+		bbUpper:        upper,
+		bbLower:        lower,
+		primaryHist:    lastPrimaryHist,
+		secondaryHist:  lastSecondaryHist,
+		signal:         qqeModSignal(lastPrimaryHist, lastSecondaryHist, upper, lower, secondaryThreshold),
+		zeroCross:      qqeZeroCross(previousPrimary, lastPrimary),
+	}, true
+}
+
 func TestQQESharedFoundationMatchesStandalonePaths(t *testing.T) {
 	closes := oscillatingCloses(180)
 	rsiValues, rsiOK := rsiSeries(closes, 6)

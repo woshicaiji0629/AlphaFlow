@@ -20,10 +20,16 @@ type Options struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	now     func() int64
-	options Options
-	items   map[string]intervalState
+	mu             sync.RWMutex
+	now            func() int64
+	options        Options
+	items          map[string]intervalState
+	windowBuilders map[string]*lockedWindowViewBuilder
+}
+
+type lockedWindowViewBuilder struct {
+	mu      sync.Mutex
+	builder *strategyframe.WindowViewBuilder
 }
 
 type intervalState struct {
@@ -50,9 +56,10 @@ func New(options Options) *Store {
 		options.ClosedStaleFactor = 2
 	}
 	return &Store{
-		now:     options.Now,
-		options: options,
-		items:   map[string]intervalState{},
+		now:            options.Now,
+		options:        options,
+		items:          map[string]intervalState{},
+		windowBuilders: map[string]*lockedWindowViewBuilder{},
 	}
 }
 
@@ -81,11 +88,24 @@ func (s *Store) Apply(envelope marketbus.SnapshotEnvelope) (bool, error) {
 	if err := s.validateFreshMessage(envelope); err != nil {
 		return false, err
 	}
-	next, err := stateFromEnvelope(envelope)
+	target := strategy.Target{
+		Exchange: envelope.Target.Exchange,
+		Market:   envelope.Target.Market,
+		Symbol:   envelope.Target.Symbol,
+		Interval: envelope.Target.Interval,
+	}
+	key := stateKey(target)
+	var builder *strategyframe.WindowViewBuilder
+	if envelope.Window != nil {
+		lockedBuilder := s.windowViewBuilder(key)
+		lockedBuilder.mu.Lock()
+		defer lockedBuilder.mu.Unlock()
+		builder = lockedBuilder.builder
+	}
+	next, err := stateFromEnvelope(envelope, builder)
 	if err != nil {
 		return false, err
 	}
-	key := stateKey(next.target)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.items[key]
@@ -95,6 +115,17 @@ func (s *Store) Apply(envelope marketbus.SnapshotEnvelope) (bool, error) {
 	merged := mergeState(current, next)
 	s.items[key] = merged
 	return true, nil
+}
+
+func (s *Store) windowViewBuilder(key string) *lockedWindowViewBuilder {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if builder := s.windowBuilders[key]; builder != nil {
+		return builder
+	}
+	builder := &lockedWindowViewBuilder{builder: strategyframe.NewWindowViewBuilder()}
+	s.windowBuilders[key] = builder
+	return builder
 }
 
 func (s *Store) BuildContext(target strategy.Target, intervals []string) (strategy.Context, bool, string, error) {
@@ -186,7 +217,7 @@ func (s *Store) degradedReason(item intervalState, requireRealtime bool) string 
 	return ""
 }
 
-func stateFromEnvelope(envelope marketbus.SnapshotEnvelope) (intervalState, error) {
+func stateFromEnvelope(envelope marketbus.SnapshotEnvelope, builder *strategyframe.WindowViewBuilder) (intervalState, error) {
 	target := strategy.Target{
 		Exchange: envelope.Target.Exchange,
 		Market:   envelope.Target.Market,
@@ -211,7 +242,13 @@ func stateFromEnvelope(envelope marketbus.SnapshotEnvelope) (intervalState, erro
 		state.updatedAt = maxInt64(state.updatedAt, indicator.UpdatedAt)
 	}
 	if envelope.Window != nil {
-		window, err := strategyframe.WindowView(*envelope.Window)
+		var window strategy.IndicatorWindowView
+		var err error
+		if builder == nil {
+			window, err = strategyframe.WindowView(*envelope.Window)
+		} else {
+			window, err = builder.FromSnapshot(*envelope.Window)
+		}
 		if err != nil {
 			return intervalState{}, err
 		}

@@ -120,9 +120,6 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	}
 
 	var values map[string]string
-	if encodeValues {
-		values = make(map[string]string, resultValuesCapacity)
-	}
 	numericSet := NewValueSet(resultValuesCapacity)
 	signals := make(map[string]string, resultSignalsCapacity)
 	requiredSamples := requiredSampleCount(options)

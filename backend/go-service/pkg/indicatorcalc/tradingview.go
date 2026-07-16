@@ -116,27 +116,26 @@ func qqeModEnhancedFromFoundation(smoothed []float64, smoothedDeltas []float64, 
 	if !foundationOK {
 		return qqeModEnhancedResult{}, false
 	}
-	primaryTrend, primaryLine, okPrimary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, primaryFactor, true)
+	primaryTrend, _, okPrimary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, primaryFactor, false)
 	secondaryTrend, _, okSecondary := qqeModTrendSeriesFromFoundation(smoothed, smoothedDeltas, offset, secondaryFactor, false)
-	secondaryLine := primaryLine
-	if !okPrimary || !okSecondary || len(primaryTrend) < bbPeriod || len(primaryLine) < 2 || len(secondaryLine) == 0 {
+	if !okPrimary || !okSecondary || bbPeriod <= 0 || len(primaryTrend) < bbPeriod || len(smoothed) < 2 {
 		return qqeModEnhancedResult{}, false
 	}
-	primaryTrendHist := make([]float64, 0, len(primaryTrend))
-	for _, value := range primaryTrend {
-		primaryTrendHist = append(primaryTrendHist, value-50)
+	trendWindow := primaryTrend[len(primaryTrend)-bbPeriod:]
+	var basis float64
+	for _, value := range trendWindow {
+		basis += value - 50
 	}
-	basis, ok := sma(primaryTrendHist, bbPeriod)
-	if !ok {
-		return qqeModEnhancedResult{}, false
+	basis /= float64(bbPeriod)
+	var variance float64
+	for _, value := range trendWindow {
+		diff := (value - 50) - basis
+		variance += diff * diff
 	}
-	deviation, ok := standardDeviation(primaryTrendHist, bbPeriod)
-	if !ok {
-		return qqeModEnhancedResult{}, false
-	}
-	lastPrimary := primaryLine[len(primaryLine)-1]
-	previousPrimary := primaryLine[len(primaryLine)-2]
-	lastSecondary := secondaryLine[len(secondaryLine)-1]
+	deviation := math.Sqrt(variance / float64(bbPeriod))
+	lastPrimary := smoothed[len(smoothed)-1]
+	previousPrimary := smoothed[len(smoothed)-2]
+	lastSecondary := lastPrimary
 	lastPrimaryHist := lastPrimary - 50
 	lastSecondaryHist := lastSecondary - 50
 	upper := basis + deviation*bbMultiplier
