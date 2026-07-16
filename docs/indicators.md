@@ -149,10 +149,12 @@ BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 
 | --- | --- | --- |
 | `signal:trend_valid` | signal | 当前趋势是否有效。 |
 | `signal:trend_window_bias` | signal | 窗口趋势偏向。 |
-| `signal:trend_price_progress` | signal | 价格推进状态，例如 `advancing`、`declining`。 |
+| `signal:trend_price_progress` | signal | 相对当前趋势方向的价格推进状态：`advancing`、`reversing`、`stalling` 或 `unknown`。 |
 | `signal:trend_quality` | signal | 趋势质量。 |
 | `signal:supertrend_direction` | signal | Supertrend 方向。 |
 | `signal:alphatrend_direction` | signal | AlphaTrend 方向。 |
+
+`advancing` 表示价格沿 `trend_window_bias` 推进，即多头上涨或空头下跌，不表示绝对价格只会上涨。拉盘/砸盘语义会把它与趋势方向组合：`bull + advancing` 生成多头价格推进，`bear + advancing` 生成空头价格推进。
 
 ### 均线窗口
 

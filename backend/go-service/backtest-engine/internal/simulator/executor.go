@@ -62,6 +62,7 @@ type Executor struct {
 	progress      func(processed int, total int, trades int)
 	processed     int
 	progressTotal int
+	setNow        func(int64)
 	incremental   executionState
 }
 
@@ -79,8 +80,11 @@ func NewExecutor(options ExecutorOptions) (*Executor, error) {
 	if options.Store == nil {
 		options.Store = position.NewMemoryStore()
 	}
+	var setNow func(int64)
 	if options.Now == nil {
-		options.Now = func() int64 { return 0 }
+		currentTime := int64(0)
+		options.Now = func() int64 { return currentTime }
+		setNow = func(value int64) { currentTime = value }
 	}
 	manager := position.NewManager(options.ManagerConfig)
 	handler, err := paperhandler.New(paperhandler.Options{
@@ -123,6 +127,7 @@ func NewExecutor(options ExecutorOptions) (*Executor, error) {
 		account:       account,
 		progress:      options.Progress,
 		progressTotal: options.ProgressTotal,
+		setNow:        setNow,
 	}, nil
 }
 
@@ -172,6 +177,7 @@ func (e *Executor) execute(
 			if err := ctx.Err(); err != nil {
 				return ExecutionSummary{}, err
 			}
+			e.setContextTime(item)
 			input, err := e.contextWithPositions(ctx, item)
 			if err != nil {
 				return ExecutionSummary{}, err
@@ -251,6 +257,22 @@ func (e *Executor) execute(
 		summary.OpenPositions = len(positions)
 	}
 	return summary, nil
+}
+
+func (e *Executor) setContextTime(item strategy.Context) {
+	if e.setNow == nil {
+		return
+	}
+	snapshot, ok := item.Snapshots[item.Target.Interval]
+	if !ok {
+		e.setNow(0)
+		return
+	}
+	eventTime := snapshot.AsOf
+	if eventTime <= 0 {
+		eventTime = snapshot.Current.CloseTime
+	}
+	e.setNow(eventTime)
 }
 
 func (e *Executor) filterDecision(input strategy.Context, decision strategy.Decision) (strategy.Decision, error) {

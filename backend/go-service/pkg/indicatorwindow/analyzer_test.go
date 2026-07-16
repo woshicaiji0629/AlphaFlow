@@ -848,6 +848,62 @@ func TestAnalyzeBuildsWindowSnapshotFromIndicatorSequence(t *testing.T) {
 	}
 }
 
+func TestAnalyzeBuildsBearishContinuationSemantics(t *testing.T) {
+	snapshots := []model.IndicatorSnapshot{
+		testSnapshot(1, map[string]string{
+			"close": "108", "ema7": "107", "ema25_slope5_pct": "-0.1",
+			"ema_spread_pct": "-0.2", "ma_group_spread_pct": "0.2",
+			"supertrend_distance_pct": "-0.2", "volume_ratio20": "1",
+			"macd_hist": "0.2", "macd_zero_distance": "0.2",
+		}, map[string]string{
+			"ema_alignment": "bear", "ma_cross": "none", "ma_compression": "normal",
+			"supertrend_direction": "down", "alphatrend_direction": "down",
+		}),
+		testSnapshot(2, map[string]string{
+			"close": "104", "ema7": "103", "ema25_slope5_pct": "-0.2",
+			"ema_spread_pct": "-0.5", "ma_group_spread_pct": "0.5",
+			"supertrend_distance_pct": "-0.5", "volume_ratio20": "1.6",
+			"macd_hist": "-0.1", "macd_zero_distance": "-0.1",
+		}, map[string]string{
+			"ema_alignment": "bear", "ma_cross": "none", "ma_compression": "normal",
+			"supertrend_direction": "down", "alphatrend_direction": "down",
+		}),
+		testSnapshot(3, map[string]string{
+			"close": "100", "ema7": "101", "ema25_slope5_pct": "-0.3",
+			"ema_spread_pct": "-0.9", "ma_group_spread_pct": "0.9",
+			"supertrend_distance_pct": "-0.9", "volume_ratio20": "2",
+			"macd_hist": "-0.4", "macd_zero_distance": "-0.4",
+		}, map[string]string{
+			"ema_alignment": "bear", "ma_cross": "none", "ma_compression": "normal",
+			"supertrend_direction": "down", "alphatrend_direction": "down",
+		}),
+	}
+
+	result, err := Analyze(snapshots)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	assertAnalyzeOrderedTypedMatchesLegacy(t, snapshots)
+
+	wantSignals := map[string]string{
+		"ma_window_spread_state":    "rising",
+		"ma_window_tangled":         "false",
+		"ma_ribbon_state":           "bearish_fan",
+		"trend_distance_state":      "falling",
+		"trend_price_progress":      "advancing",
+		"trend_window_continuation": "true",
+		"trend_quality":             "strong",
+		"trend_valid":               "true",
+		"pump_window_signal":        "false",
+		"dump_window_signal":        "true",
+	}
+	for key, want := range wantSignals {
+		if got := result.Signals[key]; got != want {
+			t.Errorf("signal %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func testSnapshot(
 	openTime int64,
 	values map[string]string,

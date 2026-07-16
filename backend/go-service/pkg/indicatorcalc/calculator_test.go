@@ -29,6 +29,7 @@ func TestCalculateCommonIndicators(t *testing.T) {
 		t.Fatalf("Calculate: %v", err)
 	}
 	for _, key := range []string{
+		"close",
 		"sma7",
 		"ema25",
 		"wma99",
@@ -240,6 +241,9 @@ func TestCalculateCommonIndicators(t *testing.T) {
 	if result.Values["required_count"] != "99" {
 		t.Fatalf("required count = %q, want 99", result.Values["required_count"])
 	}
+	if result.Values["close"] != "220" {
+		t.Fatalf("close = %q, want 220", result.Values["close"])
+	}
 }
 
 func TestCalculateIgnoresOpenKline(t *testing.T) {
@@ -276,6 +280,9 @@ func TestCalculateWindowNumericSkipsLegacyEncoding(t *testing.T) {
 	}
 	if result.NumericValues["sma2"] != 101.5 {
 		t.Fatalf("numeric sma2 = %v, want 101.5", result.NumericValues["sma2"])
+	}
+	if result.NumericValues["close"] != 102 {
+		t.Fatalf("numeric close = %v, want 102", result.NumericValues["close"])
 	}
 }
 

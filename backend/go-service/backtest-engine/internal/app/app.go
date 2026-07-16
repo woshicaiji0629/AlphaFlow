@@ -152,6 +152,7 @@ func Run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("build backtest report: %w", err)
 	}
+	item.Diagnostics = report.BuildDecisionDiagnostics(summary.StrategyEvents)
 	slog.Info("backtest report", "report", report.FormatBacktestReport(item))
 	if err := writeBacktestReportJSON(cfg.Result.ReportJSONPath, item); err != nil {
 		return err

@@ -1,5 +1,7 @@
 package indicatorwindow
 
+import "math"
+
 func addMovingAverageWindowAnalysis(ctx *analysisContext) {
 	ctx.addNumeric(
 		"sma7", "sma25", "sma99",
@@ -45,8 +47,22 @@ func addMovingAverageSemanticAnalysis(ctx *analysisContext) {
 	}
 
 	spreadState := "flat"
-	if stats, ok := numericStatsFor(ctx, "ema_spread_pct"); ok {
+	if stats, ok := numericStatsFor(ctx, "ma_group_spread_pct"); ok {
 		spreadState = stats.direction
+	} else if stats, ok := numericStatsFor(ctx, "ema_spread_pct"); ok {
+		spreadState = stats.direction
+		if bias == "bear" {
+			switch spreadState {
+			case "rising":
+				spreadState = "falling"
+			case "falling":
+				spreadState = "rising"
+			}
+		}
+	}
+	if stats, ok := numericStatsFor(ctx, "ema_spread_pct"); ok {
+		ctx.values["ma_window_spread_pct"] = format(stats.latest)
+	} else if stats, ok := numericStatsFor(ctx, "ma_group_spread_pct"); ok {
 		ctx.values["ma_window_spread_pct"] = format(stats.latest)
 	}
 	if spreadState == "flat" {
@@ -84,7 +100,11 @@ func addMovingAverageSemanticAnalysis(ctx *analysisContext) {
 
 	crossFlips := signalChangeCount(ctx, "ma_cross") + signalChangeCount(ctx, "script_dual_ma_cross")
 	tangled := crossFlips >= choppyCrossFlipCount || signalIs(spreadState, "compressed", "tight", "contracting")
-	if spread, ok := latestNumeric(ctx, "ema_spread_pct"); ok && spread < maTangleSpreadPct {
+	spread, spreadOK := latestNumeric(ctx, "ma_group_spread_pct")
+	if !spreadOK {
+		spread, spreadOK = latestNumeric(ctx, "ema_spread_pct")
+	}
+	if spreadOK && math.Abs(spread) < maTangleSpreadPct {
 		tangled = true
 	}
 	if value, ok := latestSignal(ctx, "ma_compression"); ok && signalIs(value, "true", "yes", "compressed", "tight") {

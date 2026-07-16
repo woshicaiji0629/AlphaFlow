@@ -161,6 +161,7 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 			Signals:       signals,
 		}, nil
 	}
+	setValueSet(numericSet, "close", closes[len(closes)-1], true)
 	basic := window.basic
 	if window.aiPreview == nil {
 		window.prepareAISourcePrefix()

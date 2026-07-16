@@ -67,6 +67,17 @@ func TestEvaluateBlocksWhenShortTimeframesOppose(t *testing.T) {
 	}
 }
 
+func TestEvaluateReturnsSellWhenShortTrendAdvances(t *testing.T) {
+	item := New(Config{})
+	result, err := item.Evaluate(context.Background(), snapshot(strategy.SignalSideSell, nil), nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideSell {
+		t.Fatalf("side = %q, want sell", result.Signal.Side)
+	}
+}
+
 func TestEvaluateClosesLongOnConfirmedShortSetup(t *testing.T) {
 	item := New(Config{})
 	currentPosition := &strategy.Position{
@@ -127,7 +138,7 @@ func window(side strategy.SignalSide, overrides map[string]string) strategy.Indi
 		"volume_window_state":       {Latest: "expanding"},
 		"supertrend_direction":      {Latest: directionForSide(side), StableCount: 2},
 		"trend_window_bias":         {Latest: biasForSide(side)},
-		"trend_price_progress":      {Latest: progressForSide(side)},
+		"trend_price_progress":      {Latest: "advancing"},
 	}
 	if side == strategy.SignalSideBuy {
 		signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true"}

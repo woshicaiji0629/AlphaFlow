@@ -117,9 +117,11 @@ func addTrendVolatilitySemanticAnalysis(ctx *analysisContext) {
 	}
 
 	quality := "weak"
+	distanceExpanding := (bias == "bull" && signalIs(distanceState, "rising")) ||
+		(bias == "bear" && signalIs(distanceState, "falling"))
 	if bias == "neutral" || choppyContext {
 		quality = "choppy"
-	} else if continuation && confirmedContext && signalIs(distanceState, "rising") {
+	} else if continuation && confirmedContext && distanceExpanding {
 		quality = "strong"
 	}
 	fakeRisk := "medium"

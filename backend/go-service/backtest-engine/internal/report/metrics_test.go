@@ -72,6 +72,36 @@ func TestBuildTradeMetricsRejectsInvalidPnL(t *testing.T) {
 	}
 }
 
+func TestBuildDecisionDiagnosticsAggregatesSignalsChecksAndScores(t *testing.T) {
+	events := []strategy.StrategyEvent{
+		{EventType: strategy.EventTypeSignalGenerated, Side: strategy.SignalSideHold, Metadata: map[string]string{"analysis": `{"Checks":[{"Name":"trend","Side":"buy","Status":"blocked","Reason":"trend not aligned"},{"Name":"entry_threshold","Side":"buy","Status":"blocked","Reason":"entry threshold not met","Values":{"score":"0.8","threshold":"0.72"}},{"Name":"entry_threshold","Side":"sell","Status":"blocked","Reason":"entry threshold not met","Values":{"score":"0.4","threshold":"0.72"}},{"Name":"quality","Side":"buy","Status":"missing","Reason":"quality missing"}]}`}},
+		{EventType: strategy.EventTypeSignalGenerated, Side: strategy.SignalSideBuy, Metadata: map[string]string{"analysis": `{"Checks":[{"Name":"trend","Side":"buy","Status":"pass","Reason":"trend aligned"},{"Name":"entry_threshold","Side":"buy","Status":"pass","Reason":"entry threshold met","Values":{"score":"0.8","threshold":"0.72"}}]}`}},
+		{EventType: strategy.EventTypeSignalGenerated, Side: strategy.SignalSideSell},
+		{EventType: strategy.EventTypeSignalGenerated, Side: strategy.SignalSideHold, Metadata: map[string]string{"analysis": "{"}},
+		{EventType: strategy.EventTypeOrderFilled, Side: strategy.SignalSideBuy},
+	}
+	diagnostics := BuildDecisionDiagnostics(events)
+	if diagnostics.SignalEvents != 4 || diagnostics.AnalysisEvents != 2 || diagnostics.AnalysisMissing != 1 || diagnostics.AnalysisMalformed != 1 {
+		t.Fatalf("analysis counts = %#v, want signals=4 analysis=2 missing=1 malformed=1", diagnostics)
+	}
+	if len(diagnostics.SignalDistribution) != 3 || diagnostics.SignalDistribution[0].Side != "buy" || diagnostics.SignalDistribution[0].Count != 1 || diagnostics.SignalDistribution[1].Count != 2 || diagnostics.SignalDistribution[2].Side != "sell" {
+		t.Fatalf("signal distribution = %#v, want buy=1 hold=2 sell=1", diagnostics.SignalDistribution)
+	}
+	if len(diagnostics.Checks) != 4 || diagnostics.Checks[2].Name != "trend" || diagnostics.Checks[2].Pass != 1 || diagnostics.Checks[2].Blocked != 1 || diagnostics.Checks[2].BlockedRate != 0.5 || diagnostics.Checks[1].MissingRate != 1 {
+		t.Fatalf("checks = %#v, want aggregated pass/blocked/missing rates", diagnostics.Checks)
+	}
+	if len(diagnostics.BlockingReasons) != 3 || diagnostics.BlockingReasons[0].CheckRate != 0.5 {
+		t.Fatalf("blocking reasons = %#v, want stable check-relative rates", diagnostics.BlockingReasons)
+	}
+	if len(diagnostics.EntryScores) != 2 || diagnostics.EntryScores[0].AtOrAboveThreshold != 2 || diagnostics.EntryScores[0].BlockedAtOrAboveThreshold != 1 || diagnostics.EntryScores[0].Buckets["0_75_to_lt_1_00"] != 2 || diagnostics.EntryScores[1].Buckets["0_25_to_lt_0_50"] != 1 {
+		t.Fatalf("entry scores = %#v, want threshold and bucket counts", diagnostics.EntryScores)
+	}
+	text := FormatBacktestReport(BacktestReport{Diagnostics: diagnostics})
+	if !strings.Contains(text, "signals: buy=1,hold=2,sell=1") || !strings.Contains(text, "top_blocker: buy/entry_threshold=1") {
+		t.Fatalf("formatted diagnostics = %q", text)
+	}
+}
+
 func TestFormatRunSummaryIncludesKeyFields(t *testing.T) {
 	item, err := BuildBacktestReport(strategy.BacktestRunSummary{
 		RunID:        "run-1",
@@ -173,10 +203,10 @@ func TestMarshalBacktestReportUsesStableJSONKeys(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v payload=%s", err, payload)
 	}
-	if decoded["summary"] == nil || decoded["stats"] == nil || decoded["metrics"] == nil ||
+	if decoded["summary"] == nil || decoded["stats"] == nil || decoded["metrics"] == nil || decoded["diagnostics"] == nil ||
 		decoded["bar_equity_curve"] == nil || decoded["portfolio_equity_curve"] == nil ||
 		decoded["account_equity_curve"] == nil {
-		t.Fatalf("json keys = %#v, want summary/stats/metrics/equity curves", decoded)
+		t.Fatalf("json keys = %#v, want summary/stats/metrics/diagnostics/equity curves", decoded)
 	}
 	summary := decoded["summary"].(map[string]any)
 	if summary["run_id"] != "run-1" || summary["strategy_set"] != "supertrend" {

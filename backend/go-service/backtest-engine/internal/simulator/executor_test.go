@@ -126,6 +126,44 @@ func TestExecutorIncrementalRetainsEventStateWithoutMaterializingHistory(t *test
 	if first.StrategyEvents != nil || second.StrategyEvents != nil {
 		t.Fatal("incremental execution materialized full event history")
 	}
+	for _, event := range store.Events() {
+		want := event.BarOpenTime + 999
+		if event.EventTime != want || event.CreatedAt != want {
+			t.Fatalf("event time = %d/%d, want %d for bar open time %d", event.EventTime, event.CreatedAt, want, event.BarOpenTime)
+		}
+	}
+}
+
+func TestExecutorPreservesConfiguredClock(t *testing.T) {
+	store := position.NewMemoryStore()
+	executor, err := NewExecutor(ExecutorOptions{
+		Engine: strategy.NewEngine([]strategy.Strategy{fixedStrategy{
+			name:       "fixed",
+			signalSide: strategy.SignalSideBuy,
+			confidence: 0.9,
+		}}),
+		Store: store,
+		ManagerConfig: position.ManagerConfig{
+			MarginQuote:       100,
+			Leverage:          1,
+			MaxPositionSize:   10,
+			MinOpenConfidence: 0.5,
+		},
+		Now: func() int64 { return 4242 },
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	if _, err := executor.Execute(context.Background(), []strategy.Context{
+		executorTestContext("ETHUSDT", 1000, "100"),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, event := range store.Events() {
+		if event.EventTime != 4242 || event.CreatedAt != 4242 {
+			t.Fatalf("event time = %d/%d, want configured time 4242", event.EventTime, event.CreatedAt)
+		}
+	}
 }
 
 func TestExecutorAppliesConfiguredSlippage(t *testing.T) {
@@ -496,9 +534,11 @@ func executorTestContext(symbol string, openTime int64, close string) strategy.C
 		Snapshots: map[string]strategy.Snapshot{
 			"3m": {
 				Current: marketmodel.Kline{
-					Close:    close,
-					OpenTime: openTime,
+					Close:     close,
+					OpenTime:  openTime,
+					CloseTime: openTime + 999,
 				},
+				AsOf: openTime + 999,
 			},
 		},
 	}

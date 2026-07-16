@@ -304,7 +304,7 @@ func trendConfirmation(window strategy.IndicatorWindowView, side strategy.Signal
 		return false, 0, []string{"trend not aligned"}
 	}
 	progress := latestSignal(window, "trend_price_progress")
-	if progress != "" && progress != progressForSide(side) {
+	if progress != "" && progress != "advancing" {
 		return false, 0, []string{"trend progress blocked"}
 	}
 	quality := latestSignal(window, "trend_quality")
@@ -585,13 +585,6 @@ func oppositeBias(side strategy.SignalSide) string {
 		return "bear"
 	}
 	return "bull"
-}
-
-func progressForSide(side strategy.SignalSide) string {
-	if side == strategy.SignalSideBuy {
-		return "advancing"
-	}
-	return "declining"
 }
 
 func oppositeSide(side strategy.SignalSide) strategy.SignalSide {

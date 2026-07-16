@@ -6,8 +6,9 @@ func addPumpWindowAnalysis(ctx *analysisContext) {
 	volumeExpansion := signalIs(ctx.signals["volume_window_state"], "expansion", "climax") ||
 		signalIs(ctx.signals["volume_window_support"], "true") ||
 		signalIs(ctx.signals["price_volume_window_confirmed"], "true")
-	priceAdvancing := signalIs(ctx.signals["trend_price_progress"], "advancing")
-	priceDeclining := signalIs(ctx.signals["trend_price_progress"], "declining")
+	trendAdvancing := signalIs(ctx.signals["trend_price_progress"], "advancing")
+	priceAdvancing := signalIs(ctx.signals["trend_window_bias"], "bull") && trendAdvancing
+	priceDeclining := signalIs(ctx.signals["trend_window_bias"], "bear") && trendAdvancing
 	trendOK := signalIs(ctx.signals["trend_valid"], "true") ||
 		signalIs(ctx.signals["trend_quality"], "strong")
 	bullMACDOK := signalIs(ctx.signals["macd_window_bias"], "bull") &&

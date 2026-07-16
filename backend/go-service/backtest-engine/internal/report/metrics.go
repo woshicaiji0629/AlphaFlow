@@ -75,10 +75,60 @@ type RunStats struct {
 	OpenPositions int `json:"open_positions"`
 }
 
+type DecisionDiagnostics struct {
+	SignalEvents       int                         `json:"signal_events"`
+	AnalysisEvents     int                         `json:"analysis_events"`
+	AnalysisMissing    int                         `json:"analysis_missing"`
+	AnalysisMalformed  int                         `json:"analysis_malformed"`
+	SignalDistribution []DiagnosticSignalSummary   `json:"signal_distribution"`
+	Checks             []DiagnosticCheckSummary    `json:"checks"`
+	BlockingReasons    []DiagnosticBlockingReason  `json:"blocking_reasons"`
+	EntryScores        []DiagnosticEntryScoreStats `json:"entry_scores"`
+}
+
+type DiagnosticSignalSummary struct {
+	Side  string  `json:"side"`
+	Count int     `json:"count"`
+	Rate  float64 `json:"rate"`
+}
+
+type DiagnosticCheckSummary struct {
+	Name        string  `json:"name"`
+	Side        string  `json:"side"`
+	Total       int     `json:"total"`
+	Pass        int     `json:"pass"`
+	Blocked     int     `json:"blocked"`
+	Missing     int     `json:"missing"`
+	Info        int     `json:"info"`
+	Other       int     `json:"other"`
+	PassRate    float64 `json:"pass_rate"`
+	BlockedRate float64 `json:"blocked_rate"`
+	MissingRate float64 `json:"missing_rate"`
+}
+
+type DiagnosticBlockingReason struct {
+	Name      string  `json:"name"`
+	Side      string  `json:"side"`
+	Reason    string  `json:"reason"`
+	Count     int     `json:"count"`
+	CheckRate float64 `json:"check_rate"`
+}
+
+type DiagnosticEntryScoreStats struct {
+	Side                      string         `json:"side"`
+	Total                     int            `json:"total"`
+	ValidScores               int            `json:"valid_scores"`
+	InvalidScores             int            `json:"invalid_scores"`
+	AtOrAboveThreshold        int            `json:"at_or_above_threshold"`
+	BlockedAtOrAboveThreshold int            `json:"blocked_at_or_above_threshold"`
+	Buckets                   map[string]int `json:"buckets"`
+}
+
 type BacktestReport struct {
 	Summary              strategy.BacktestRunSummary `json:"summary"`
 	Stats                RunStats                    `json:"stats"`
 	Metrics              TradeMetrics                `json:"metrics"`
+	Diagnostics          DecisionDiagnostics         `json:"diagnostics"`
 	BarEquityCurve       []BarEquityPoint            `json:"bar_equity_curve"`
 	PortfolioEquityCurve []PortfolioEquityPoint      `json:"portfolio_equity_curve"`
 	AccountEquityCurve   []AccountEquityPoint        `json:"account_equity_curve"`
@@ -109,9 +159,179 @@ type BacktestReportDTO struct {
 	Summary              BacktestSummaryDTO     `json:"summary"`
 	Stats                RunStats               `json:"stats"`
 	Metrics              TradeMetrics           `json:"metrics"`
+	Diagnostics          DecisionDiagnostics    `json:"diagnostics"`
 	BarEquityCurve       []BarEquityPoint       `json:"bar_equity_curve"`
 	PortfolioEquityCurve []PortfolioEquityPoint `json:"portfolio_equity_curve"`
 	AccountEquityCurve   []AccountEquityPoint   `json:"account_equity_curve"`
+}
+
+type diagnosticCheckKey struct {
+	side string
+	name string
+}
+
+type diagnosticBlockingKey struct {
+	diagnosticCheckKey
+	reason string
+}
+
+type diagnosticEntryScoreAccumulator struct {
+	stats DiagnosticEntryScoreStats
+}
+
+func BuildDecisionDiagnostics(events []strategy.StrategyEvent) DecisionDiagnostics {
+	diagnostics := DecisionDiagnostics{
+		SignalDistribution: []DiagnosticSignalSummary{},
+		Checks:             []DiagnosticCheckSummary{},
+		BlockingReasons:    []DiagnosticBlockingReason{},
+		EntryScores:        []DiagnosticEntryScoreStats{},
+	}
+	signals := map[string]int{}
+	checks := map[diagnosticCheckKey]*DiagnosticCheckSummary{}
+	blockers := map[diagnosticBlockingKey]int{}
+	scores := map[string]*diagnosticEntryScoreAccumulator{}
+	for _, event := range events {
+		if event.EventType != strategy.EventTypeSignalGenerated {
+			continue
+		}
+		diagnostics.SignalEvents++
+		signals[diagnosticSide(string(event.Side))]++
+		encoded := strings.TrimSpace(event.Metadata["analysis"])
+		if encoded == "" {
+			diagnostics.AnalysisMissing++
+			continue
+		}
+		var analysis strategy.Analysis
+		if err := json.Unmarshal([]byte(encoded), &analysis); err != nil {
+			diagnostics.AnalysisMalformed++
+			continue
+		}
+		diagnostics.AnalysisEvents++
+		for _, check := range analysis.Checks {
+			side := diagnosticSide(string(check.Side))
+			key := diagnosticCheckKey{side: side, name: check.Name}
+			item := checks[key]
+			if item == nil {
+				item = &DiagnosticCheckSummary{Name: check.Name, Side: side}
+				checks[key] = item
+			}
+			item.Total++
+			switch check.Status {
+			case strategy.DiagnosticStatusPass:
+				item.Pass++
+			case strategy.DiagnosticStatusBlocked:
+				item.Blocked++
+				blockers[diagnosticBlockingKey{diagnosticCheckKey: key, reason: check.Reason}]++
+			case strategy.DiagnosticStatusMissing:
+				item.Missing++
+			case strategy.DiagnosticStatusInfo:
+				item.Info++
+			default:
+				item.Other++
+			}
+			if check.Name == "entry_threshold" {
+				addDiagnosticEntryScore(scores, side, check)
+			}
+		}
+	}
+	for side, count := range signals {
+		diagnostics.SignalDistribution = append(diagnostics.SignalDistribution, DiagnosticSignalSummary{
+			Side: side, Count: count, Rate: diagnosticRate(count, diagnostics.SignalEvents),
+		})
+	}
+	sort.Slice(diagnostics.SignalDistribution, func(i, j int) bool {
+		return diagnostics.SignalDistribution[i].Side < diagnostics.SignalDistribution[j].Side
+	})
+	for _, item := range checks {
+		item.PassRate = diagnosticRate(item.Pass, item.Total)
+		item.BlockedRate = diagnosticRate(item.Blocked, item.Total)
+		item.MissingRate = diagnosticRate(item.Missing, item.Total)
+		diagnostics.Checks = append(diagnostics.Checks, *item)
+	}
+	sort.Slice(diagnostics.Checks, func(i, j int) bool {
+		if diagnostics.Checks[i].Side == diagnostics.Checks[j].Side {
+			return diagnostics.Checks[i].Name < diagnostics.Checks[j].Name
+		}
+		return diagnostics.Checks[i].Side < diagnostics.Checks[j].Side
+	})
+	for key, count := range blockers {
+		diagnostics.BlockingReasons = append(diagnostics.BlockingReasons, DiagnosticBlockingReason{
+			Name: key.name, Side: key.side, Reason: key.reason, Count: count,
+			CheckRate: diagnosticRate(count, checks[key.diagnosticCheckKey].Total),
+		})
+	}
+	sort.Slice(diagnostics.BlockingReasons, func(i, j int) bool {
+		left, right := diagnostics.BlockingReasons[i], diagnostics.BlockingReasons[j]
+		if left.Count != right.Count {
+			return left.Count > right.Count
+		}
+		if left.Side != right.Side {
+			return left.Side < right.Side
+		}
+		if left.Name != right.Name {
+			return left.Name < right.Name
+		}
+		return left.Reason < right.Reason
+	})
+	for _, accumulator := range scores {
+		diagnostics.EntryScores = append(diagnostics.EntryScores, accumulator.stats)
+	}
+	sort.Slice(diagnostics.EntryScores, func(i, j int) bool {
+		return diagnostics.EntryScores[i].Side < diagnostics.EntryScores[j].Side
+	})
+	return diagnostics
+}
+
+func addDiagnosticEntryScore(accumulators map[string]*diagnosticEntryScoreAccumulator, side string, check strategy.DiagnosticCheck) {
+	item := accumulators[side]
+	if item == nil {
+		item = &diagnosticEntryScoreAccumulator{stats: DiagnosticEntryScoreStats{Side: side, Buckets: map[string]int{}}}
+		accumulators[side] = item
+	}
+	item.stats.Total++
+	score, scoreErr := strconv.ParseFloat(check.Values["score"], 64)
+	threshold, thresholdErr := strconv.ParseFloat(check.Values["threshold"], 64)
+	if scoreErr != nil || thresholdErr != nil || math.IsNaN(score) || math.IsInf(score, 0) || math.IsNaN(threshold) || math.IsInf(threshold, 0) {
+		item.stats.InvalidScores++
+		return
+	}
+	item.stats.ValidScores++
+	item.stats.Buckets[diagnosticScoreBucket(score)]++
+	if score >= threshold {
+		item.stats.AtOrAboveThreshold++
+		if check.Status == strategy.DiagnosticStatusBlocked {
+			item.stats.BlockedAtOrAboveThreshold++
+		}
+	}
+}
+
+func diagnosticSide(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func diagnosticRate(count int, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(count) / float64(total)
+}
+
+func diagnosticScoreBucket(score float64) string {
+	switch {
+	case score < 0.25:
+		return "lt_0_25"
+	case score < 0.50:
+		return "0_25_to_lt_0_50"
+	case score < 0.75:
+		return "0_50_to_lt_0_75"
+	case score < 1.00:
+		return "0_75_to_lt_1_00"
+	default:
+		return "gte_1_00"
+	}
 }
 
 func BuildTradeMetrics(trades []strategy.BacktestTrade) (TradeMetrics, error) {
@@ -391,6 +611,21 @@ func FormatBacktestReport(report BacktestReport) string {
 		builder.WriteString("\nstopped_reason: ")
 		builder.WriteString(value)
 	}
+	if report.Diagnostics.SignalEvents > 0 {
+		fmt.Fprintf(&builder, "\nsignal_events: %d\nanalysis_missing: %d\nanalysis_malformed: %d",
+			report.Diagnostics.SignalEvents, report.Diagnostics.AnalysisMissing, report.Diagnostics.AnalysisMalformed)
+		builder.WriteString("\nsignals: ")
+		for index, item := range report.Diagnostics.SignalDistribution {
+			if index > 0 {
+				builder.WriteString(",")
+			}
+			fmt.Fprintf(&builder, "%s=%d", item.Side, item.Count)
+		}
+		if len(report.Diagnostics.BlockingReasons) > 0 {
+			top := report.Diagnostics.BlockingReasons[0]
+			fmt.Fprintf(&builder, "\ntop_blocker: %s/%s=%d", top.Side, top.Name, top.Count)
+		}
+	}
 	return builder.String()
 }
 
@@ -430,6 +665,7 @@ func ToBacktestReportDTO(report BacktestReport) BacktestReportDTO {
 		Summary:              ToBacktestSummaryDTO(report.Summary),
 		Stats:                report.Stats,
 		Metrics:              report.Metrics,
+		Diagnostics:          report.Diagnostics,
 		BarEquityCurve:       finiteBarEquityCurve(report.BarEquityCurve),
 		PortfolioEquityCurve: finitePortfolioEquityCurve(report.PortfolioEquityCurve),
 		AccountEquityCurve:   finiteAccountEquityCurve(report.AccountEquityCurve),
@@ -459,6 +695,9 @@ func WriteBacktestReport(writer io.Writer, report BacktestReport) error {
 	output.writeString(",\n")
 	output.writeString(`  "metrics": `)
 	output.writeJSON(finiteMetrics(report.Metrics), "  ")
+	output.writeString(",\n")
+	output.writeString(`  "diagnostics": `)
+	output.writeJSON(report.Diagnostics, "  ")
 	output.writeString(",\n")
 	output.writeString(`  "bar_equity_curve": `)
 	writeBacktestReportCurve(output, report.BarEquityCurve, finiteBarEquityPoint)
