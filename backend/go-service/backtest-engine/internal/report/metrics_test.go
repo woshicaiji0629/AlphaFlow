@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 
@@ -309,6 +310,57 @@ func TestBuildBacktestReportWithInitialEquityAddsAccountCurve(t *testing.T) {
 	}
 }
 
+func TestBuildBacktestReportWithOwnedCurvesTransfersCurveOwnership(t *testing.T) {
+	barCurve := []BarEquityPoint{
+		{Time: 1000, Symbol: "ETHUSDT", RealizedPnL: 3, UnrealizedPnL: 7, Equity: 10},
+	}
+	accountCurve := []AccountEquityPoint{
+		{Time: 1000, InitialEquity: 1000, Fee: 2, Equity: 1008, Liquidated: true},
+	}
+	item, err := BuildBacktestReportWithOwnedCurves(
+		strategy.BacktestRunSummary{RunID: "run-1"},
+		RunStats{},
+		nil,
+		1000,
+		barCurve,
+		accountCurve,
+	)
+	if err != nil {
+		t.Fatalf("BuildBacktestReportWithOwnedCurves() error = %v", err)
+	}
+	if &item.BarEquityCurve[0] != &barCurve[0] {
+		t.Fatal("bar equity curve was copied, want ownership transfer")
+	}
+	if &item.AccountEquityCurve[0] != &accountCurve[0] {
+		t.Fatal("account equity curve was copied, want ownership transfer")
+	}
+	if item.AccountEquityCurve[0].Fee != 2 || !item.AccountEquityCurve[0].Liquidated {
+		t.Fatalf("account equity curve = %#v, want supplied account state", item.AccountEquityCurve)
+	}
+	if len(item.PortfolioEquityCurve) != 1 || item.PortfolioEquityCurve[0].Equity != 10 {
+		t.Fatalf("portfolio equity curve = %#v, want derived portfolio state", item.PortfolioEquityCurve)
+	}
+}
+
+func TestBuildBacktestReportWithOwnedCurvesDerivesMissingAccountCurve(t *testing.T) {
+	item, err := BuildBacktestReportWithOwnedCurves(
+		strategy.BacktestRunSummary{RunID: "run-1"},
+		RunStats{},
+		nil,
+		1000,
+		[]BarEquityPoint{
+			{Time: 1000, Symbol: "ETHUSDT", UnrealizedPnL: 10, Equity: 10},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildBacktestReportWithOwnedCurves() error = %v", err)
+	}
+	if len(item.AccountEquityCurve) != 1 || item.AccountEquityCurve[0].Equity != 1010 {
+		t.Fatalf("account equity curve = %#v, want derived equity 1010", item.AccountEquityCurve)
+	}
+}
+
 func TestBuildPortfolioEquityCurveAggregatesLatestSymbolPnL(t *testing.T) {
 	curve := BuildPortfolioEquityCurve([]BarEquityPoint{
 		{Time: 2000, Symbol: "ETHUSDT", RealizedPnL: 3, UnrealizedPnL: 4},
@@ -328,6 +380,62 @@ func TestBuildPortfolioEquityCurveAggregatesLatestSymbolPnL(t *testing.T) {
 	if curve[2].Time != 3000 || curve[2].RealizedPnL != 5 || curve[2].UnrealizedPnL != 3 || curve[2].Equity != 8 {
 		t.Fatalf("curve[2] = %#v, want realized 5 unrealized 3 equity 8", curve[2])
 	}
+}
+
+func TestBuildPortfolioEquityCurveMatchesOrderedAndUnorderedInput(t *testing.T) {
+	ordered := BuildPortfolioEquityCurve([]BarEquityPoint{
+		{Time: 1000, Symbol: "ETHUSDT", RealizedPnL: 0, UnrealizedPnL: 1},
+		{Time: 1000, Symbol: "BTCUSDT", RealizedPnL: 0, UnrealizedPnL: 2},
+		{Time: 2000, Symbol: "ETHUSDT", RealizedPnL: 3, UnrealizedPnL: 4},
+		{Time: 3000, Symbol: "BTCUSDT", RealizedPnL: 5, UnrealizedPnL: -1},
+	})
+	unordered := BuildPortfolioEquityCurve([]BarEquityPoint{
+		{Time: 2000, Symbol: "ETHUSDT", RealizedPnL: 3, UnrealizedPnL: 4},
+		{Time: 1000, Symbol: "ETHUSDT", RealizedPnL: 0, UnrealizedPnL: 1},
+		{Time: 1000, Symbol: "BTCUSDT", RealizedPnL: 0, UnrealizedPnL: 2},
+		{Time: 3000, Symbol: "BTCUSDT", RealizedPnL: 5, UnrealizedPnL: -1},
+	})
+	if len(ordered) != len(unordered) {
+		t.Fatalf("curve lengths differ: ordered=%d unordered=%d", len(ordered), len(unordered))
+	}
+	for index := range ordered {
+		if ordered[index] != unordered[index] {
+			t.Fatalf("curve[%d] differs: ordered=%#v unordered=%#v", index, ordered[index], unordered[index])
+		}
+	}
+}
+
+func BenchmarkBuildPortfolioEquityCurve(b *testing.B) {
+	const pointCount = 175_200
+	ordered := make([]BarEquityPoint, pointCount)
+	reversed := make([]BarEquityPoint, pointCount)
+	for index := 0; index < pointCount; index++ {
+		point := BarEquityPoint{Time: int64(index), Symbol: "ETHUSDT", UnrealizedPnL: float64(index)}
+		ordered[index] = point
+		reversed[pointCount-index-1] = point
+	}
+	b.Run("ordered_fast_path", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			benchmarkPortfolioEquityCurve = BuildPortfolioEquityCurve(ordered)
+		}
+	})
+	b.Run("ordered_legacy_copy_sort", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			copied := append([]BarEquityPoint(nil), ordered...)
+			sort.SliceStable(copied, func(left, right int) bool {
+				return copied[left].Time < copied[right].Time
+			})
+			benchmarkPortfolioEquityCurve = buildPortfolioEquityCurve(copied)
+		}
+	})
+	b.Run("unordered_fallback", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			benchmarkPortfolioEquityCurve = BuildPortfolioEquityCurve(reversed)
+		}
+	})
 }
 
 func TestToBacktestSummaryDTOCopiesMutableFields(t *testing.T) {
@@ -356,6 +464,7 @@ func reportTrade(id string, exitTime int64, pnl string) strategy.BacktestTrade {
 }
 
 var benchmarkBacktestReportPayload []byte
+var benchmarkPortfolioEquityCurve []PortfolioEquityPoint
 
 type failingWriter struct {
 	err error

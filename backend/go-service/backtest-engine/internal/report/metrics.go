@@ -238,22 +238,61 @@ func BuildBacktestReportWithInitialEquity(
 	return item, nil
 }
 
+// BuildBacktestReportWithOwnedCurves transfers ownership of the supplied curves
+// to the returned report. Callers must not mutate them after this function returns.
+func BuildBacktestReportWithOwnedCurves(
+	summary strategy.BacktestRunSummary,
+	stats RunStats,
+	trades []strategy.BacktestTrade,
+	initialEquity float64,
+	barEquityCurve []BarEquityPoint,
+	accountEquityCurve []AccountEquityPoint,
+) (BacktestReport, error) {
+	item, err := BuildBacktestReport(summary, stats, trades)
+	if err != nil {
+		return BacktestReport{}, err
+	}
+	item.BarEquityCurve = barEquityCurve
+	item.PortfolioEquityCurve = BuildPortfolioEquityCurve(barEquityCurve)
+	if len(accountEquityCurve) > 0 {
+		item.AccountEquityCurve = accountEquityCurve
+	} else {
+		item.AccountEquityCurve = BuildAccountEquityCurve(initialEquity, item.PortfolioEquityCurve)
+	}
+	return item, nil
+}
+
 func BuildPortfolioEquityCurve(points []BarEquityPoint) []PortfolioEquityPoint {
 	if len(points) == 0 {
 		return nil
+	}
+	if barEquityCurveTimeOrdered(points) {
+		return buildPortfolioEquityCurve(points)
 	}
 	ordered := append([]BarEquityPoint(nil), points...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].Time < ordered[j].Time
 	})
+	return buildPortfolioEquityCurve(ordered)
+}
 
+func barEquityCurveTimeOrdered(points []BarEquityPoint) bool {
+	for index := 1; index < len(points); index++ {
+		if points[index].Time < points[index-1].Time {
+			return false
+		}
+	}
+	return true
+}
+
+func buildPortfolioEquityCurve(points []BarEquityPoint) []PortfolioEquityPoint {
 	latestUnrealizedBySymbol := map[string]float64{}
-	curve := make([]PortfolioEquityPoint, 0, len(ordered))
-	for index := 0; index < len(ordered); {
-		currentTime := ordered[index].Time
-		realizedPnL := ordered[index].RealizedPnL
-		for index < len(ordered) && ordered[index].Time == currentTime {
-			point := ordered[index]
+	curve := make([]PortfolioEquityPoint, 0, len(points))
+	for index := 0; index < len(points); {
+		currentTime := points[index].Time
+		realizedPnL := points[index].RealizedPnL
+		for index < len(points) && points[index].Time == currentTime {
+			point := points[index]
 			latestUnrealizedBySymbol[point.Symbol] = point.UnrealizedPnL
 			realizedPnL = point.RealizedPnL
 			index++

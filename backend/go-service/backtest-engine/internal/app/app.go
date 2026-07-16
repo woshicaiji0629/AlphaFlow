@@ -141,19 +141,16 @@ func Run(ctx context.Context, configPath string) error {
 		"status", summary.RunSummary.Status,
 		"failures", len(summary.Failures),
 	)
-	item, err := report.BuildBacktestReportWithInitialEquity(summary.RunSummary, report.RunStats{
+	item, err := report.BuildBacktestReportWithOwnedCurves(summary.RunSummary, report.RunStats{
 		Contexts:      summary.Contexts,
 		Decisions:     summary.Decisions,
 		Results:       summary.Results,
 		Events:        summary.Events,
 		OrderFills:    summary.OrderFills,
 		OpenPositions: summary.OpenPositions,
-	}, summary.BacktestTrades, cfg.Sizing.InitialEquity, summary.BarEquityCurve)
+	}, summary.BacktestTrades, cfg.Sizing.InitialEquity, summary.BarEquityCurve, summary.AccountCurve)
 	if err != nil {
 		return fmt.Errorf("build backtest report: %w", err)
-	}
-	if len(summary.AccountCurve) > 0 {
-		item.AccountEquityCurve = summary.AccountCurve
 	}
 	slog.Info("backtest report", "report", report.FormatBacktestReport(item))
 	if err := writeBacktestReportJSON(cfg.Result.ReportJSONPath, item); err != nil {
