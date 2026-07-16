@@ -13,6 +13,9 @@ type fakeStore struct {
 	hasLast         bool
 	ranges          map[int64][]model.Kline
 	writes          []model.Kline
+	rangeCalls      int
+	rangeStart      int64
+	rangeEnd        int64
 	available       *bool
 	symbolAvailable *bool
 }
@@ -41,13 +44,16 @@ func (s *fakeStore) RangeKlines(
 	_ string,
 	_ string,
 	start int64,
-	_ int64,
+	end int64,
 ) ([]model.Kline, error) {
+	s.rangeCalls++
+	s.rangeStart = start
+	s.rangeEnd = end
 	return s.ranges[start], nil
 }
 
-func (s *fakeStore) UpsertKline(_ context.Context, kline model.Kline) error {
-	s.writes = append(s.writes, kline)
+func (s *fakeStore) UpsertKlines(_ context.Context, klines []model.Kline) error {
+	s.writes = append(s.writes, klines...)
 	return nil
 }
 
@@ -152,6 +158,46 @@ func TestRunOnceWritesMissingDerivedWindow(t *testing.T) {
 	}
 	if store.writes[0].Interval != "10m" {
 		t.Fatalf("interval = %q, want 10m", store.writes[0].Interval)
+	}
+	if store.rangeCalls != 1 {
+		t.Fatalf("range calls = %d, want 1", store.rangeCalls)
+	}
+}
+
+func TestRunOnceReadsAndWritesMultipleDerivedWindowsInBatches(t *testing.T) {
+	openTime := int64(1699999800000)
+	store := &fakeStore{
+		hasLast:      true,
+		lastOpenTime: openTime - 600000,
+		ranges: map[int64][]model.Kline{
+			openTime: {
+				sourceKline(openTime, "1", "3", "0.5", "2", "10", "100", 5),
+				sourceKline(openTime+300000, "2", "4", "1.5", "3", "20", "200", 7),
+				sourceKline(openTime+600000, "3", "5", "2.5", "4", "30", "300", 9),
+				sourceKline(openTime+900000, "4", "6", "3.5", "5", "40", "400", 11),
+			},
+		},
+	}
+	agg := New(store, Options{Rules: []Rule{{
+		Exchange: "gate", Market: "usdt", Symbols: []string{"ETH_USDT"},
+		SourceInterval: "5m", TargetInterval: "10m",
+	}}})
+	agg.now = func() time.Time { return time.UnixMilli(openTime + 1200000) }
+
+	if err := agg.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if store.rangeCalls != 1 {
+		t.Fatalf("range calls = %d, want 1", store.rangeCalls)
+	}
+	if store.rangeStart != openTime || store.rangeEnd != openTime+1199999 {
+		t.Fatalf("range = [%d, %d], want [%d, %d]", store.rangeStart, store.rangeEnd, openTime, openTime+1199999)
+	}
+	if len(store.writes) != 2 {
+		t.Fatalf("writes = %d, want 2", len(store.writes))
+	}
+	if store.writes[0].OpenTime != openTime || store.writes[1].OpenTime != openTime+600000 {
+		t.Fatalf("write open times = [%d, %d]", store.writes[0].OpenTime, store.writes[1].OpenTime)
 	}
 }
 

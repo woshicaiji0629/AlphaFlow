@@ -21,6 +21,21 @@ type numericStats struct {
 	rangePositionPct float64
 }
 
+type numericOutputFields struct {
+	latest       string
+	previous     string
+	change       string
+	changePct    string
+	slope        string
+	minimum      string
+	maximum      string
+	rangePosPct  string
+	risingCount  string
+	fallingCount string
+	stableCount  string
+	direction    string
+}
+
 func addNumericSeriesAnalysis(
 	values map[string]string,
 	signals map[string]string,
@@ -28,28 +43,54 @@ func addNumericSeriesAnalysis(
 	series []float64,
 ) {
 	stats := analyzeNumericSeries(series)
-	addNumericStatsAnalysis(values, signals, key, stats)
+	addNumericStatsAnalysis(&analysisContext{values: values, signals: signals, encodeValues: true}, key, stats)
 }
 
 func addNumericStatsAnalysis(
-	values map[string]string,
-	signals map[string]string,
+	ctx *analysisContext,
 	key string,
 	stats numericStats,
 ) {
+	fields := ctx.numericOutputFields(key)
+	ctx.setNumericValue(fields.latest, stats.latest, true)
+	ctx.setNumericValue(fields.previous, stats.previous, stats.count > 1)
+	ctx.setNumericValue(fields.change, stats.change, stats.count > 1)
+	ctx.setNumericValue(fields.changePct, stats.changePct, stats.count > 1)
+	ctx.setNumericValue(fields.slope, stats.slope, stats.count > 1)
+	ctx.setNumericValue(fields.minimum, stats.minimum, true)
+	ctx.setNumericValue(fields.maximum, stats.maximum, true)
+	ctx.setNumericValue(fields.rangePosPct, stats.rangePositionPct, stats.maximum != stats.minimum)
+	ctx.setNumericInt(fields.risingCount, stats.risingCount)
+	ctx.setNumericInt(fields.fallingCount, stats.fallingCount)
+	ctx.setNumericInt(fields.stableCount, stats.stableCount)
+	ctx.signals[fields.direction] = stats.direction
+}
+
+func (ctx *analysisContext) numericOutputFields(key string) numericOutputFields {
+	if ctx.numericFields != nil {
+		if fields, ok := ctx.numericFields[key]; ok {
+			return fields
+		}
+	}
 	prefix := key + "_win_"
-	setValue(values, prefix+"latest", stats.latest, true)
-	setValue(values, prefix+"previous", stats.previous, stats.count > 1)
-	setValue(values, prefix+"change", stats.change, stats.count > 1)
-	setValue(values, prefix+"change_pct", stats.changePct, stats.count > 1)
-	setValue(values, prefix+"slope", stats.slope, stats.count > 1)
-	setValue(values, prefix+"min", stats.minimum, true)
-	setValue(values, prefix+"max", stats.maximum, true)
-	setValue(values, prefix+"range_pos_pct", stats.rangePositionPct, stats.maximum != stats.minimum)
-	values[prefix+"rising_count"] = strconv.Itoa(stats.risingCount)
-	values[prefix+"falling_count"] = strconv.Itoa(stats.fallingCount)
-	values[prefix+"stable_count"] = strconv.Itoa(stats.stableCount)
-	signals[prefix+"direction"] = stats.direction
+	fields := numericOutputFields{
+		latest:       prefix + "latest",
+		previous:     prefix + "previous",
+		change:       prefix + "change",
+		changePct:    prefix + "change_pct",
+		slope:        prefix + "slope",
+		minimum:      prefix + "min",
+		maximum:      prefix + "max",
+		rangePosPct:  prefix + "range_pos_pct",
+		risingCount:  prefix + "rising_count",
+		fallingCount: prefix + "falling_count",
+		stableCount:  prefix + "stable_count",
+		direction:    prefix + "direction",
+	}
+	if ctx.numericFields != nil {
+		ctx.numericFields[key] = fields
+	}
+	return fields
 }
 
 func numericSeries(points []point, key string) []float64 {
@@ -167,6 +208,32 @@ func numericStatsFromPoints(points []point, key string) (numericStats, bool) {
 	}
 	stats.direction = numericDirection(stats.change)
 	return stats, true
+}
+
+func (r *rollingWindow) numericStats(key string) (numericStats, bool) {
+	index, ok := r.numericIndexes[key]
+	if !ok || r.count == 0 {
+		return numericStats{}, false
+	}
+	slot := &r.numericSlots[index]
+	series := [DefaultLookback]float64{}
+	seriesCount := 0
+	start := r.next - r.count
+	if start < 0 {
+		start += DefaultLookback
+	}
+	for offset := 0; offset < r.count; offset++ {
+		position := (start + offset) % DefaultLookback
+		if slot.generations[position] != r.rowGenerations[position] {
+			continue
+		}
+		series[seriesCount] = slot.values[position]
+		seriesCount++
+	}
+	if seriesCount == 0 {
+		return numericStats{}, false
+	}
+	return analyzeNumericSeries(series[:seriesCount]), true
 }
 
 func numericPointValue(point point, key string) (float64, bool) {

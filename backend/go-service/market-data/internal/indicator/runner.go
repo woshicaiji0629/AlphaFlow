@@ -103,7 +103,7 @@ type Runner struct {
 	store                   Store
 	options                 RunnerOptions
 	mu                      sync.Mutex
-	windows                 map[string]*indicatorcalc.CalculationWindow
+	windowShards            [indicatorWindowShardCount]indicatorWindowShard
 	indicatorSnapshots      map[string][]model.IndicatorSnapshot
 	lastCalculatedOpenTimes map[string]int64
 	now                     func() time.Time
@@ -113,6 +113,11 @@ type indicatorJob struct {
 	rule     Rule
 	symbol   string
 	interval string
+}
+
+type indicatorWindowShard struct {
+	mu      sync.Mutex
+	windows map[string]*indicatorcalc.CalculationWindow
 }
 
 func NewRunner(store Store, options RunnerOptions) *Runner {
@@ -151,14 +156,17 @@ func NewRunner(store Store, options RunnerOptions) *Runner {
 	if options.PublishTTL <= 0 {
 		options.PublishTTL = 30 * time.Second
 	}
-	return &Runner{
+	runner := &Runner{
 		store:                   store,
 		options:                 options,
-		windows:                 map[string]*indicatorcalc.CalculationWindow{},
 		indicatorSnapshots:      map[string][]model.IndicatorSnapshot{},
 		lastCalculatedOpenTimes: map[string]int64{},
 		now:                     time.Now,
 	}
+	for index := range runner.windowShards {
+		runner.windowShards[index].windows = map[string]*indicatorcalc.CalculationWindow{}
+	}
+	return runner
 }
 
 func (r *Runner) Run(ctx context.Context) error {

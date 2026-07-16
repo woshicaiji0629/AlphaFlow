@@ -14,16 +14,15 @@ func addMovingAverageFeaturesToSet(target *ValueSet, values map[string]string, s
 	setValueTarget(target, values, "hma21", hma21, ok)
 	vwma20, ok := vwma(closes, volumes, 20)
 	setValueTarget(target, values, "vwma20", vwma20, ok)
-	dema21, ok := dema(closes, 21)
-	setValueTarget(target, values, "dema21", dema21, ok)
-	tema21, ok := tema(closes, 21)
-	setValueTarget(target, values, "tema21", tema21, ok)
+	dema21, tema21, demaOK, temaOK := demaTema(closes, 21)
+	setValueTarget(target, values, "dema21", dema21, demaOK)
+	setValueTarget(target, values, "tema21", tema21, temaOK)
 	kama10, ok := kama(closes, 10, 2, 30)
 	setValueTarget(target, values, "kama10", kama10, ok)
 	addAlligatorFeaturesToSet(target, values, signals, closes)
 
 	if len(closes) >= 30 {
-		recentHMA, okRecent := hma(closes, 21)
+		recentHMA, okRecent := hma21, ok
 		previousHMA, okPrevious := hma(closes[:len(closes)-3], 21)
 		if okRecent && okPrevious && previousHMA != 0 {
 			setValueTarget(target, values, "hma21_slope3_pct", percentDistance(recentHMA, previousHMA), true)
@@ -142,6 +141,31 @@ func tema(values []float64, period int) (float64, bool) {
 		return 0, false
 	}
 	return 3*ema1.value - 3*ema2.value + ema3.value, true
+}
+
+func demaTema(values []float64, period int) (float64, float64, bool, bool) {
+	ema1 := newStreamEMAState(period)
+	ema2 := newStreamEMAState(period)
+	ema3 := newStreamEMAState(period)
+	for _, value := range values {
+		ema1.append(value)
+		if ema1.ready {
+			ema2.append(ema1.value)
+		}
+		if ema2.ready {
+			ema3.append(ema2.value)
+		}
+	}
+	demaOK := ema1.ready && ema2.ready
+	temaOK := demaOK && ema3.ready
+	var demaValue, temaValue float64
+	if demaOK {
+		demaValue = 2*ema1.value - ema2.value
+	}
+	if temaOK {
+		temaValue = 3*ema1.value - 3*ema2.value + ema3.value
+	}
+	return demaValue, temaValue, demaOK, temaOK
 }
 
 func tilsonT3(values []float64, period int, factor float64) (float64, bool) {

@@ -8,9 +8,22 @@ import (
 
 	"alphaflow/go-service/backtest-engine/internal/reader"
 	"alphaflow/go-service/pkg/indicatorcalc"
+	"alphaflow/go-service/pkg/indicatorwindow"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/strategy"
 )
+
+type trackingIndicatorWindowAnalyzer struct {
+	inner  orderedIndicatorWindowAnalyzer
+	before func()
+}
+
+func (a *trackingIndicatorWindowAnalyzer) AppendDenseInto(snapshot marketmodel.IndicatorSnapshot, result *indicatorwindow.Result) error {
+	if a.before != nil {
+		a.before()
+	}
+	return a.inner.AppendDenseInto(snapshot, result)
+}
 
 func TestSnapshotBuilderUsesLatestClosedConfirmInterval(t *testing.T) {
 	const minute = int64(60_000)
@@ -108,8 +121,12 @@ func TestSnapshotBuilderRejectsMissingSeries(t *testing.T) {
 }
 
 func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
-	original := calculateIndicatorWindow
-	t.Cleanup(func() { calculateIndicatorWindow = original })
+	originalCalculate := calculateIndicatorWindow
+	originalAnalyzerFactory := newIndicatorWindowAnalyzer
+	t.Cleanup(func() {
+		calculateIndicatorWindow = originalCalculate
+		newIndicatorWindowAnalyzer = originalAnalyzerFactory
+	})
 	var calls atomic.Int64
 	var maxWindow atomic.Int64
 	var active atomic.Int64
@@ -124,7 +141,23 @@ func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 		currentWindow := int64(len(window.Klines()))
 		for currentWindow > maxWindow.Load() && !maxWindow.CompareAndSwap(maxWindow.Load(), currentWindow) {
 		}
-		return original(window, options)
+		return originalCalculate(window, options)
+	}
+	var analyzeCalls atomic.Int64
+	var analyzeActive atomic.Int64
+	var maxAnalyzeActive atomic.Int64
+	newIndicatorWindowAnalyzer = func() orderedIndicatorWindowAnalyzer {
+		return &trackingIndicatorWindowAnalyzer{
+			inner: originalAnalyzerFactory(),
+			before: func() {
+				analyzeCalls.Add(1)
+				currentActive := analyzeActive.Add(1)
+				defer analyzeActive.Add(-1)
+				for currentActive > maxAnalyzeActive.Load() && !maxAnalyzeActive.CompareAndSwap(maxAnalyzeActive.Load(), currentActive) {
+				}
+				time.Sleep(time.Millisecond)
+			},
+		}
 	}
 	const minute = int64(60_000)
 	dataset := reader.Dataset{Series: []reader.SeriesResult{
@@ -158,6 +191,12 @@ func TestSnapshotBuilderCalculatesEachClosedKlineOncePerReplay(t *testing.T) {
 	}
 	if maxActive.Load() < 2 {
 		t.Fatalf("maximum concurrent calculations = %d, want at least 2 periods", maxActive.Load())
+	}
+	if analyzeCalls.Load() != 6 {
+		t.Fatalf("AnalyzeOrdered calls = %d, want each of 6 source klines once", analyzeCalls.Load())
+	}
+	if maxAnalyzeActive.Load() < 2 {
+		t.Fatalf("maximum concurrent window analyses = %d, want at least 2 periods", maxAnalyzeActive.Load())
 	}
 }
 

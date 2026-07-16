@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,8 +70,13 @@ output = "stdout"
 	if err := Run(context.Background(), path); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(store.requests) != 10 {
-		t.Fatalf("requests len = %d, want 10", len(store.requests))
+	requests := store.requestsSnapshot()
+	if len(requests) != 10 {
+		t.Fatalf("requests len = %d, want 10", len(requests))
+	}
+	requestsBySeries := make(map[reader.SeriesKey]reader.Request, len(requests))
+	for _, request := range requests {
+		requestsBySeries[reader.SeriesKey{Symbol: request.Symbol, Interval: request.Interval}] = request
 	}
 	wantRequests := []reader.SeriesKey{
 		{Symbol: "ETHUSDT", Interval: "3m"},
@@ -85,15 +91,15 @@ output = "stdout"
 		{Symbol: "BTCUSDT", Interval: "30m"},
 	}
 	for index, want := range wantRequests {
-		got := store.requests[index]
-		if got.Symbol != want.Symbol || got.Interval != want.Interval {
-			t.Fatalf("request[%d] = %s/%s, want %s/%s", index, got.Symbol, got.Interval, want.Symbol, want.Interval)
+		got, ok := requestsBySeries[want]
+		if !ok {
+			t.Fatalf("request[%d] missing for %s/%s", index, want.Symbol, want.Interval)
 		}
 		if got.Start == 0 || got.End == 0 {
 			t.Fatalf("request[%d] time range not set: %#v", index, got)
 		}
 	}
-	if !store.closed {
+	if !store.isClosed() {
 		t.Fatal("store closed = false, want true")
 	}
 	if !persistedStore.closed {
@@ -578,6 +584,7 @@ func appTestKlines(symbol string, interval string, start int64, end int64, inter
 }
 
 type fakeMarketStore struct {
+	mu             sync.Mutex
 	request        reader.Request
 	requests       []reader.Request
 	klinesBySeries map[reader.SeriesKey][]marketmodel.Kline
@@ -596,7 +603,7 @@ func (s *fakeMarketStore) RangeKlines(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.request = reader.Request{
+	request := reader.Request{
 		Exchange: exchange,
 		Market:   market,
 		Symbol:   symbol,
@@ -604,7 +611,10 @@ func (s *fakeMarketStore) RangeKlines(
 		Start:    start,
 		End:      end,
 	}
-	s.requests = append(s.requests, s.request)
+	s.mu.Lock()
+	s.request = request
+	s.requests = append(s.requests, request)
+	s.mu.Unlock()
 	key := reader.SeriesKey{Symbol: symbol, Interval: interval}
 	if klines, ok := s.klinesBySeries[key]; ok {
 		return klines, nil
@@ -617,8 +627,22 @@ func (s *fakeMarketStore) RangeKlines(
 }
 
 func (s *fakeMarketStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.closed = true
 	return nil
+}
+
+func (s *fakeMarketStore) requestsSnapshot() []reader.Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]reader.Request(nil), s.requests...)
+}
+
+func (s *fakeMarketStore) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 type fakeResultStore struct {

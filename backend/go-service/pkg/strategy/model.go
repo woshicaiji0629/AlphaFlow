@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"strconv"
+	"sync"
 
 	"alphaflow/go-service/pkg/marketmodel"
 )
@@ -140,13 +141,121 @@ func (v IndicatorView) Float(name string) (float64, bool) {
 }
 
 type IndicatorWindowView struct {
-	OpenTime    int64
-	CloseTime   int64
-	Version     string
-	SampleCount int
-	Values      map[string]NumericSeries
-	Signals     map[string]SignalSeries
-	UpdatedAt   int64
+	OpenTime        int64
+	CloseTime       int64
+	Version         string
+	SampleCount     int
+	Values          map[string]NumericSeries
+	Signals         map[string]SignalSeries
+	Schema          *IndicatorWindowSchema
+	DenseValues     []DenseNumericSeries
+	DenseDirections []string
+	DenseSignals    []DenseSignalSeries
+	NumericPresent  []uint64
+	SignalPresent   []uint64
+	UpdatedAt       int64
+}
+
+// IndicatorWindowSchema assigns append-only indexes to window fields. A
+// builder may discover fields while previously built views are being read.
+type IndicatorWindowSchema struct {
+	mu             sync.RWMutex
+	numericIndexes map[string]int
+	signalIndexes  map[string]int
+}
+
+func NewIndicatorWindowSchema() *IndicatorWindowSchema {
+	return &IndicatorWindowSchema{
+		numericIndexes: map[string]int{},
+		signalIndexes:  map[string]int{},
+	}
+}
+
+func (s *IndicatorWindowSchema) EnsureNumeric(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index, ok := s.numericIndexes[name]; ok {
+		return index
+	}
+	index := len(s.numericIndexes)
+	s.numericIndexes[name] = index
+	return index
+}
+
+func (s *IndicatorWindowSchema) EnsureSignal(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index, ok := s.signalIndexes[name]; ok {
+		return index
+	}
+	index := len(s.signalIndexes)
+	s.signalIndexes[name] = index
+	return index
+}
+
+func (s *IndicatorWindowSchema) NumericIndex(name string) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	index, ok := s.numericIndexes[name]
+	return index, ok
+}
+
+func (s *IndicatorWindowSchema) SignalIndex(name string) (int, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	index, ok := s.signalIndexes[name]
+	return index, ok
+}
+
+func (v IndicatorWindowView) Numeric(name string) (NumericSeries, bool) {
+	if index, ok := v.Schema.NumericIndex(name); ok && index < len(v.DenseValues) && densePresent(v.NumericPresent, index) {
+		value := v.DenseValues[index]
+		direction := ""
+		if index < len(v.DenseDirections) {
+			direction = v.DenseDirections[index]
+		}
+		return NumericSeries{
+			Latest: value.Latest, Previous: value.Previous, Change: value.Change,
+			ChangePct: value.ChangePct, Slope: value.Slope, Direction: direction,
+			RisingCount: value.RisingCount, FallingCount: value.FallingCount,
+			Minimum: value.Minimum, Maximum: value.Maximum,
+			RangePositionPct: value.RangePositionPct,
+		}, true
+	}
+	value, ok := v.Values[name]
+	return value, ok
+}
+
+func (v IndicatorWindowView) Signal(name string) (SignalSeries, bool) {
+	if index, ok := v.Schema.SignalIndex(name); ok && index < len(v.DenseSignals) && densePresent(v.SignalPresent, index) {
+		return v.DenseSignals[index], true
+	}
+	value, ok := v.Signals[name]
+	return value, ok
+}
+
+func (v IndicatorWindowView) Empty() bool {
+	return len(v.Values) == 0 && len(v.Signals) == 0 && !denseAny(v.NumericPresent) && !denseAny(v.SignalPresent)
+}
+
+func densePresent(words []uint64, index int) bool {
+	word := index / 64
+	return word < len(words) && words[word]&(uint64(1)<<uint(index%64)) != 0
+}
+
+func denseAny(words []uint64) bool {
+	for _, word := range words {
+		if word != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type NumericSeries struct {
@@ -163,6 +272,21 @@ type NumericSeries struct {
 	RangePositionPct float64
 }
 
+// DenseNumericSeries is the compact in-memory representation used by replay
+// window views.
+type DenseNumericSeries struct {
+	Latest           float64
+	Previous         float64
+	Change           float64
+	ChangePct        float64
+	Slope            float64
+	Minimum          float64
+	Maximum          float64
+	RangePositionPct float64
+	RisingCount      int
+	FallingCount     int
+}
+
 type SignalSeries struct {
 	Latest         string
 	Previous       string
@@ -170,6 +294,10 @@ type SignalSeries struct {
 	StableCount    int
 	LastChangedAgo int
 }
+
+// DenseSignalSeries keeps the dense view API explicit while retaining the
+// complete signal representation without a conversion copy.
+type DenseSignalSeries = SignalSeries
 
 type PriceView struct {
 	LastPrice string

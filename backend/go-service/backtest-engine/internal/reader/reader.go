@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"alphaflow/go-service/pkg/marketmodel"
 )
+
+const defaultDatasetReadConcurrency = 4
 
 type Request struct {
 	Exchange   string
@@ -89,12 +92,15 @@ func (r *Reader) ReadDataset(ctx context.Context, request DatasetRequest) (Datas
 		return Dataset{}, err
 	}
 	intervals := datasetIntervals(request.Interval, request.ConfirmIntervals)
+	seriesCount := len(request.Symbols) * len(intervals)
 	dataset := Dataset{
-		Series: make([]SeriesResult, 0, len(request.Symbols)*len(intervals)),
+		Series: make([]SeriesResult, seriesCount),
 	}
+	requests := make([]Request, 0, seriesCount)
+	keys := make([]SeriesKey, 0, seriesCount)
 	for _, symbol := range request.Symbols {
 		for _, interval := range intervals {
-			result, err := r.ReadKlines(ctx, Request{
+			requests = append(requests, Request{
 				Exchange:   request.Exchange,
 				Market:     request.Market,
 				Symbol:     symbol,
@@ -103,16 +109,45 @@ func (r *Reader) ReadDataset(ctx context.Context, request DatasetRequest) (Datas
 				End:        request.End,
 				WarmupBars: request.WarmupBars,
 			})
-			if err != nil {
-				return Dataset{}, fmt.Errorf("read dataset %s %s: %w", symbol, interval, err)
+			keys = append(keys, SeriesKey{Symbol: symbol, Interval: interval})
+		}
+	}
+
+	jobs := make(chan int)
+	errs := make([]error, seriesCount)
+	var wg sync.WaitGroup
+	workers := min(defaultDatasetReadConcurrency, seriesCount)
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				result, err := r.ReadKlines(ctx, requests[index])
+				if err != nil {
+					errs[index] = fmt.Errorf("read dataset %s %s: %w", keys[index].Symbol, keys[index].Interval, err)
+					continue
+				}
+				dataset.Series[index] = SeriesResult{Key: keys[index], Result: result}
 			}
-			dataset.Series = append(dataset.Series, SeriesResult{
-				Key: SeriesKey{
-					Symbol:   symbol,
-					Interval: interval,
-				},
-				Result: result,
-			})
+		}()
+	}
+
+sendJobs:
+	for index := range requests {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return Dataset{}, err
+	}
+	for _, err := range errs {
+		if err != nil {
+			return Dataset{}, err
 		}
 	}
 	return dataset, nil

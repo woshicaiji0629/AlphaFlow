@@ -16,7 +16,14 @@ import (
 
 var errSnapshotNotReady = errors.New("strategy snapshot not ready")
 var calculateIndicatorWindow = indicatorcalc.CalculateWindowNumeric
-var analyzeIndicatorWindow = indicatorwindow.AnalyzeOrdered
+
+type orderedIndicatorWindowAnalyzer interface {
+	AppendDenseInto(snapshot marketmodel.IndicatorSnapshot, result *indicatorwindow.Result) error
+}
+
+var newIndicatorWindowAnalyzer = func() orderedIndicatorWindowAnalyzer {
+	return indicatorwindow.NewOrderedAnalyzer()
+}
 
 const defaultReplayCalculationWindow = 268
 const defaultIndicatorBatchSize = 30
@@ -26,10 +33,8 @@ type PreparationProgress func(stage string, interval string, processed int, tota
 type replaySeriesState struct {
 	series          reader.SeriesResult
 	cursor          int
-	indicators      []marketmodel.IndicatorSnapshot
 	latestIndicator marketmodel.IndicatorSnapshot
 	latestWindow    strategy.IndicatorWindowView
-	windowCloseTime int64
 	ready           bool
 	batches         <-chan indicatorBatch
 	batch           []preparedIndicator
@@ -38,8 +43,9 @@ type replaySeriesState struct {
 }
 
 type preparedIndicator struct {
-	kline  marketmodel.Kline
-	result indicatorcalc.Result
+	kline     marketmodel.Kline
+	indicator marketmodel.IndicatorSnapshot
+	window    strategy.IndicatorWindowView
 }
 
 type indicatorBatch struct {
@@ -244,9 +250,8 @@ func (b *SnapshotBuilder) prepare(ctx context.Context) error {
 		}
 		batches := make(chan indicatorBatch)
 		b.stateByKey[key] = &replaySeriesState{
-			series:     series,
-			indicators: make([]marketmodel.IndicatorSnapshot, 0, indicatorwindow.DefaultLookback),
-			batches:    batches,
+			series:  series,
+			batches: batches,
 		}
 		go b.calculateSeries(ctx, interval, series, calculationWindow, batchSize, semaphore, batches)
 	}
@@ -257,6 +262,9 @@ func (b *SnapshotBuilder) calculateSeries(ctx context.Context, interval string, 
 	defer close(batches)
 	window := indicatorcalc.NewCalculationWindow(calculationWindow)
 	window.EnableBasicState()
+	analyzer := newIndicatorWindowAnalyzer()
+	viewBuilder := strategyframe.NewWindowViewBuilder()
+	windowResult := indicatorwindow.Result{}
 	for start := 0; start < len(series.Result.Klines); start += batchSize {
 		select {
 		case semaphore <- struct{}{}:
@@ -279,7 +287,24 @@ func (b *SnapshotBuilder) calculateSeries(ctx context.Context, interval string, 
 				batch.err = fmt.Errorf("calculate indicator %s open_time=%d: %w", interval, kline.OpenTime, err)
 				break
 			}
-			batch.items = append(batch.items, preparedIndicator{kline: kline, result: result})
+			indicator := marketmodel.IndicatorSnapshot{
+				Exchange: kline.Exchange, Market: kline.Market, Symbol: kline.Symbol, Interval: kline.Interval,
+				OpenTime: result.OpenTime, CloseTime: result.CloseTime, Values: result.Values, NumericValues: result.NumericValues, Signals: result.Signals, UpdatedAt: result.CloseTime,
+			}
+			if err := analyzer.AppendDenseInto(indicator, &windowResult); err != nil {
+				batch.err = fmt.Errorf("analyze indicator window %s close_time=%d: %w", interval, indicator.CloseTime, err)
+				break
+			}
+			windowView, err := viewBuilder.FromResult(windowResult, windowResult.CloseTime)
+			if err != nil {
+				batch.err = fmt.Errorf("build indicator window %s close_time=%d: %w", interval, indicator.CloseTime, err)
+				break
+			}
+			batch.items = append(batch.items, preparedIndicator{
+				kline:     kline,
+				indicator: indicator,
+				window:    windowView,
+			})
 		}
 		<-semaphore
 		select {
@@ -311,9 +336,7 @@ func (b *SnapshotBuilder) advanceTo(ctx context.Context, asOf int64) error {
 			if prepared.kline.CloseTime > asOf {
 				break
 			}
-			if err := b.advanceSeries(interval, state, *prepared); err != nil {
-				return err
-			}
+			b.advanceSeries(state, *prepared)
 			state.next = nil
 			state.cursor++
 			if b.progress != nil {
@@ -324,21 +347,10 @@ func (b *SnapshotBuilder) advanceTo(ctx context.Context, asOf int64) error {
 	return nil
 }
 
-func (b *SnapshotBuilder) advanceSeries(interval string, state *replaySeriesState, prepared preparedIndicator) error {
-	kline := prepared.kline
-	result := prepared.result
-	indicator := marketmodel.IndicatorSnapshot{
-		Exchange: kline.Exchange, Market: kline.Market, Symbol: kline.Symbol, Interval: kline.Interval,
-		OpenTime: result.OpenTime, CloseTime: result.CloseTime, Values: result.Values, NumericValues: result.NumericValues, Signals: result.Signals, UpdatedAt: result.CloseTime,
-	}
-	state.indicators = append(state.indicators, indicator)
-	if len(state.indicators) > indicatorwindow.DefaultLookback {
-		copy(state.indicators, state.indicators[len(state.indicators)-indicatorwindow.DefaultLookback:])
-		state.indicators = state.indicators[:indicatorwindow.DefaultLookback]
-	}
-	state.latestIndicator = indicator
+func (b *SnapshotBuilder) advanceSeries(state *replaySeriesState, prepared preparedIndicator) {
+	state.latestIndicator = prepared.indicator
+	state.latestWindow = prepared.window
 	state.ready = true
-	return nil
 }
 
 func (s *replaySeriesState) peekPrepared(ctx context.Context) (*preparedIndicator, error) {
@@ -363,23 +375,6 @@ func (s *replaySeriesState) peekPrepared(ctx context.Context) (*preparedIndicato
 	s.next = &s.batch[s.batchIndex]
 	s.batchIndex++
 	return s.next, nil
-}
-
-func (b *SnapshotBuilder) ensureIndicatorWindow(interval string, state *replaySeriesState) error {
-	if state.windowCloseTime == state.latestIndicator.CloseTime {
-		return nil
-	}
-	windowResult, err := analyzeIndicatorWindow(state.indicators)
-	if err != nil {
-		return fmt.Errorf("analyze indicator window %s close_time=%d: %w", interval, state.latestIndicator.CloseTime, err)
-	}
-	window, err := strategyframe.WindowViewFromResult(windowResult, windowResult.CloseTime)
-	if err != nil {
-		return fmt.Errorf("build indicator window %s close_time=%d: %w", interval, state.latestIndicator.CloseTime, err)
-	}
-	state.latestWindow = window
-	state.windowCloseTime = state.latestIndicator.CloseTime
-	return nil
 }
 
 func (b *SnapshotBuilder) buildAt(current marketmodel.Kline) (strategy.Context, error) {
@@ -413,9 +408,6 @@ func (b *SnapshotBuilder) buildIntervalSnapshot(
 	state := b.stateByKey[reader.SeriesKey{Symbol: b.target.Symbol, Interval: interval}]
 	if state == nil || !state.ready {
 		return strategy.Snapshot{}, fmt.Errorf("%w: no closed klines for %s at as_of=%d", errSnapshotNotReady, interval, asOf)
-	}
-	if err := b.ensureIndicatorWindow(interval, state); err != nil {
-		return strategy.Snapshot{}, err
 	}
 	if state.latestIndicator.CloseTime > asOf || state.latestWindow.CloseTime > asOf {
 		return strategy.Snapshot{}, fmt.Errorf("replay state %s exceeds as_of=%d", interval, asOf)

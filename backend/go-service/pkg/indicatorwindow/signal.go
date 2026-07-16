@@ -1,13 +1,19 @@
 package indicatorwindow
 
-import "strconv"
-
 type signalStats struct {
 	count          int
 	latest         string
 	previous       string
 	stableCount    int
 	lastChangedAgo int
+}
+
+type signalOutputFields struct {
+	latest         string
+	previous       string
+	changed        string
+	stableCount    string
+	lastChangedAgo string
 }
 
 func addSignalSeriesAnalysis(
@@ -17,18 +23,38 @@ func addSignalSeriesAnalysis(
 	series []string,
 ) {
 	stats := analyzeSignalSeries(series)
-	addSignalStatsAnalysis(values, signals, key, stats)
+	addSignalStatsAnalysis(&analysisContext{values: values, signals: signals, encodeValues: true}, key, stats)
 }
 
-func addSignalStatsAnalysis(values map[string]string, signals map[string]string, key string, stats signalStats) {
-	prefix := key + "_win_"
-	signals[prefix+"latest"] = stats.latest
+func addSignalStatsAnalysis(ctx *analysisContext, key string, stats signalStats) {
+	fields := ctx.signalOutputFields(key)
+	ctx.signals[fields.latest] = stats.latest
 	if stats.previous != "" {
-		signals[prefix+"previous"] = stats.previous
+		ctx.signals[fields.previous] = stats.previous
 	}
-	signals[prefix+"changed"] = boolString(stats.previous != "" && stats.latest != stats.previous)
-	values[prefix+"stable_count"] = strconv.Itoa(stats.stableCount)
-	values[prefix+"last_changed_ago"] = strconv.Itoa(stats.lastChangedAgo)
+	ctx.signals[fields.changed] = boolString(stats.previous != "" && stats.latest != stats.previous)
+	ctx.setNumericInt(fields.stableCount, stats.stableCount)
+	ctx.setNumericInt(fields.lastChangedAgo, stats.lastChangedAgo)
+}
+
+func (ctx *analysisContext) signalOutputFields(key string) signalOutputFields {
+	if ctx.signalFields != nil {
+		if fields, ok := ctx.signalFields[key]; ok {
+			return fields
+		}
+	}
+	prefix := key + "_win_"
+	fields := signalOutputFields{
+		latest:         prefix + "latest",
+		previous:       prefix + "previous",
+		changed:        prefix + "changed",
+		stableCount:    prefix + "stable_count",
+		lastChangedAgo: prefix + "last_changed_ago",
+	}
+	if ctx.signalFields != nil {
+		ctx.signalFields[key] = fields
+	}
+	return fields
 }
 
 func analyzeSignalSeries(series []string) signalStats {
@@ -80,6 +106,32 @@ func signalStatsFromPoints(points []point, key string) (signalStats, bool) {
 		stats.lastChangedAgo = stats.count
 	}
 	return stats, true
+}
+
+func (r *rollingWindow) signalStats(key string) (signalStats, bool) {
+	index, ok := r.signalIndexes[key]
+	if !ok || r.count == 0 {
+		return signalStats{}, false
+	}
+	slot := &r.signalSlots[index]
+	series := [DefaultLookback]string{}
+	seriesCount := 0
+	start := r.next - r.count
+	if start < 0 {
+		start += DefaultLookback
+	}
+	for offset := 0; offset < r.count; offset++ {
+		position := (start + offset) % DefaultLookback
+		if slot.generations[position] != r.rowGenerations[position] {
+			continue
+		}
+		series[seriesCount] = slot.values[position]
+		seriesCount++
+	}
+	if seriesCount == 0 {
+		return signalStats{}, false
+	}
+	return analyzeSignalSeries(series[:seriesCount]), true
 }
 
 func signalSeries(points []point, key string) []string {

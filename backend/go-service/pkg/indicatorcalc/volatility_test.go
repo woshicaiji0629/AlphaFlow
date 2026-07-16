@@ -331,12 +331,12 @@ func TestSupertrendZoneUsesRecentFlipPivots(t *testing.T) {
 	lows := []float64{100, 98, 94, 92, 96, 103, 109, 108}
 	closes := []float64{102, 100, 96, 94, 102, 108, 114, 110}
 	points := []trendPoint{
-		{value: 103, direction: "down"},
-		{value: 101, direction: "down"},
-		{value: 97, direction: "up"},
-		{value: 100, direction: "up"},
-		{value: 105, direction: "up"},
-		{value: 112, direction: "down"},
+		{value: 103, direction: trendDirectionDown},
+		{value: 101, direction: trendDirectionDown},
+		{value: 97, direction: trendDirectionUp},
+		{value: 100, direction: trendDirectionUp},
+		{value: 105, direction: trendDirectionUp},
+		{value: 112, direction: trendDirectionDown},
 	}
 
 	zone, ok := supertrendZone(highs, lows, closes, points, 2, 3, 1.5)
@@ -447,7 +447,7 @@ func TestAlphaTrendSeriesCompactMatchesBatch(t *testing.T) {
 	for index := range gotPoints {
 		assertFloatClose(t, "alpha trend point", gotPoints[index].value, wantPoints[index].value)
 		if gotPoints[index].direction != wantPoints[index].direction {
-			t.Fatalf("alpha trend direction[%d] = %q, want %q", index, gotPoints[index].direction, wantPoints[index].direction)
+			t.Fatalf("alpha trend direction[%d] = %q, want %q", index, gotPoints[index].direction.String(), wantPoints[index].direction.String())
 		}
 	}
 	assertFloatClose(t, "alpha trend mfi", gotMFI, wantMFI)

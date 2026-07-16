@@ -1,6 +1,9 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestMovingAverageFeatures(t *testing.T) {
 	closes := linearValues(240, 100, 0.5)
@@ -116,6 +119,67 @@ func TestDEMATEMAStreamedFinalValueMatchesSeries(t *testing.T) {
 		t.Fatal("temaFromSeries returned false")
 	}
 	assertFloatClose(t, "tema", gotTEMA, wantTEMA)
+}
+
+func TestCombinedDEMATEMAMatchesStandaloneCalculations(t *testing.T) {
+	values := oscillatingCloses(268)
+	wantDEMA, wantDEMAOK := dema(values, 21)
+	wantTEMA, wantTEMAOK := tema(values, 21)
+	gotDEMA, gotTEMA, gotDEMAOK, gotTEMAOK := demaTema(values, 21)
+	if gotDEMAOK != wantDEMAOK || gotDEMA != wantDEMA {
+		t.Fatalf("combined DEMA = %v/%v, want %v/%v", gotDEMA, gotDEMAOK, wantDEMA, wantDEMAOK)
+	}
+	if gotTEMAOK != wantTEMAOK || gotTEMA != wantTEMA {
+		t.Fatalf("combined TEMA = %v/%v, want %v/%v", gotTEMA, gotTEMAOK, wantTEMA, wantTEMAOK)
+	}
+}
+
+func TestTrendFeaturesWithContextMatchStandaloneCalculation(t *testing.T) {
+	closes := oscillatingCloses(268)
+	highs := make([]float64, len(closes))
+	lows := make([]float64, len(closes))
+	volumes := make([]float64, len(closes))
+	for index, closeValue := range closes {
+		highs[index] = closeValue + 1
+		lows[index] = closeValue - 1
+		volumes[index] = 100 + float64(index)
+	}
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	features := newFeatureContext(highs, lows, closes, basic)
+
+	wantValues := map[string]string{}
+	wantSignals := map[string]string{}
+	addTrendFeaturesWithContext(wantValues, wantSignals, closes, nil)
+	gotValues := map[string]string{}
+	gotSignals := map[string]string{}
+	addTrendFeaturesWithContext(gotValues, gotSignals, closes, features)
+
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("context trend values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("context trend signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+var benchmarkDEMAValue float64
+var benchmarkTEMAValue float64
+
+func BenchmarkDEMATEMAIndependent(b *testing.B) {
+	values := oscillatingCloses(268)
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkDEMAValue, _ = dema(values, 21)
+		benchmarkTEMAValue, _ = tema(values, 21)
+	}
+}
+
+func BenchmarkDEMATEMACombined(b *testing.B) {
+	values := oscillatingCloses(268)
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkDEMAValue, benchmarkTEMAValue, _, _ = demaTema(values, 21)
+	}
 }
 
 func TestMovingAverageByTypeUsesConfiguredAverage(t *testing.T) {

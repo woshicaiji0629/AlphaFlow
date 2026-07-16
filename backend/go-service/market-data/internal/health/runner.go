@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"alphaflow/go-service/market-data/internal/model"
@@ -59,6 +61,14 @@ type Options struct {
 	Rules        []Rule
 	ScanInterval time.Duration
 	GapLookback  int64
+	Workers      int
+}
+
+type healthJob struct {
+	rule     Rule
+	symbol   string
+	interval string
+	skipped  bool
 }
 
 type Runner struct {
@@ -99,6 +109,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 func (r *Runner) RunOnce(ctx context.Context) error {
 	var errs []error
+	jobs := make([]healthJob, 0)
 	for _, rule := range r.options.Rules {
 		if err := validateRule(rule); err != nil {
 			errs = append(errs, err)
@@ -112,9 +123,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		if !available {
 			for _, symbol := range rule.Symbols {
 				for _, interval := range rule.Intervals {
-					if err := r.writeSkipped(ctx, rule, symbol, interval); err != nil {
-						errs = append(errs, err)
-					}
+					jobs = append(jobs, healthJob{rule: rule, symbol: symbol, interval: interval, skipped: true})
 				}
 			}
 			continue
@@ -127,26 +136,80 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			}
 			if !symbolAvailable {
 				for _, interval := range rule.Intervals {
-					if err := r.writeSkipped(ctx, rule, symbol, interval); err != nil {
-						errs = append(errs, err)
-					}
+					jobs = append(jobs, healthJob{rule: rule, symbol: symbol, interval: interval, skipped: true})
 				}
 				continue
 			}
 			for _, interval := range rule.Intervals {
-				if err := r.checkSymbolInterval(ctx, rule, symbol, interval); err != nil {
-					errs = append(errs, fmt.Errorf("check data health %s %s %s %s: %w",
-						rule.Exchange,
-						rule.Market,
-						symbol,
-						interval,
-						err,
-					))
-				}
+				jobs = append(jobs, healthJob{rule: rule, symbol: symbol, interval: interval})
 			}
 		}
 	}
+	errs = append(errs, r.runJobs(ctx, jobs)...)
 	return errors.Join(errs...)
+}
+
+func (r *Runner) runJobs(ctx context.Context, jobs []healthJob) []error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	jobCh := make(chan healthJob)
+	var wg sync.WaitGroup
+	var errsMu sync.Mutex
+	var errs []error
+	workers := healthWorkerCount(len(jobs), r.options.Workers)
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := r.runJob(ctx, job); err != nil {
+					errsMu.Lock()
+					errs = append(errs, err)
+					errsMu.Unlock()
+				}
+			}
+		}()
+	}
+
+sendJobs:
+	for _, job := range jobs {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobCh <- job:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	return errs
+}
+
+func (r *Runner) runJob(ctx context.Context, job healthJob) error {
+	if job.skipped {
+		if err := r.writeSkipped(ctx, job.rule, job.symbol, job.interval); err != nil {
+			return fmt.Errorf("write skipped data health %s %s %s %s: %w", job.rule.Exchange, job.rule.Market, job.symbol, job.interval, err)
+		}
+		return nil
+	}
+	if err := r.checkSymbolInterval(ctx, job.rule, job.symbol, job.interval); err != nil {
+		return fmt.Errorf("check data health %s %s %s %s: %w", job.rule.Exchange, job.rule.Market, job.symbol, job.interval, err)
+	}
+	return nil
+}
+
+func healthWorkerCount(jobCount int, configured int) int {
+	workers := configured
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return min(workers, jobCount)
 }
 
 func healthSymbolAvailable(ctx context.Context, store Store, exchange string, market string, symbol string) (bool, error) {

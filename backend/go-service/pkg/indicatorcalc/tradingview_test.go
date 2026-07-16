@@ -2,6 +2,7 @@ package indicatorcalc
 
 import (
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -83,6 +84,59 @@ func TestQQEModEnhancedOutputsSignalFields(t *testing.T) {
 	}
 	if result.signal == "" || result.zeroCross == "" {
 		t.Fatalf("missing qqe signals: %#v", result)
+	}
+}
+
+func TestQQESharedFoundationMatchesStandalonePaths(t *testing.T) {
+	closes := oscillatingCloses(180)
+	rsiValues, rsiOK := rsiSeries(closes, 6)
+	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, 6, 5)
+
+	wantValues := map[string]string{}
+	wantSignals := map[string]string{}
+	addQQEModFeaturesWithRSI(nil, wantValues, wantSignals, rsiValues, rsiOK, 6, 5, 3)
+	addQQEModEnhancedFeaturesWithRSI(nil, wantValues, wantSignals, rsiValues, rsiOK)
+
+	gotValues := map[string]string{}
+	gotSignals := map[string]string{}
+	addQQEModFeaturesWithFoundation(nil, gotValues, gotSignals, smoothed, smoothedDeltas, 6, 5, 3, foundationOK)
+	addQQEModEnhancedFeaturesWithFoundation(nil, gotValues, gotSignals, smoothed, smoothedDeltas, offset, foundationOK)
+
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("shared QQE values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("shared QQE signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+var benchmarkQQELine float64
+var benchmarkQQEEnhanced qqeModEnhancedResult
+
+func BenchmarkQQEIndependentFoundations(b *testing.B) {
+	closes := oscillatingCloses(268)
+	rsiValues, rsiOK := rsiSeries(closes, 6)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		line, _, _, _, _ := qqeModWithRSI(rsiValues, rsiOK, 6, 5, 3)
+		enhanced, _ := qqeModEnhancedWithRSI(rsiValues, rsiOK, 6, 5, 3, 1.61, 50, 0.35, 3)
+		benchmarkQQELine = line
+		benchmarkQQEEnhanced = enhanced
+	}
+}
+
+func BenchmarkQQESharedFoundation(b *testing.B) {
+	closes := oscillatingCloses(268)
+	rsiValues, rsiOK := rsiSeries(closes, 6)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, 6, 5)
+		line, _, _, _, _ := qqeModFromFoundation(smoothed, smoothedDeltas, 6, 5, 3, foundationOK)
+		enhanced, _ := qqeModEnhancedFromFoundation(smoothed, smoothedDeltas, offset, 3, 1.61, 50, 0.35, 3, foundationOK)
+		benchmarkQQELine = line
+		benchmarkQQEEnhanced = enhanced
 	}
 }
 

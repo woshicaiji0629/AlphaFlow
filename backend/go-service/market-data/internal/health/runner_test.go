@@ -2,6 +2,8 @@ package health
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -9,12 +11,16 @@ import (
 )
 
 type fakeStore struct {
+	mu                     sync.Mutex
 	lastOpenTimes          map[string]int64
 	lastIndicatorOpenTimes map[string]int64
 	klines                 map[string][]model.Kline
 	marketAvailable        bool
 	symbolAvailable        *bool
 	written                []model.DataHealth
+	checkDelay             time.Duration
+	activeChecks           atomic.Int32
+	maxActiveChecks        atomic.Int32
 }
 
 func (s *fakeStore) IsSymbolAvailable(context.Context, string, string, string) (bool, error) {
@@ -34,6 +40,13 @@ func newFakeStore() *fakeStore {
 }
 
 func (s *fakeStore) LastOpenTime(context.Context, string, string, string, string) (int64, bool, error) {
+	active := s.activeChecks.Add(1)
+	for current := s.maxActiveChecks.Load(); active > current && !s.maxActiveChecks.CompareAndSwap(current, active); current = s.maxActiveChecks.Load() {
+	}
+	if s.checkDelay > 0 {
+		time.Sleep(s.checkDelay)
+	}
+	s.activeChecks.Add(-1)
 	value, ok := s.lastOpenTimes["default"]
 	return value, ok, nil
 }
@@ -67,6 +80,8 @@ func (s *fakeStore) LastIndicatorOpenTime(context.Context, string, string, strin
 }
 
 func (s *fakeStore) SetDataHealth(_ context.Context, health model.DataHealth) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.written = append(s.written, health)
 	return nil
 }
@@ -191,8 +206,33 @@ func TestRunnerSkipsUnavailableSymbol(t *testing.T) {
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if len(store.written) == 0 || store.written[0].KlineStatus != model.HealthStatusSkipped || store.written[0].IndicatorStatus != model.HealthStatusSkipped {
-		t.Fatalf("health = %#v, want skipped", store.written)
+	written := store.writtenHealth()
+	if len(written) == 0 || written[0].KlineStatus != model.HealthStatusSkipped || written[0].IndicatorStatus != model.HealthStatusSkipped {
+		t.Fatalf("health = %#v, want skipped", written)
+	}
+}
+
+func TestRunnerChecksIntervalsConcurrently(t *testing.T) {
+	store := newFakeStore()
+	store.checkDelay = 10 * time.Millisecond
+	runner := NewRunner(store, Options{
+		Rules: []Rule{{
+			Exchange:  "binance",
+			Market:    "um",
+			Symbols:   []string{"ETHUSDT"},
+			Intervals: []string{"1m", "3m", "5m", "15m"},
+		}},
+		Workers: 4,
+	})
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := store.maxActiveChecks.Load(); got < 2 {
+		t.Fatalf("max concurrent checks = %d, want at least 2", got)
+	}
+	if got := len(store.writtenHealth()); got != 4 {
+		t.Fatalf("written health count = %d, want 4", got)
 	}
 }
 
@@ -212,10 +252,17 @@ func testRunner(store *fakeStore, now time.Time) *Runner {
 
 func onlyHealth(t *testing.T, store *fakeStore) model.DataHealth {
 	t.Helper()
-	if len(store.written) != 1 {
-		t.Fatalf("written health count = %d, want 1", len(store.written))
+	written := store.writtenHealth()
+	if len(written) != 1 {
+		t.Fatalf("written health count = %d, want 1", len(written))
 	}
-	return store.written[0]
+	return written[0]
+}
+
+func (s *fakeStore) writtenHealth() []model.DataHealth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]model.DataHealth(nil), s.written...)
 }
 
 func closedKlines(lastOpenTime int64, interval time.Duration, count int) []model.Kline {

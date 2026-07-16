@@ -5,11 +5,25 @@ import (
 	"strconv"
 )
 
-func setValue(values map[string]string, name string, value float64, ok bool) {
+func (ctx *analysisContext) setNumericValue(name string, value float64, ok bool) {
 	if !ok {
 		return
 	}
-	values[name] = format(value)
+	if ctx.numericValues != nil {
+		ctx.numericValues[name] = value
+	}
+	if ctx.encodeValues {
+		ctx.values[name] = format(value)
+	}
+}
+
+func (ctx *analysisContext) setNumericInt(name string, value int) {
+	if ctx.numericValues != nil {
+		ctx.numericValues[name] = float64(value)
+	}
+	if ctx.encodeValues {
+		ctx.values[name] = strconv.Itoa(value)
+	}
 }
 
 func format(value float64) string {

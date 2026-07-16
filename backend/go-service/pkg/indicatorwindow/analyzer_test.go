@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	model "alphaflow/go-service/pkg/marketmodel"
@@ -16,6 +17,251 @@ func TestCalculateWindowsContextHonorsCancellation(t *testing.T) {
 	_, err := CalculateWindowsContext(ctx, benchmarkSnapshots(1), nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context canceled", err)
+	}
+}
+
+func TestAllNumericKeysUsesTypedValuesAndLegacyFallback(t *testing.T) {
+	points := []point{{
+		values: map[string]string{
+			"legacy_numeric": "2.5",
+			"typed_numeric":  "not_encoded",
+			"text":           "bull",
+		},
+		numericValues: map[string]float64{
+			"typed_numeric": 1.5,
+		},
+	}}
+	want := []string{"legacy_numeric", "typed_numeric"}
+	if got := allNumericKeys(points); !reflect.DeepEqual(got, want) {
+		t.Fatalf("allNumericKeys() = %v, want %v", got, want)
+	}
+}
+
+func TestAnalyzeOrderedTypedMatchesLegacyFields(t *testing.T) {
+	assertAnalyzeOrderedTypedMatchesLegacy(t, benchmarkSnapshots(DefaultLookback))
+}
+
+func TestOrderedAnalyzerMatchesStatelessTypedResults(t *testing.T) {
+	snapshots := benchmarkSnapshots(40)
+	analyzer := NewOrderedAnalyzer()
+	for index, snapshot := range snapshots {
+		got, err := analyzer.AppendTyped(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := index + 1 - DefaultLookback
+		if start < 0 {
+			start = 0
+		}
+		want, err := AnalyzeOrderedTyped(snapshots[start : index+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("result %d differs: got=%#v want=%#v", index, got, want)
+		}
+	}
+}
+
+func TestOrderedAnalyzerRollingSlotsMatchMissingAndDynamicFields(t *testing.T) {
+	snapshots := make([]model.IndicatorSnapshot, 0, 45)
+	for index := 0; index < 45; index++ {
+		values := map[string]string{
+			"typed_precedence": "999",
+		}
+		numericValues := map[string]float64{
+			"always":           float64(index),
+			"typed_precedence": float64(index + 10),
+		}
+		signals := map[string]string{"always_signal": fmt.Sprintf("state_%d", index%3)}
+		if index%3 != 0 {
+			numericValues["sometimes"] = float64(index * 2)
+		}
+		if index%5 != 0 {
+			values["legacy_only"] = fmt.Sprintf("%d", index+100)
+		}
+		if index >= 7 && index%4 != 0 {
+			numericValues["dynamic_numeric"] = float64(index * 3)
+		}
+		if index >= 11 && index%6 != 0 {
+			signals["dynamic_signal"] = fmt.Sprintf("dynamic_%d", index%2)
+		}
+		snapshot := testSnapshot(int64(index+1), values, signals)
+		snapshot.NumericValues = numericValues
+		snapshots = append(snapshots, snapshot)
+	}
+
+	analyzer := NewOrderedAnalyzer()
+	for index, snapshot := range snapshots {
+		got, err := analyzer.AppendTyped(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := index + 1 - DefaultLookback
+		if start < 0 {
+			start = 0
+		}
+		want, err := AnalyzeOrderedTyped(snapshots[start : index+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("result %d differs after rolling slot update: got=%#v want=%#v", index, got, want)
+		}
+	}
+}
+
+func TestOrderedAnalyzerDiscoversNewFieldsAndRejectsOlderSnapshots(t *testing.T) {
+	analyzer := NewOrderedAnalyzer()
+	first := testSnapshot(1, map[string]string{"legacy": "1"}, map[string]string{"first": "up"})
+	if _, err := analyzer.AppendTyped(first); err != nil {
+		t.Fatal(err)
+	}
+	second := testSnapshot(2, map[string]string{"new_legacy": "2"}, map[string]string{"second": "down"})
+	second.NumericValues = map[string]float64{"new_typed": 3}
+	result, err := analyzer.AppendTyped(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"legacy_win_latest", "new_legacy_win_latest", "new_typed_win_latest"} {
+		if _, ok := result.NumericValues[key]; !ok {
+			t.Fatalf("numeric field %s missing from %#v", key, result.NumericValues)
+		}
+	}
+	for _, key := range []string{"first_win_latest", "second_win_latest"} {
+		if _, ok := result.Signals[key]; !ok {
+			t.Fatalf("signal field %s missing from %#v", key, result.Signals)
+		}
+	}
+	if _, err := analyzer.AppendTyped(first); err == nil {
+		t.Fatal("AppendTyped() error = nil for older snapshot")
+	}
+}
+
+func TestOrderedAnalyzerAppendTypedIntoMatchesAndClearsReusableResult(t *testing.T) {
+	snapshots := benchmarkSnapshots(40)
+	safeAnalyzer := NewOrderedAnalyzer()
+	reuseAnalyzer := NewOrderedAnalyzer()
+	result := Result{}
+	for index, snapshot := range snapshots {
+		want, err := safeAnalyzer.AppendTyped(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index > 0 {
+			result.NumericValues["stale_numeric"] = 1
+			result.Signals["stale_signal"] = "stale"
+		}
+		if err := reuseAnalyzer.AppendTypedInto(snapshot, &result); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := result.NumericValues["stale_numeric"]; exists {
+			t.Fatal("reusable numeric result retained a stale field")
+		}
+		if _, exists := result.Signals["stale_signal"]; exists {
+			t.Fatal("reusable signal result retained a stale field")
+		}
+		if !reflect.DeepEqual(result, want) {
+			t.Fatalf("result %d differs: got=%#v want=%#v", index, result, want)
+		}
+	}
+	if err := reuseAnalyzer.AppendTypedInto(model.IndicatorSnapshot{}, nil); err == nil {
+		t.Fatal("AppendTypedInto() error = nil for nil result")
+	}
+}
+
+func TestOrderedAnalyzerAppendDenseIntoMatchesTypedResult(t *testing.T) {
+	snapshots := benchmarkSnapshots(40)
+	typedAnalyzer := NewOrderedAnalyzer()
+	denseAnalyzer := NewOrderedAnalyzer()
+	dense := Result{}
+	for index, snapshot := range snapshots {
+		want, err := typedAnalyzer.AppendTyped(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index > 0 {
+			dense.NumericWindows = append(dense.NumericWindows, NumericWindow{Name: "stale"})
+			dense.SignalWindows = append(dense.SignalWindows, SignalWindow{Name: "stale"})
+		}
+		if err := denseAnalyzer.AppendDenseInto(snapshot, &dense); err != nil {
+			t.Fatal(err)
+		}
+		got := expandDenseResult(dense)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("dense result %d differs: got=%#v want=%#v", index, got, want)
+		}
+	}
+	if len(dense.NumericWindows) == 0 || len(dense.SignalWindows) == 0 {
+		t.Fatalf("dense result did not group rolling fields: %#v", dense)
+	}
+	if err := denseAnalyzer.AppendDenseInto(model.IndicatorSnapshot{}, nil); err == nil {
+		t.Fatal("AppendDenseInto() error = nil for nil result")
+	}
+}
+
+func expandDenseResult(dense Result) Result {
+	numericValues := make(map[string]float64, len(dense.NumericValues)+len(dense.NumericWindows)*11)
+	for key, value := range dense.NumericValues {
+		numericValues[key] = value
+	}
+	signals := make(map[string]string, len(dense.Signals)+len(dense.NumericWindows)+len(dense.SignalWindows)*3)
+	for key, value := range dense.Signals {
+		signals[key] = value
+	}
+	ctx := &analysisContext{numericValues: numericValues, signals: signals}
+	for _, window := range dense.NumericWindows {
+		addNumericStatsAnalysis(ctx, window.Name, numericStats{
+			count: window.Count, latest: window.Latest, previous: window.Previous,
+			change: window.Change, changePct: window.ChangePct, slope: window.Slope,
+			direction: window.Direction, risingCount: window.RisingCount,
+			fallingCount: window.FallingCount, stableCount: window.StableCount,
+			minimum: window.Minimum, maximum: window.Maximum,
+			rangePositionPct: window.RangePositionPct,
+		})
+	}
+	for _, window := range dense.SignalWindows {
+		addSignalStatsAnalysis(ctx, window.Name, signalStats{
+			count: window.Count, latest: window.Latest, previous: window.Previous,
+			stableCount: window.StableCount, lastChangedAgo: window.LastChangedAgo,
+		})
+	}
+	return Result{
+		OpenTime: dense.OpenTime, CloseTime: dense.CloseTime, Version: dense.Version,
+		NumericValues: numericValues, Signals: signals,
+	}
+}
+
+func assertAnalyzeOrderedTypedMatchesLegacy(t *testing.T, snapshots []model.IndicatorSnapshot) {
+	t.Helper()
+	legacy, err := AnalyzeOrdered(snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, err := AnalyzeOrderedTyped(snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typed.Values != nil {
+		t.Fatalf("typed Values = %#v, want nil", typed.Values)
+	}
+	if legacy.OpenTime != typed.OpenTime || legacy.CloseTime != typed.CloseTime || legacy.Version != typed.Version {
+		t.Fatalf("typed metadata = %#v, want %#v", typed, legacy)
+	}
+	if !reflect.DeepEqual(typed.Signals, legacy.Signals) {
+		t.Fatalf("typed signals differ from legacy: typed=%#v legacy=%#v", typed.Signals, legacy.Signals)
+	}
+	if len(typed.NumericValues) != len(legacy.Values) {
+		t.Fatalf("typed numeric fields = %d, want %d", len(typed.NumericValues), len(legacy.Values))
+	}
+	for key, text := range legacy.Values {
+		want, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			t.Fatalf("legacy value %s=%q is not numeric: %v", key, text, err)
+		}
+		if got, ok := typed.NumericValues[key]; !ok || got != want {
+			t.Fatalf("typed value %s = %v, %v; want %v", key, got, ok, want)
+		}
 	}
 }
 
@@ -143,6 +389,116 @@ func BenchmarkAnalyzeOrderedWindow20(b *testing.B) {
 	}
 }
 
+func BenchmarkAnalyzeOrderedTypedWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := AnalyzeOrderedTyped(snapshots); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkOrderedAnalyzerTypedWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	analyzer := NewOrderedAnalyzer()
+	for _, snapshot := range snapshots[:DefaultLookback-1] {
+		if _, err := analyzer.AppendTyped(snapshot); err != nil {
+			b.Fatal(err)
+		}
+	}
+	next := snapshots[DefaultLookback-1]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		next.OpenTime = int64(DefaultLookback + index)
+		next.CloseTime = next.OpenTime + 59
+		if _, err := analyzer.AppendTyped(next); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkOrderedAnalyzerTypedIntoWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	analyzer := NewOrderedAnalyzer()
+	result := Result{}
+	for _, snapshot := range snapshots[:DefaultLookback-1] {
+		if err := analyzer.AppendTypedInto(snapshot, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+	next := snapshots[DefaultLookback-1]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		next.OpenTime = int64(DefaultLookback + index)
+		next.CloseTime = next.OpenTime + 59
+		if err := analyzer.AppendTypedInto(next, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkOrderedAnalyzerDenseIntoWindow20(b *testing.B) {
+	snapshots := benchmarkSnapshots(DefaultLookback)
+	analyzer := NewOrderedAnalyzer()
+	result := Result{}
+	for _, snapshot := range snapshots[:DefaultLookback-1] {
+		if err := analyzer.AppendDenseInto(snapshot, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+	next := snapshots[DefaultLookback-1]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		next.OpenTime = int64(DefaultLookback + index)
+		next.CloseTime = next.OpenTime + 59
+		if err := analyzer.AppendDenseInto(next, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkOrderedAnalyzerTypedIntoWideWindow20(b *testing.B) {
+	benchmarkOrderedAnalyzerWide(b, false)
+}
+
+func BenchmarkOrderedAnalyzerDenseIntoWideWindow20(b *testing.B) {
+	benchmarkOrderedAnalyzerWide(b, true)
+}
+
+func benchmarkOrderedAnalyzerWide(b *testing.B, dense bool) {
+	snapshots := benchmarkWideSnapshots(DefaultLookback, 300, 100)
+	analyzer := NewOrderedAnalyzer()
+	result := Result{}
+	for _, snapshot := range snapshots[:DefaultLookback-1] {
+		if dense {
+			if err := analyzer.AppendDenseInto(snapshot, &result); err != nil {
+				b.Fatal(err)
+			}
+		} else if err := analyzer.AppendTypedInto(snapshot, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+	next := snapshots[DefaultLookback-1]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		next.OpenTime = int64(DefaultLookback + index)
+		next.CloseTime = next.OpenTime + 59
+		if dense {
+			if err := analyzer.AppendDenseInto(next, &result); err != nil {
+				b.Fatal(err)
+			}
+		} else if err := analyzer.AppendTypedInto(next, &result); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkAnalyzeWindow20(b *testing.B) {
 	snapshots := benchmarkSnapshots(DefaultLookback)
 	b.ReportAllocs()
@@ -157,12 +513,35 @@ func BenchmarkAnalyzeWindow20(b *testing.B) {
 func benchmarkSnapshots(count int) []model.IndicatorSnapshot {
 	snapshots := make([]model.IndicatorSnapshot, 0, count)
 	for index := 0; index < count; index++ {
-		snapshots = append(snapshots, testSnapshot(int64(index+1), map[string]string{
+		snapshot := testSnapshot(int64(index+1), map[string]string{
 			"ema7": fmt.Sprintf("%d", 100+index), "macd_hist": fmt.Sprintf("%d", index%7),
 			"rsi14": fmt.Sprintf("%d", 40+index%30), "volume_ratio20": "1.2",
 		}, map[string]string{
 			"ema_alignment": "bull", "supertrend_direction": "up",
-		}))
+		})
+		snapshot.NumericValues = map[string]float64{
+			"ema7": float64(100 + index), "macd_hist": float64(index % 7),
+			"rsi14": float64(40 + index%30), "volume_ratio20": 1.2,
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots
+}
+
+func benchmarkWideSnapshots(count int, numericCount int, signalCount int) []model.IndicatorSnapshot {
+	snapshots := make([]model.IndicatorSnapshot, 0, count)
+	for row := 0; row < count; row++ {
+		numericValues := make(map[string]float64, numericCount)
+		for index := 0; index < numericCount; index++ {
+			numericValues[fmt.Sprintf("numeric_%03d", index)] = float64(row + index)
+		}
+		signals := make(map[string]string, signalCount)
+		for index := 0; index < signalCount; index++ {
+			signals[fmt.Sprintf("signal_%03d", index)] = fmt.Sprintf("state_%d", (row+index)%3)
+		}
+		snapshot := testSnapshot(int64(row+1), nil, signals)
+		snapshot.NumericValues = numericValues
+		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots
 }
@@ -300,6 +679,7 @@ func TestAnalyzeBuildsWindowSnapshotFromIndicatorSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
+	assertAnalyzeOrderedTypedMatchesLegacy(t, snapshots)
 
 	if result.Version != Version {
 		t.Fatalf("version = %q, want %q", result.Version, Version)

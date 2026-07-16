@@ -12,8 +12,9 @@ func addTradingViewFeaturesWithContext(values map[string]string, signals map[str
 
 func addTradingViewFeaturesWithContextToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
 	rsi6, rsi6OK := rsiSeries(closes, 6)
-	addQQEModFeaturesWithRSI(target, values, signals, rsi6, rsi6OK, 6, 5, 3)
-	addQQEModEnhancedFeaturesWithRSI(target, values, signals, rsi6, rsi6OK)
+	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsi6, rsi6OK, 6, 5)
+	addQQEModFeaturesWithFoundation(target, values, signals, smoothed, smoothedDeltas, 6, 5, 3, foundationOK)
+	addQQEModEnhancedFeaturesWithFoundation(target, values, signals, smoothed, smoothedDeltas, offset, foundationOK)
 	if features != nil {
 		if atrValues, ok := features.atrSeries(10); ok {
 			addUTBotFeaturesWithATR(target, values, signals, closes, 10, 1, atrValues)
@@ -36,7 +37,12 @@ func addQQEModFeatures(target *ValueSet, values map[string]string, signals map[s
 }
 
 func addQQEModFeaturesWithRSI(target *ValueSet, values map[string]string, signals map[string]string, rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, factor float64) {
-	line, signal, previousLine, previousSignal, ok := qqeModWithRSI(rsiValues, rsiOK, rsiPeriod, smoothing, factor)
+	smoothed, smoothedDeltas, _, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, rsiPeriod, smoothing)
+	addQQEModFeaturesWithFoundation(target, values, signals, smoothed, smoothedDeltas, rsiPeriod, smoothing, factor, foundationOK)
+}
+
+func addQQEModFeaturesWithFoundation(target *ValueSet, values map[string]string, signals map[string]string, smoothed []float64, smoothedDeltas []float64, rsiPeriod int, smoothing int, factor float64, foundationOK bool) {
+	line, signal, previousLine, previousSignal, ok := qqeModFromFoundation(smoothed, smoothedDeltas, rsiPeriod, smoothing, factor, foundationOK)
 	if !ok {
 		return
 	}
@@ -53,7 +59,12 @@ func addQQEModEnhancedFeatures(target *ValueSet, values map[string]string, signa
 }
 
 func addQQEModEnhancedFeaturesWithRSI(target *ValueSet, values map[string]string, signals map[string]string, rsiValues []float64, rsiOK bool) {
-	result, ok := qqeModEnhancedWithRSI(rsiValues, rsiOK, 6, 5, 3, 1.61, 50, 0.35, 3)
+	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, 6, 5)
+	addQQEModEnhancedFeaturesWithFoundation(target, values, signals, smoothed, smoothedDeltas, offset, foundationOK)
+}
+
+func addQQEModEnhancedFeaturesWithFoundation(target *ValueSet, values map[string]string, signals map[string]string, smoothed []float64, smoothedDeltas []float64, offset int, foundationOK bool) {
+	result, ok := qqeModEnhancedFromFoundation(smoothed, smoothedDeltas, offset, 3, 1.61, 50, 0.35, 3, foundationOK)
 	if !ok {
 		return
 	}
@@ -98,6 +109,10 @@ func qqeModEnhanced(
 
 func qqeModEnhancedWithRSI(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, primaryFactor float64, secondaryFactor float64, bbPeriod int, bbMultiplier float64, secondaryThreshold float64) (qqeModEnhancedResult, bool) {
 	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, rsiPeriod, smoothing)
+	return qqeModEnhancedFromFoundation(smoothed, smoothedDeltas, offset, primaryFactor, secondaryFactor, bbPeriod, bbMultiplier, secondaryThreshold, foundationOK)
+}
+
+func qqeModEnhancedFromFoundation(smoothed []float64, smoothedDeltas []float64, offset int, primaryFactor float64, secondaryFactor float64, bbPeriod int, bbMultiplier float64, secondaryThreshold float64, foundationOK bool) (qqeModEnhancedResult, bool) {
 	if !foundationOK {
 		return qqeModEnhancedResult{}, false
 	}
@@ -267,22 +282,15 @@ func qqeMod(closes []float64, rsiPeriod int, smoothing int, factor float64) (flo
 }
 
 func qqeModWithRSI(rsiValues []float64, rsiOK bool, rsiPeriod int, smoothing int, factor float64) (float64, float64, float64, float64, bool) {
-	if !rsiOK || len(rsiValues) < smoothing*3 || factor <= 0 {
+	smoothed, smoothedDeltas, _, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, rsiPeriod, smoothing)
+	return qqeModFromFoundation(smoothed, smoothedDeltas, rsiPeriod, smoothing, factor, foundationOK)
+}
+
+func qqeModFromFoundation(smoothed []float64, smoothedDeltas []float64, rsiPeriod int, smoothing int, factor float64, foundationOK bool) (float64, float64, float64, float64, bool) {
+	if !foundationOK || factor <= 0 || len(smoothed) < smoothing+2 {
 		return 0, 0, 0, 0, false
-	}
-	smoothed, ok := emaSeries(rsiValues, smoothing)
-	if !ok || len(smoothed) < smoothing+2 {
-		return 0, 0, 0, 0, false
-	}
-	deltas := make([]float64, 0, len(smoothed)-1)
-	for index := 1; index < len(smoothed); index++ {
-		deltas = append(deltas, math.Abs(smoothed[index]-smoothed[index-1]))
 	}
 	wildersPeriod := rsiPeriod*2 - 1
-	smoothedDeltas, ok := emaSeries(deltas, wildersPeriod)
-	if !ok {
-		return 0, 0, 0, 0, false
-	}
 	dynamicRange, ok := emaSeries(smoothedDeltas, wildersPeriod)
 	if !ok || len(dynamicRange) < 2 {
 		return 0, 0, 0, 0, false

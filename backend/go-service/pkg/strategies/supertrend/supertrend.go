@@ -109,7 +109,7 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 		side:    side,
 		reasons: []string{},
 	}
-	if len(window.Values) == 0 && len(window.Signals) == 0 {
+	if window.Empty() {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "indicator window missing")
 		decision.checks = append(decision.checks, strategy.DiagnosticCheck{Name: "indicator_window", Side: side, Status: strategy.DiagnosticStatusMissing, Reason: "indicator window missing"})
@@ -401,7 +401,7 @@ func shortTimeframesBlocked(snapshot strategy.Snapshot, side strategy.SignalSide
 }
 
 func classifyTimeframe(window strategy.IndicatorWindowView, side strategy.SignalSide) string {
-	if len(window.Values) == 0 && len(window.Signals) == 0 {
+	if window.Empty() {
 		return "missing"
 	}
 	expected := biasForSide(side)
@@ -501,7 +501,7 @@ func stopLoss(snapshot strategy.Snapshot, primary string, fallback string) strin
 }
 
 func numericString(snapshot strategy.Snapshot, key string) string {
-	if series, ok := snapshot.Window.Values[key]; ok && series.Latest > 0 {
+	if series, ok := snapshot.Window.Numeric(key); ok && series.Latest > 0 {
 		return fmt.Sprintf("%g", series.Latest)
 	}
 	if value, ok := snapshot.Indicator.Float(key); ok {
@@ -511,11 +511,13 @@ func numericString(snapshot strategy.Snapshot, key string) string {
 }
 
 func latestSignal(window strategy.IndicatorWindowView, key string) string {
-	return window.Signals[key].Latest
+	series, _ := window.Signal(key)
+	return series.Latest
 }
 
 func latestSignalStableCount(window strategy.IndicatorWindowView, key string) int {
-	return window.Signals[key].StableCount
+	series, _ := window.Signal(key)
+	return series.StableCount
 }
 
 func truthySignal(window strategy.IndicatorWindowView, key string) bool {

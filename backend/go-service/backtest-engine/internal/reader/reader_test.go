@@ -3,7 +3,10 @@ package reader
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"alphaflow/go-service/pkg/marketmodel"
 )
@@ -136,19 +139,55 @@ func TestReadDatasetLoadsSymbolsAndConfirmIntervals(t *testing.T) {
 	if len(result.Series) != 4 {
 		t.Fatalf("series len = %d, want 4", len(result.Series))
 	}
-	wantRequests := []SeriesKey{
+	wantSeries := []SeriesKey{
 		{Symbol: "ETHUSDT", Interval: "1m"},
 		{Symbol: "ETHUSDT", Interval: "5m"},
 		{Symbol: "BTCUSDT", Interval: "1m"},
 		{Symbol: "BTCUSDT", Interval: "5m"},
 	}
-	for index, want := range wantRequests {
-		if store.requests[index].Symbol != want.Symbol || store.requests[index].Interval != want.Interval {
-			t.Fatalf("request[%d] = %s/%s, want %s/%s", index, store.requests[index].Symbol, store.requests[index].Interval, want.Symbol, want.Interval)
+	for index, want := range wantSeries {
+		if result.Series[index].Key != want {
+			t.Fatalf("series[%d] = %#v, want %#v", index, result.Series[index].Key, want)
 		}
 	}
 	if result.TotalKlines() == 0 {
 		t.Fatal("total klines = 0, want loaded klines")
+	}
+}
+
+func TestReadDatasetLoadsSeriesConcurrently(t *testing.T) {
+	store := &fakeKlineStore{
+		klinesBySeries: map[SeriesKey][]marketmodel.Kline{},
+		delay:          10 * time.Millisecond,
+	}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := item.ReadDataset(context.Background(), DatasetRequest{
+		Exchange:         "binance",
+		Market:           "um",
+		Symbols:          []string{"ETHUSDT"},
+		Interval:         "1m",
+		ConfirmIntervals: []string{"3m", "5m", "15m"},
+	})
+	if err != nil {
+		t.Fatalf("ReadDataset() error = %v", err)
+	}
+	if got := store.maxActive.Load(); got < 2 {
+		t.Fatalf("max concurrent reads = %d, want at least 2", got)
+	}
+	want := []SeriesKey{
+		{Symbol: "ETHUSDT", Interval: "1m"},
+		{Symbol: "ETHUSDT", Interval: "3m"},
+		{Symbol: "ETHUSDT", Interval: "5m"},
+		{Symbol: "ETHUSDT", Interval: "15m"},
+	}
+	for index, key := range want {
+		if result.Series[index].Key != key {
+			t.Fatalf("series[%d] = %#v, want %#v", index, result.Series[index].Key, key)
+		}
 	}
 }
 
@@ -290,11 +329,15 @@ func TestReadKlinesWrapsStoreError(t *testing.T) {
 }
 
 type fakeKlineStore struct {
+	mu             sync.Mutex
 	request        Request
 	requests       []Request
 	klines         []marketmodel.Kline
 	klinesBySeries map[SeriesKey][]marketmodel.Kline
 	err            error
+	delay          time.Duration
+	active         atomic.Int32
+	maxActive      atomic.Int32
 }
 
 func (s *fakeKlineStore) RangeKlines(
@@ -309,6 +352,14 @@ func (s *fakeKlineStore) RangeKlines(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	active := s.active.Add(1)
+	for current := s.maxActive.Load(); active > current && !s.maxActive.CompareAndSwap(current, active); current = s.maxActive.Load() {
+	}
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	s.active.Add(-1)
+	s.mu.Lock()
 	s.request = Request{
 		Exchange: exchange,
 		Market:   market,
@@ -318,6 +369,7 @@ func (s *fakeKlineStore) RangeKlines(
 		End:      end,
 	}
 	s.requests = append(s.requests, s.request)
+	s.mu.Unlock()
 	if s.klinesBySeries != nil {
 		return s.klinesBySeries[SeriesKey{Symbol: symbol, Interval: interval}], s.err
 	}

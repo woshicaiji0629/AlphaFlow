@@ -1,0 +1,233 @@
+# 性能优化记录
+
+本文档存档 2026-07 对 AlphaFlow 指标、行情和回测热路径进行的集中优化。它记录稳定的设计决策、正确性边界、有效与无效实验、基准结果以及后续排查入口；指标字段定义和业务语义仍以[指标文档](indicators.md)为准。
+
+## 优化目标与边界
+
+本轮目标是降低完整指标集合在在线计算和历史回放中的 CPU、分配和常驻内存，同时保持线上与回测使用同一套指标和策略实现。
+
+必须保持的约束：
+
+- 一次年度回测按一个 symbol 处理；周期内必须保持时间顺序，不通过同周期乱序并发换取吞吐。
+- 不裁剪指标计算字段。新策略可以继续读取现有任意数值和信号字段。
+- 不改变已闭合 K 线、确认周期收盘和 `AsOf` 语义，不能引入未来数据。
+- 不改变 EMA、RSI、ATR、MACD、AI Source 和 Adaptive Supertrend 等连续状态的递推语义。
+- 数值零值与字段缺失必须可区分，旧字符串输入和新数值输入必须等价。
+- 旧 view 不能因为 schema 后续发现新字段而读取到未来字段。
+- 对外 Getter 继续返回完整 `NumericSeries` 和 `SignalSeries`，策略不感知底层紧凑存储。
+- 性能优化不能依赖整数窄化、忽略错误或静默降级。
+
+## 最终数据路径
+
+```text
+ClickHouse K 线
+  -> CalculationWindow 连续指标状态
+  -> CalculateWindowNumeric 完整数值/信号字段
+  -> OrderedAnalyzer 固定长度滚动槽
+  -> NumericWindow / SignalWindow 分组结果
+  -> WindowViewBuilder 稳定 schema + 紧凑数组
+  -> strategy.Context
+  -> 同一份 Go Strategy
+```
+
+在线 `market-data` 和回测继续共享 `CalculationWindow` 与指标实现。回测 producer 按 interval 顺序生成指标和窗口 view，consumer 只在对应 K 线真正闭合后推进状态。
+
+## 已完成的优化
+
+### 1. 指标计算热路径
+
+- 回测使用 `CalculateWindowNumeric`，避免把约 278 个数值字段先格式化为字符串、再由窗口层解析回 `float64`。
+- `CalculationWindow` 持有基础指标和高成本指标的连续状态；固定窗口只保留所需 K 线，递归状态不会因窗口裁剪重建。
+- DEMA 和 TEMA 共享同一组流式 EMA 递推，HMA slope 复用本轮已经得到的 HMA。
+- QQE Mod 与增强 QQE 共享 RSI smoothing 和 delta foundation，避免同一窗口重复生成基础序列。
+- 趋势特征优先读取 `featureContext` 中已经计算的 EMA；Supertrend/AlphaTrend 内部方向改为紧凑枚举，只在输出边界转换为字符串。
+- VFI、Dynamic Swing VWAP、Bollinger、Donchian、Nadaraya-Watson、ATR 和多种趋势指标移除了已确认的重复扫描或完整临时序列。
+
+主要实现位于：
+
+- [`pkg/indicatorcalc`](../backend/go-service/pkg/indicatorcalc)
+- [`docs/indicators.md`](indicators.md)
+
+### 2. 指标窗口分析
+
+`OrderedAnalyzer` 取代每个决策点重新枚举、排序和构造窗口 map 的路径：
+
+- 数值和信号 key 只在首次出现时加入稳定 schema；只有发现新 key 时才重新排序。
+- 每个字段使用 `DefaultLookback` 大小的滚动槽和 generation 标记，不再复制完整 snapshot 窗口。
+- `AppendTypedInto` 复用结果 map；`clear` 后保留容量，避免每根 K 线重新分配。
+- `AppendDenseInto` 把通用滚动字段直接输出为 `NumericWindow` 和 `SignalWindow` 切片；pump、SMC、资金流等适配语义字段仍保留在兼容 map 中，不丢字段。
+- 动态新增字段、字符串数值 fallback 和非数值信号仍按原规则发现和分类。
+
+主要实现位于：
+
+- [`pkg/indicatorwindow/analyzer.go`](../backend/go-service/pkg/indicatorwindow/analyzer.go)
+- [`pkg/indicatorwindow/model.go`](../backend/go-service/pkg/indicatorwindow/model.go)
+
+### 3. market-data 调度与缓存
+
+- 派生周期聚合从“每个目标窗口查询一次并单条写入”改为“一次范围查询、内存分组、批量写入”。
+- health 扫描构造 job 后使用有界 worker 执行；默认 worker 数跟随 `GOMAXPROCS`，错误仍显式汇总返回。
+- indicator runner 的窗口缓存拆成 64 个 shard，降低多 symbol/interval 计算时对单一全局锁的竞争。
+- 缓存更新继续保留 clone 隔离、缺口检测和全量重载 fallback，不用共享可变窗口换取性能。
+
+主要实现位于：
+
+- [`market-data/internal/aggregator`](../backend/go-service/market-data/internal/aggregator)
+- [`market-data/internal/health`](../backend/go-service/market-data/internal/health)
+- [`market-data/internal/indicator`](../backend/go-service/market-data/internal/indicator)
+
+### 4. 回测读取与回放流水线
+
+- 数据集读取使用最多 4 个 worker 并发读取 symbol/interval series，结果仍按请求顺序写入固定位置。
+- 指标 producer 使用无缓冲 batch channel 提供背压；默认 `indicator_batch_size = 30`，所有 interval 共享并发上限。
+- producer 顺序完成底层指标、窗口分析和 view 构建，prepared batch 直接携带不可变 indicator/window；consumer 不再重复维护窗口 snapshot 或临时分析 map。
+- consumer 只在 `CloseTime <= AsOf` 时发布 prepared 状态，确认周期不会提前进入策略上下文。
+- context 取消、读取错误、指标错误和窗口错误继续显式返回，worker/channel 都有确定退出路径。
+
+主要实现位于：
+
+- [`backtest-engine/internal/reader/reader.go`](../backend/go-service/backtest-engine/internal/reader/reader.go)
+- [`backtest-engine/internal/simulator/snapshot.go`](../backend/go-service/backtest-engine/internal/simulator/snapshot.go)
+
+### 5. 稳定 schema 与紧凑数组
+
+策略 view 使用 append-only schema 把字段名映射到稳定下标：
+
+- presence 位图区分合法零值和缺失字段。
+- `NumericSeries` 的回放存储从包含常驻 `Direction string` 的 96-byte 结构改为 80-byte `DenseNumericSeries`。
+- Direction 只在旧兼容数值字段真实包含方向时分配旁路字符串数组；正常 grouped 路径把方向作为 signal 存储。
+- signal 计数继续使用完整 `int`。`DenseSignalSeries` 是 `SignalSeries` 的别名，避免为追求表面压缩而引入整数截断或转换复制。
+- `WindowViewBuilder` 的 scratch 本身就是紧凑结构，生成 view 时执行整结构赋值。
+- `Numeric`、`Signal` 和 `Empty` Getter 屏蔽底层 map/array 差异；Supertrend 策略只通过 Getter 读取窗口。
+
+主要实现位于：
+
+- [`pkg/strategy/model.go`](../backend/go-service/pkg/strategy/model.go)
+- [`pkg/strategyframe/view.go`](../backend/go-service/pkg/strategyframe/view.go)
+- [`pkg/strategies/supertrend/supertrend.go`](../backend/go-service/pkg/strategies/supertrend/supertrend.go)
+
+## 被否决或回滚的实验
+
+以下实验没有进入最终实现，结论应保留，避免重复试错：
+
+| 实验 | 结果 | 处理 |
+| --- | --- | --- |
+| 固定 `indicator_concurrency = 1` | 五周期回放吞吐下降 | 保留共享有界并发，`0` 跟随 `GOMAXPROCS` |
+| AI Supertrend 交换 factor/bar 循环 | 没有稳定 CPU 收益，并增加分配 | 回滚；后续只能做真正的逐 bar 增量状态 |
+| typed 快速路径只覆盖通用 `*_win_*` | 会遗漏 pump、SMC、资金流等语义字段 | 改为 grouped 通用字段 + 兼容语义 map |
+| 每次生成 view 时逐字段转换到紧凑结构 | 分配下降但 CPU 明显退化，grouped 约从 7–8µs 升到 12.5–14µs | 改为紧凑 scratch + 整结构复制 |
+| 把窗口计数从 `int` 压成 `int32` | 兼容字符串入口理论上可能截断 | 放弃窄化，完整保留 `int` 语义 |
+| 通过裁剪指标字段降低内存 | 新策略可能依赖被裁剪字段 | 明确禁止；改为优化表示和生命周期 |
+
+## 基准与年度回测记录
+
+本地环境为 Intel i7-8850H，结果只用于同机趋势比较，不是生产 SLA。后台进程、ClickHouse/OrbStack、Spotlight 和温度都会显著影响墙钟时间。
+
+### 窗口与 view 微基准
+
+| 路径 | 优化前 | 优化后 | 分配 |
+| --- | ---: | ---: | ---: |
+| wide analyzer，300 numeric + 100 signal | 344–402µs/op | 220–253µs/op | 17,342 B/op，21 allocs/op，保持不变 |
+| typed WindowViewBuilder | 16.6–18.5µs/op | 14.0–15.7µs/op | 15,384 -> 13,336 B/op |
+| grouped WindowViewBuilder | 7–8µs/op | 6.45–7.30µs/op | 15,384 -> 13,336 B/op |
+
+紧凑 view 的分配下降约 13.3%，分配次数保持 4 allocs/op。微基准必须和完整年度回测一起看，不能用单函数结果直接外推端到端吞吐。
+
+### ETHUSDT 一年回测
+
+固定配置：
+
+- symbol：`ETHUSDT`
+- 区间：`2025-07-11T00:00:00Z` 至 `2026-07-11T00:00:00Z`
+- 主周期：`3m`
+- 确认周期：`5m`、`10m`、`15m`、`30m`
+- warmup：268 bars
+- batch size：30，无缓冲 channel
+- 完整指标字段，不做字段裁剪
+
+| 阶段 | 主循环耗时 | 吞吐 | 说明 |
+| --- | ---: | ---: | --- |
+| 早期完整路径 | 约 12m43s | — | 早期本地观测/外推，用于确认优化量级 |
+| grouped window 阶段 | 4m35.61s | 635.68 contexts/s | 175,200 contexts 完成 |
+| 紧凑数组最终验证 | 6m10.53s | 472.83 contexts/s | 端到端 6m31.10s；运行时存在明显 OrbStack 与 Spotlight CPU 竞争，不能据此判定代码退化 |
+
+最终验证报告：
+
+- status：`completed`
+- contexts / decisions / results / events：均为 175,200
+- failures：0
+- trades：0
+- final equity：10,000
+- 报告 JSON：约 103 MiB
+
+完整年度结果证明紧凑数组没有改变当前策略行为。最后一次运行约 44% 时 RSS 为 860 MiB，与前一次同进度约 855 MiB 接近；由于没有在相同系统负载下获取双方峰值，不能把这组 RSS 当作内存收益结论。
+
+## 正确性验证
+
+本轮必须持续通过以下检查：
+
+```sh
+cd backend/go-service
+
+go test ./pkg/strategy ./pkg/strategyframe \
+  ./pkg/strategies/supertrend ./backtest-engine/internal/simulator
+
+go test -race ./pkg/strategy ./pkg/strategyframe \
+  ./pkg/strategies/supertrend ./backtest-engine/internal/simulator
+
+go test ./...
+```
+
+关键等价性测试覆盖：
+
+- 字符串、typed 和 grouped 三种窗口输入。
+- NumericSeries/SignalSeries 全部公开字段。
+- 合法零值与缺失字段。
+- 动态新增和同数量字段替换。
+- schema 扩展后历史 view 不暴露未来字段。
+- ordered analyzer 与旧批量 analyzer 输出等价。
+- context 取消、worker 退出和数据读取错误。
+- 3 小时、7 天标准化报告与优化前逐字节一致。
+
+## 复现命令
+
+窗口基准：
+
+```sh
+cd backend/go-service
+
+go test ./pkg/indicatorwindow -run '^$' \
+  -bench 'BenchmarkOrderedAnalyzer(Dense|Typed)IntoWideWindow20$' \
+  -benchmem -count=5
+
+go test ./pkg/strategyframe -run '^$' \
+  -bench 'BenchmarkWindowViewBuilderFrom(Grouped|Typed)Result$' \
+  -benchmem -count=5
+```
+
+年度数据检查和回测：
+
+```sh
+cd backend/go-service
+
+go run ./backtest-engine/cmd/backtest-dataset-check \
+  -config configs/backtest-engine.ethusdt-1y.toml
+
+go run ./backtest-engine/cmd/backtest-engine \
+  -config configs/backtest-engine.ethusdt-1y.toml
+```
+
+年度性能比较必须尽量保持相同系统负载，并分别记录主循环耗时、端到端耗时、吞吐、RSS/heap 和 profile。一次受后台索引影响的墙钟结果不能单独作为性能回退依据。
+
+## 下一步优化方向
+
+当前最优先的工作是采集年度路径 40%–50% 进度时的 CPU、heap 和 allocs profile，而不是继续猜测热点。
+
+根据现有证据，下一轮应重点区分：
+
+1. `DenseValues` 或窗口 view 是否仍是主要保留对象。
+2. 175,200 个 contexts/events/results 是否存在重复长期驻留。
+3. 约 103 MiB 报告构建和结果持久化是否可以流式化或分批落盘。
+4. GC 是否已经超过指标计算本身成为主耗时。
+
+这里的第 2、3 项是根据报告体积和常驻内存增长做出的待验证推断，不是已确认瓶颈。后续仍需遵守“不裁剪指标字段”和“结果语义不变”的约束。

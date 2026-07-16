@@ -126,6 +126,7 @@ Polymarket Gamma + CLOB WebSocket + RTDS
 - [项目进度](docs/progress.md)
 - [行情服务](docs/market-data.md)
 - [指标系统](docs/indicators.md)
+- [性能优化记录](docs/performance-optimization-history.md)
 - [策略系统](docs/strategies/README.md)
 - [Go 策略引擎](docs/strategies/go-strategy-engine.md)
 - [Polymarket 事件合约研究](docs/polymarket-research.md)

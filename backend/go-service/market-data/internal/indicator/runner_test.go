@@ -452,9 +452,7 @@ func TestRunnerNormalizesIncrementalKlinesBeforeAppending(t *testing.T) {
 		t.Fatalf("latest snapshot open time = %d, want %d", got, afterNext.OpenTime)
 	}
 	key := windowKey("binance", "um", "ETHUSDT", "1m")
-	runner.mu.Lock()
-	window := runner.windows[key].Clone()
-	runner.mu.Unlock()
+	window := runner.cachedWindow(key)
 	windowKlines := window.Klines()
 	if len(windowKlines) != 5 {
 		t.Fatalf("window length = %d, want 5", len(windowKlines))
@@ -464,6 +462,37 @@ func TestRunnerNormalizesIncrementalKlinesBeforeAppending(t *testing.T) {
 	}
 	if got := windowKlines[len(windowKlines)-1].OpenTime; got != afterNext.OpenTime {
 		t.Fatalf("window last open time = %d, want %d", got, afterNext.OpenTime)
+	}
+}
+
+func TestRunnerWindowShardsDoNotBlockIndependentKeys(t *testing.T) {
+	runner := NewRunner(&fakeStore{}, RunnerOptions{})
+	firstKey := windowKey("binance", "um", "ETHUSDT", "1m")
+	firstShard := runner.windowShard(firstKey)
+	secondKey := ""
+	for index := 0; index < 1000; index++ {
+		candidate := windowKey("binance", "um", "SYMBOL"+strconv.Itoa(index), "1m")
+		if runner.windowShard(candidate) != firstShard {
+			secondKey = candidate
+			break
+		}
+	}
+	if secondKey == "" {
+		t.Fatal("failed to find key in another window shard")
+	}
+
+	firstShard.mu.Lock()
+	defer firstShard.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		runner.rememberWindow(secondKey, newCalculationWindowFromKlines(minuteKlines(5), 5))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("independent window key blocked by locked shard")
 	}
 }
 
@@ -621,9 +650,7 @@ func TestRunnerWritesRealtimeSnapshotForOpenKlineFromHandler(t *testing.T) {
 		t.Fatalf("missing realtime vwap: %#v", realtime.Values)
 	}
 	key := windowKey("binance", "um", "ETHUSDT", "1m")
-	runner.mu.Lock()
-	cachedWindow := runner.windows[key].Clone()
-	runner.mu.Unlock()
+	cachedWindow := runner.cachedWindow(key)
 	cachedKlines := cachedWindow.Klines()
 	if len(cachedKlines) != 5 {
 		t.Fatalf("cached window length = %d, want 5", len(cachedKlines))

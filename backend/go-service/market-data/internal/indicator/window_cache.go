@@ -10,6 +10,8 @@ import (
 	"alphaflow/go-service/pkg/indicatorcalc"
 )
 
+const indicatorWindowShardCount = 64
+
 func (r *Runner) calculatedThrough(key string, openTime int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -32,8 +34,9 @@ func (r *Runner) windowForKline(
 	intervalMillis int64,
 ) (*indicatorcalc.CalculationWindow, error) {
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
-	r.mu.Lock()
-	cached := r.windows[key]
+	shard := r.windowShard(key)
+	shard.mu.Lock()
+	cached := shard.windows[key]
 	var cachedLast model.Kline
 	hasCached := false
 	if cached != nil && len(cached.Klines()) > 0 {
@@ -43,7 +46,7 @@ func (r *Runner) windowForKline(
 	if cached != nil && hasCached {
 		if kline.OpenTime <= cachedLast.OpenTime {
 			window := cached.Clone()
-			r.mu.Unlock()
+			shard.mu.Unlock()
 			return window, nil
 		}
 		if isContiguous(cachedLast, kline, intervalMillis) {
@@ -53,11 +56,11 @@ func (r *Runner) windowForKline(
 				cached.PrepareAISourcePrefix()
 			}
 			window := cached.Clone()
-			r.mu.Unlock()
+			shard.mu.Unlock()
 			return window, nil
 		}
 	}
-	r.mu.Unlock()
+	shard.mu.Unlock()
 
 	return r.prepareKlineWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
 }
@@ -71,8 +74,9 @@ func (r *Runner) prepareKlineWindow(
 	lastOpenTime int64,
 ) (*indicatorcalc.CalculationWindow, error) {
 	key := windowKey(rule.Exchange, rule.Market, symbol, interval)
-	r.mu.Lock()
-	cached := r.windows[key]
+	shard := r.windowShard(key)
+	shard.mu.Lock()
+	cached := shard.windows[key]
 	var cachedLastOpenTime int64
 	var hasCached bool
 	if cached != nil {
@@ -81,11 +85,11 @@ func (r *Runner) prepareKlineWindow(
 	if cached != nil && hasCached {
 		if lastOpenTime <= cachedLastOpenTime {
 			window := cached.Clone()
-			r.mu.Unlock()
+			shard.mu.Unlock()
 			return preparedKlineWindow(window, intervalMillis)
 		}
 	}
-	r.mu.Unlock()
+	shard.mu.Unlock()
 
 	if cached != nil && hasCached {
 		klines, err := r.store.RangeKlines(
@@ -100,20 +104,20 @@ func (r *Runner) prepareKlineWindow(
 		if err != nil {
 			return nil, err
 		}
-		r.mu.Lock()
-		cached = r.windows[key]
+		shard.mu.Lock()
+		cached = shard.windows[key]
 		if cached != nil && len(cached.Klines()) > 0 {
 			currentLastOpenTime, currentHasLast := cached.LastOpenTime()
 			if currentHasLast && lastOpenTime <= currentLastOpenTime {
 				window := cached.Clone()
-				r.mu.Unlock()
+				shard.mu.Unlock()
 				return preparedKlineWindow(window, intervalMillis)
 			}
 			klines = normalizeIncrementalKlines(klines, currentLastOpenTime)
 		}
 		if len(klines) == 0 && cached != nil {
 			window := cached.Clone()
-			r.mu.Unlock()
+			shard.mu.Unlock()
 			return preparedKlineWindow(window, intervalMillis)
 		}
 		if len(klines) > 0 &&
@@ -122,10 +126,10 @@ func (r *Runner) prepareKlineWindow(
 			isContiguous(cached.Klines()[len(cached.Klines())-1], klines[0], intervalMillis) {
 			cached.Append(klines)
 			window := cached.Clone()
-			r.mu.Unlock()
+			shard.mu.Unlock()
 			return preparedKlineWindow(window, intervalMillis)
 		}
-		r.mu.Unlock()
+		shard.mu.Unlock()
 		slog.Warn(
 			"indicator window gap detected, reload full window",
 			"exchange", rule.Exchange,
@@ -196,18 +200,38 @@ func normalizeIncrementalKlines(klines []model.Kline, afterOpenTime int64) []mod
 }
 
 func (r *Runner) rememberWindow(key string, window *indicatorcalc.CalculationWindow) *indicatorcalc.CalculationWindow {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	shard := r.windowShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	if existing := r.windows[key]; existing != nil {
+	if existing := shard.windows[key]; existing != nil {
 		existingLastOpenTime, existingOK := existing.LastOpenTime()
 		windowLastOpenTime, windowOK := window.LastOpenTime()
 		if existingOK && (!windowOK || existingLastOpenTime > windowLastOpenTime) {
 			return existing.Clone()
 		}
 	}
-	r.windows[key] = window
+	shard.windows[key] = window
 	return window.Clone()
+}
+
+func (r *Runner) cachedWindow(key string) *indicatorcalc.CalculationWindow {
+	shard := r.windowShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if window := shard.windows[key]; window != nil {
+		return window.Clone()
+	}
+	return nil
+}
+
+func (r *Runner) windowShard(key string) *indicatorWindowShard {
+	hash := uint32(2166136261)
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= 16777619
+	}
+	return &r.windowShards[hash%indicatorWindowShardCount]
 }
 
 func windowWithTemporaryKline(window *indicatorcalc.CalculationWindow, kline model.Kline, limit int) *indicatorcalc.CalculationWindow {

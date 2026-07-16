@@ -29,7 +29,7 @@ type Store interface {
 		start int64,
 		end int64,
 	) ([]model.Kline, error)
-	UpsertKline(ctx context.Context, kline model.Kline) error
+	UpsertKlines(ctx context.Context, klines []model.Kline) error
 	IsMarketAvailable(ctx context.Context, exchange string, market string) (bool, error)
 }
 
@@ -160,29 +160,29 @@ func (a *Aggregator) aggregateSymbol(ctx context.Context, rule Rule, symbol stri
 		return err
 	}
 
+	klines, err := a.store.RangeKlines(
+		ctx,
+		rule.Exchange,
+		rule.Market,
+		symbol,
+		rule.SourceInterval,
+		start,
+		end+targetMillis-1,
+	)
+	if err != nil {
+		return err
+	}
+	windows := groupSourceKlines(klines, start, end, sourceMillis, targetMillis)
+	aggregatedKlines := make([]model.Kline, 0, len(windows))
 	for openTime := start; openTime <= end; openTime += targetMillis {
-		klines, err := a.store.RangeKlines(
-			ctx,
-			rule.Exchange,
-			rule.Market,
-			symbol,
-			rule.SourceInterval,
-			openTime,
-			openTime+targetMillis-1,
-		)
-		if err != nil {
-			return err
-		}
-		aggregated, ok, err := Aggregate(rule, symbol, openTime, klines)
+		aggregated, ok, err := Aggregate(rule, symbol, openTime, windows[openTime])
 		if err != nil {
 			return err
 		}
 		if !ok {
 			continue
 		}
-		if err := a.store.UpsertKline(ctx, aggregated); err != nil {
-			return err
-		}
+		aggregatedKlines = append(aggregatedKlines, aggregated)
 		slog.Debug(
 			"aggregated kline",
 			"exchange", rule.Exchange,
@@ -193,7 +193,38 @@ func (a *Aggregator) aggregateSymbol(ctx context.Context, rule Rule, symbol stri
 			"open_time", openTime,
 		)
 	}
-	return nil
+	return a.store.UpsertKlines(ctx, aggregatedKlines)
+}
+
+func groupSourceKlines(
+	klines []model.Kline,
+	start int64,
+	end int64,
+	sourceMillis int64,
+	targetMillis int64,
+) map[int64][]model.Kline {
+	required := int(targetMillis / sourceMillis)
+	windows := make(map[int64][]model.Kline)
+	for _, kline := range klines {
+		if kline.OpenTime < start {
+			continue
+		}
+		openTime := start + (kline.OpenTime-start)/targetMillis*targetMillis
+		if openTime > end {
+			continue
+		}
+		window := windows[openTime]
+		if window == nil {
+			window = make([]model.Kline, required)
+		}
+		index := int((kline.OpenTime - openTime) / sourceMillis)
+		if index < 0 || index >= len(window) {
+			continue
+		}
+		window[index] = kline
+		windows[openTime] = window
+	}
+	return windows
 }
 
 func (a *Aggregator) scanWindow(
