@@ -349,13 +349,13 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 	if err != nil {
 		return err
 	}
-	window, err := r.windowForKline(ctx, rule, kline, intervalMillis)
-	if err != nil {
-		return err
-	}
-	calcWindow := window
-	if !kline.IsClosed {
-		if !windowImmediatelyPrecedesKline(window, kline, intervalMillis) {
+	var calcWindow *indicatorcalc.CalculationWindow
+	if kline.IsClosed {
+		calcWindow, err = r.windowForKline(ctx, rule, kline, intervalMillis)
+	} else {
+		var ready bool
+		calcWindow, ready, err = r.realtimeWindowForKline(ctx, rule, kline, intervalMillis)
+		if err == nil && !ready {
 			slog.Debug(
 				"skip realtime indicator before previous kline closes",
 				"exchange", rule.Exchange,
@@ -366,7 +366,9 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 			)
 			return nil
 		}
-		calcWindow = windowWithTemporaryKline(window, kline, int(r.options.LookbackPeriods))
+	}
+	if err != nil {
+		return err
 	}
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
 	var calculated calculatedIndicators
