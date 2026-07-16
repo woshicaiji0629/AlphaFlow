@@ -164,6 +164,17 @@ func (s *MemoryStore) Events() []strategy.StrategyEvent {
 	return events
 }
 
+// DetachEvents transfers ownership of all stored events to the caller without
+// copying them. It is intended for terminal consumers after event producers
+// and incremental readers have stopped.
+func (s *MemoryStore) DetachEvents() []strategy.StrategyEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.events
+	s.events = nil
+	return events
+}
+
 // EventsSince returns a copy of events appended at or after cursor and the
 // cursor to use for the next incremental read.
 func (s *MemoryStore) EventsSince(cursor int) ([]strategy.StrategyEvent, int) {

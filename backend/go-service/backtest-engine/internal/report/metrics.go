@@ -1,8 +1,10 @@
 package report
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -399,6 +401,137 @@ func MarshalBacktestReport(report BacktestReport) ([]byte, error) {
 	return json.MarshalIndent(ToBacktestReportDTO(report), "", "  ")
 }
 
+const backtestReportCurveChunkSize = 4096
+
+// WriteBacktestReport writes the same indented JSON representation as
+// MarshalBacktestReport without retaining full curve copies or the complete
+// encoded payload in memory.
+func WriteBacktestReport(writer io.Writer, report BacktestReport) error {
+	if writer == nil {
+		return fmt.Errorf("nil backtest report writer")
+	}
+	output := &backtestReportJSONWriter{writer: bufio.NewWriterSize(writer, 64*1024)}
+	output.writeString("{\n")
+	output.writeString(`  "summary": `)
+	output.writeJSON(ToBacktestSummaryDTO(report.Summary), "  ")
+	output.writeString(",\n")
+	output.writeString(`  "stats": `)
+	output.writeJSON(report.Stats, "  ")
+	output.writeString(",\n")
+	output.writeString(`  "metrics": `)
+	output.writeJSON(finiteMetrics(report.Metrics), "  ")
+	output.writeString(",\n")
+	output.writeString(`  "bar_equity_curve": `)
+	writeBacktestReportCurve(output, report.BarEquityCurve, finiteBarEquityPoint)
+	output.writeString(",\n")
+	output.writeString(`  "portfolio_equity_curve": `)
+	writeBacktestReportCurve(output, report.PortfolioEquityCurve, finitePortfolioEquityPoint)
+	output.writeString(",\n")
+	output.writeString(`  "account_equity_curve": `)
+	writeBacktestReportCurve(output, report.AccountEquityCurve, finiteAccountEquityPoint)
+	output.writeString("\n}")
+	if output.err != nil {
+		return output.err
+	}
+	return output.writer.Flush()
+}
+
+type backtestReportJSONWriter struct {
+	writer *bufio.Writer
+	err    error
+}
+
+func (w *backtestReportJSONWriter) writeString(value string) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.writer.WriteString(value)
+}
+
+func (w *backtestReportJSONWriter) writeBytes(value []byte) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.writer.Write(value)
+}
+
+func (w *backtestReportJSONWriter) writeJSON(value any, lineIndent string) {
+	if w.err != nil {
+		return
+	}
+	payload, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		w.err = err
+		return
+	}
+	w.writeIndentedBytes(payload, lineIndent)
+}
+
+func (w *backtestReportJSONWriter) writeIndentedBytes(value []byte, lineIndent string) {
+	start := 0
+	for index, current := range value {
+		if current != '\n' {
+			continue
+		}
+		w.writeBytes(value[start : index+1])
+		w.writeString(lineIndent)
+		start = index + 1
+	}
+	w.writeBytes(value[start:])
+}
+
+func writeBacktestReportCurve[T any](
+	output *backtestReportJSONWriter,
+	points []T,
+	finitePoint func(T) T,
+) {
+	if output.err != nil {
+		return
+	}
+	if points == nil {
+		output.writeString("null")
+		return
+	}
+	if len(points) == 0 {
+		output.writeString("[]")
+		return
+	}
+	output.writeString("[\n")
+	chunkSize := backtestReportCurveChunkSize
+	if len(points) < chunkSize {
+		chunkSize = len(points)
+	}
+	chunk := make([]T, chunkSize)
+	for start := 0; start < len(points); start += chunkSize {
+		end := start + chunkSize
+		if end > len(points) {
+			end = len(points)
+		}
+		current := chunk[:end-start]
+		for index := range current {
+			current[index] = finitePoint(points[start+index])
+		}
+		payload, err := json.MarshalIndent(current, "", "  ")
+		if err != nil {
+			output.err = err
+			return
+		}
+		if len(payload) < 4 || payload[0] != '[' || payload[1] != '\n' ||
+			payload[len(payload)-2] != '\n' || payload[len(payload)-1] != ']' {
+			output.err = fmt.Errorf("unexpected backtest report curve encoding")
+			return
+		}
+		output.writeString("  ")
+		output.writeIndentedBytes(payload[2:len(payload)-2], "  ")
+		if end < len(points) {
+			output.writeString(",\n")
+		} else {
+			output.writeString("\n")
+		}
+	}
+	output.writeString("  ]")
+}
+
 func FormatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
@@ -429,13 +562,17 @@ func finiteBarEquityCurve(points []BarEquityPoint) []BarEquityPoint {
 	}
 	copied := make([]BarEquityPoint, len(points))
 	for index, point := range points {
-		point.Price = finiteFloat(point.Price)
-		point.RealizedPnL = finiteFloat(point.RealizedPnL)
-		point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
-		point.Equity = finiteFloat(point.Equity)
-		copied[index] = point
+		copied[index] = finiteBarEquityPoint(point)
 	}
 	return copied
+}
+
+func finiteBarEquityPoint(point BarEquityPoint) BarEquityPoint {
+	point.Price = finiteFloat(point.Price)
+	point.RealizedPnL = finiteFloat(point.RealizedPnL)
+	point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
+	point.Equity = finiteFloat(point.Equity)
+	return point
 }
 
 func finitePortfolioEquityCurve(points []PortfolioEquityPoint) []PortfolioEquityPoint {
@@ -444,12 +581,16 @@ func finitePortfolioEquityCurve(points []PortfolioEquityPoint) []PortfolioEquity
 	}
 	copied := make([]PortfolioEquityPoint, len(points))
 	for index, point := range points {
-		point.RealizedPnL = finiteFloat(point.RealizedPnL)
-		point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
-		point.Equity = finiteFloat(point.Equity)
-		copied[index] = point
+		copied[index] = finitePortfolioEquityPoint(point)
 	}
 	return copied
+}
+
+func finitePortfolioEquityPoint(point PortfolioEquityPoint) PortfolioEquityPoint {
+	point.RealizedPnL = finiteFloat(point.RealizedPnL)
+	point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
+	point.Equity = finiteFloat(point.Equity)
+	return point
 }
 
 func finiteAccountEquityCurve(points []AccountEquityPoint) []AccountEquityPoint {
@@ -458,19 +599,23 @@ func finiteAccountEquityCurve(points []AccountEquityPoint) []AccountEquityPoint 
 	}
 	copied := make([]AccountEquityPoint, len(points))
 	for index, point := range points {
-		point.InitialEquity = finiteFloat(point.InitialEquity)
-		point.Balance = finiteFloat(point.Balance)
-		point.AvailableBalance = finiteFloat(point.AvailableBalance)
-		point.UsedMargin = finiteFloat(point.UsedMargin)
-		point.RealizedPnL = finiteFloat(point.RealizedPnL)
-		point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
-		point.Fee = finiteFloat(point.Fee)
-		point.Rebate = finiteFloat(point.Rebate)
-		point.Equity = finiteFloat(point.Equity)
-		point.ReturnPct = finiteFloat(point.ReturnPct)
-		copied[index] = point
+		copied[index] = finiteAccountEquityPoint(point)
 	}
 	return copied
+}
+
+func finiteAccountEquityPoint(point AccountEquityPoint) AccountEquityPoint {
+	point.InitialEquity = finiteFloat(point.InitialEquity)
+	point.Balance = finiteFloat(point.Balance)
+	point.AvailableBalance = finiteFloat(point.AvailableBalance)
+	point.UsedMargin = finiteFloat(point.UsedMargin)
+	point.RealizedPnL = finiteFloat(point.RealizedPnL)
+	point.UnrealizedPnL = finiteFloat(point.UnrealizedPnL)
+	point.Fee = finiteFloat(point.Fee)
+	point.Rebate = finiteFloat(point.Rebate)
+	point.Equity = finiteFloat(point.Equity)
+	point.ReturnPct = finiteFloat(point.ReturnPct)
+	return point
 }
 
 func copyStringMap(items map[string]string) map[string]string {

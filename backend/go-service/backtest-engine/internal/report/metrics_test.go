@@ -2,6 +2,8 @@ package report
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -208,6 +210,70 @@ func TestMarshalBacktestReportUsesStableJSONKeys(t *testing.T) {
 	}
 }
 
+func TestWriteBacktestReportMatchesMarshal(t *testing.T) {
+	pointCount := backtestReportCurveChunkSize + 1
+	want, err := MarshalBacktestReport(streamingBacktestReport(pointCount))
+	if err != nil {
+		t.Fatalf("MarshalBacktestReport() error = %v", err)
+	}
+	var output strings.Builder
+	if err := WriteBacktestReport(&output, streamingBacktestReport(pointCount)); err != nil {
+		t.Fatalf("WriteBacktestReport() error = %v", err)
+	}
+	if got := output.String(); got != string(want) {
+		t.Fatalf("streamed report differs from marshal: got len=%d want len=%d", len(got), len(want))
+	}
+}
+
+func TestWriteBacktestReportPreservesNilAndEmptyCurves(t *testing.T) {
+	item := BacktestReport{
+		BarEquityCurve:       nil,
+		PortfolioEquityCurve: []PortfolioEquityPoint{},
+		AccountEquityCurve:   nil,
+	}
+	want, err := MarshalBacktestReport(item)
+	if err != nil {
+		t.Fatalf("MarshalBacktestReport() error = %v", err)
+	}
+	var output strings.Builder
+	if err := WriteBacktestReport(&output, item); err != nil {
+		t.Fatalf("WriteBacktestReport() error = %v", err)
+	}
+	if got := output.String(); got != string(want) {
+		t.Fatalf("streamed report = %q, want %q", got, want)
+	}
+}
+
+func TestWriteBacktestReportReturnsWriterError(t *testing.T) {
+	writeErr := errors.New("write failed")
+	err := WriteBacktestReport(failingWriter{err: writeErr}, streamingBacktestReport(1))
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("WriteBacktestReport() error = %v, want %v", err, writeErr)
+	}
+}
+
+func BenchmarkBacktestReportJSON(b *testing.B) {
+	item := streamingBacktestReport(backtestReportCurveChunkSize + 1)
+	b.Run("marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			payload, err := MarshalBacktestReport(item)
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkBacktestReportPayload = payload
+		}
+	})
+	b.Run("stream", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			if err := WriteBacktestReport(io.Discard, item); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func TestBuildAccountEquityCurveAddsInitialEquity(t *testing.T) {
 	curve := BuildAccountEquityCurve(1000, []PortfolioEquityPoint{
 		{Time: 1000, RealizedPnL: 5, UnrealizedPnL: 10, Equity: 15},
@@ -287,4 +353,54 @@ func reportTrade(id string, exitTime int64, pnl string) strategy.BacktestTrade {
 		ExitTime: exitTime,
 		PnL:      pnl,
 	}
+}
+
+var benchmarkBacktestReportPayload []byte
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write(_ []byte) (int, error) {
+	return 0, w.err
+}
+
+func streamingBacktestReport(pointCount int) BacktestReport {
+	item := BacktestReport{
+		Summary: strategy.BacktestRunSummary{
+			RunID:        "run-streaming",
+			StrategySet:  "supertrend",
+			Symbols:      []string{"ETHUSDT"},
+			WinRate:      math.NaN(),
+			ProfitFactor: math.Inf(1),
+			Metadata:     map[string]string{"source": "test"},
+		},
+		Stats: RunStats{Contexts: pointCount, Events: pointCount},
+		Metrics: TradeMetrics{
+			NetPnL:       math.NaN(),
+			ProfitFactor: math.Inf(1),
+			EquityCurve:  []EquityPoint{{TradeID: "trade-1", Time: 1, Equity: math.Inf(-1)}},
+		},
+		BarEquityCurve:       make([]BarEquityPoint, pointCount),
+		PortfolioEquityCurve: make([]PortfolioEquityPoint, pointCount),
+		AccountEquityCurve:   make([]AccountEquityPoint, pointCount),
+	}
+	for index := 0; index < pointCount; index++ {
+		timestamp := int64(index + 1)
+		item.BarEquityCurve[index] = BarEquityPoint{
+			Time: timestamp, Symbol: "ETHUSDT", Price: float64(index), Equity: float64(index),
+		}
+		item.PortfolioEquityCurve[index] = PortfolioEquityPoint{
+			Time: timestamp, Equity: float64(index),
+		}
+		item.AccountEquityCurve[index] = AccountEquityPoint{
+			Time: timestamp, InitialEquity: 1000, Balance: 1000, Equity: 1000 + float64(index),
+		}
+	}
+	if pointCount > 0 {
+		item.BarEquityCurve[pointCount-1].Price = math.NaN()
+		item.PortfolioEquityCurve[pointCount-1].Equity = math.Inf(1)
+		item.AccountEquityCurve[pointCount-1].ReturnPct = math.Inf(-1)
+	}
+	return item
 }

@@ -186,6 +186,36 @@ func TestMemoryStoreEventsSinceReturnsOnlyNewEvents(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreDetachEventsTransfersOwnership(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	first := strategy.StrategyEvent{EventID: "first", Metadata: map[string]string{"key": "one"}}
+	second := strategy.StrategyEvent{EventID: "second", Metadata: map[string]string{"key": "two"}}
+	if err := store.AppendEvents(ctx, []strategy.StrategyEvent{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	first.Metadata["key"] = "changed"
+
+	events := store.DetachEvents()
+	if len(events) != 2 || events[0].EventID != "first" || events[1].EventID != "second" {
+		t.Fatalf("detached events = %#v", events)
+	}
+	if events[0].Metadata["key"] != "one" {
+		t.Fatalf("detached metadata = %#v", events[0].Metadata)
+	}
+	if remaining := store.Events(); len(remaining) != 0 {
+		t.Fatalf("remaining events = %#v, want none", remaining)
+	}
+
+	if err := store.AppendEvent(ctx, strategy.StrategyEvent{EventID: "third"}); err != nil {
+		t.Fatal(err)
+	}
+	remaining := store.Events()
+	if len(remaining) != 1 || remaining[0].EventID != "third" {
+		t.Fatalf("events after append = %#v", remaining)
+	}
+}
+
 func TestMemoryStoreAppendsEventsAndSavesSummary(t *testing.T) {
 	store := NewMemoryStore()
 	event := strategy.StrategyEvent{

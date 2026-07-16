@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -168,17 +169,19 @@ func writeBacktestReportJSON(path string, item report.BacktestReport) error {
 	if path == "" {
 		return nil
 	}
-	payload, err := report.MarshalBacktestReport(item)
-	if err != nil {
-		return fmt.Errorf("marshal backtest report json: %w", err)
-	}
 	dir := filepath.Dir(path)
 	if dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create backtest report dir: %w", err)
 		}
 	}
-	if err := os.WriteFile(path, payload, 0o644); err != nil {
+	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open backtest report json: %w", err)
+	}
+	writeErr := report.WriteBacktestReport(output, item)
+	closeErr := output.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
 		return fmt.Errorf("write backtest report json: %w", err)
 	}
 	return nil
@@ -351,7 +354,7 @@ func runStrategyBacktest(ctx context.Context, cfg config.Config, dataset reader.
 		iteratorStates = append(iteratorStates, contextIteratorState{iterator: iterator, current: item, ok: ok})
 	}
 	summary, executionErr := executeContextBatches(ctx, executor, iteratorStates, 1)
-	events := store.Events()
+	events := store.DetachEvents()
 	summary.StrategyEvents = events
 	summary.Events = len(events)
 	summary.OrderFills = 0
