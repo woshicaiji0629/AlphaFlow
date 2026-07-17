@@ -138,24 +138,149 @@ func (m *Manager) RiskExit(currentPosition *strategy.Position, currentPrice stri
 	}
 	for index := range currentPosition.ExitRules {
 		rule := currentPosition.ExitRules[index]
-		if !ExitRuleTriggered(currentPosition.Side, price, rule) {
+		if !positionExitRuleTriggered(*currentPosition, price, rule) {
 			continue
 		}
-		action := closeAction(currentPosition.Side)
-		exitSize := exitSize(currentPosition.Size, rule.SizePct)
-		if exitSize < currentPosition.Size {
-			action = reduceAction(currentPosition.Side)
-		}
-		return &strategy.OrderPlan{
-			Action:        action,
-			TargetSide:    strategy.PositionSideFlat,
-			Reason:        rule.Reason,
-			ExitSize:      exitSize,
-			ExitReason:    rule.Type,
-			TriggeredRule: &rule,
-		}
+		return riskExitPlan(currentPosition, rule)
 	}
 	return nil
+}
+
+// RiskExitBar evaluates price-based exit rules against a completed OHLC bar.
+// When multiple rules are touched within the same bar, the deterministic
+// conservative order is stop loss, trailing stop, then take profit.
+func (m *Manager) RiskExitBar(currentPosition *strategy.Position, openValue string, highValue string, lowValue string) (*strategy.OrderPlan, string) {
+	if currentPosition == nil || currentPosition.IsFlat() {
+		return nil, ""
+	}
+	high, highOK := parseFloat(highValue)
+	low, lowOK := parseFloat(lowValue)
+	if !highOK || !lowOK || high <= 0 || low <= 0 || high < low {
+		return nil, ""
+	}
+	open, openOK := parseFloat(openValue)
+	for _, ruleType := range []strategy.ExitReasonType{
+		strategy.ExitReasonStopLoss,
+		strategy.ExitReasonTrailingStop,
+		strategy.ExitReasonTakeProfit,
+	} {
+		for index := range currentPosition.ExitRules {
+			rule := currentPosition.ExitRules[index]
+			if rule.Type != ruleType {
+				continue
+			}
+			triggerPrice, triggered, gapEligible := barExitTrigger(*currentPosition, &rule, high, low)
+			if !triggered {
+				continue
+			}
+			fillPrice := triggerPrice
+			if openOK && gapEligible {
+				switch currentPosition.Side {
+				case strategy.PositionSideLong:
+					if open < triggerPrice {
+						fillPrice = open
+					}
+				case strategy.PositionSideShort:
+					if open > triggerPrice {
+						fillPrice = open
+					}
+				}
+			}
+			return riskExitPlan(currentPosition, rule), formatFloat(fillPrice)
+		}
+	}
+	return nil, ""
+}
+
+func riskExitPlan(currentPosition *strategy.Position, rule strategy.ExitRule) *strategy.OrderPlan {
+	action := closeAction(currentPosition.Side)
+	exitSize := exitSize(currentPosition.Size, rule.SizePct)
+	if exitSize < currentPosition.Size {
+		action = reduceAction(currentPosition.Side)
+	}
+	return &strategy.OrderPlan{
+		Action:        action,
+		TargetSide:    strategy.PositionSideFlat,
+		Reason:        rule.Reason,
+		ExitSize:      exitSize,
+		ExitReason:    rule.Type,
+		TriggeredRule: &rule,
+	}
+}
+
+func barExitTrigger(currentPosition strategy.Position, rule *strategy.ExitRule, high float64, low float64) (float64, bool, bool) {
+	if rule.Type == strategy.ExitReasonTrailingStop {
+		trailPct, ok := parseFloat(rule.Metadata["trail_pct"])
+		if !ok || trailPct <= 0 {
+			return 0, false, false
+		}
+		referencePrice, ok := parseFloat(rule.Metadata["reference_price"])
+		if !ok || referencePrice <= 0 {
+			return 0, false, false
+		}
+		previousTrigger, previousActive := protectedTrailingTriggerPrice(currentPosition, *rule, referencePrice, trailPct)
+		if previousActive && barPriceTouched(currentPosition.Side, rule.Type, high, low, previousTrigger) {
+			rule.TriggerPrice = formatFloat(previousTrigger)
+			return previousTrigger, true, true
+		}
+		switch currentPosition.Side {
+		case strategy.PositionSideLong:
+			if high > referencePrice {
+				referencePrice = high
+			}
+		case strategy.PositionSideShort:
+			if low < referencePrice {
+				referencePrice = low
+			}
+		default:
+			return 0, false, false
+		}
+		triggerPrice, active := protectedTrailingTriggerPrice(currentPosition, *rule, referencePrice, trailPct)
+		if !active {
+			return 0, false, false
+		}
+		rule.TriggerPrice = formatFloat(triggerPrice)
+		metadata := make(map[string]string, len(rule.Metadata))
+		for key, value := range rule.Metadata {
+			metadata[key] = value
+		}
+		metadata["reference_price"] = formatFloat(referencePrice)
+		rule.Metadata = metadata
+		return triggerPrice, barPriceTouched(currentPosition.Side, rule.Type, high, low, triggerPrice), false
+	}
+	triggerPrice, ok := parseFloat(rule.TriggerPrice)
+	if !ok || triggerPrice <= 0 {
+		return 0, false, false
+	}
+	return triggerPrice, barPriceTouched(currentPosition.Side, rule.Type, high, low, triggerPrice), rule.Type == strategy.ExitReasonStopLoss
+}
+
+func trailingTriggerPrice(side strategy.PositionSide, referencePrice float64, trailPct float64) float64 {
+	if side == strategy.PositionSideLong {
+		return referencePrice * (1 - trailPct/100)
+	}
+	return referencePrice * (1 + trailPct/100)
+}
+
+func barPriceTouched(side strategy.PositionSide, ruleType strategy.ExitReasonType, high float64, low float64, triggerPrice float64) bool {
+	switch side {
+	case strategy.PositionSideLong:
+		if isAdverseExit(ruleType) {
+			return low <= triggerPrice
+		}
+		return ruleType == strategy.ExitReasonTakeProfit && high >= triggerPrice
+	case strategy.PositionSideShort:
+		if isAdverseExit(ruleType) {
+			return high >= triggerPrice
+		}
+		return ruleType == strategy.ExitReasonTakeProfit && low <= triggerPrice
+	default:
+		return false
+	}
+}
+
+func isAdverseExit(ruleType strategy.ExitReasonType) bool {
+	return ruleType == strategy.ExitReasonStopLoss || ruleType == strategy.ExitReasonTrailingStop
 }
 
 func ExitRuleTriggered(side strategy.PositionSide, price float64, rule strategy.ExitRule) bool {
@@ -178,6 +303,66 @@ func ExitRuleTriggered(side strategy.PositionSide, price float64, rule strategy.
 	}
 }
 
+func positionExitRuleTriggered(currentPosition strategy.Position, price float64, rule strategy.ExitRule) bool {
+	if rule.Type != strategy.ExitReasonTrailingStop {
+		return ExitRuleTriggered(currentPosition.Side, price, rule)
+	}
+	trailPct, ok := parseFloat(rule.Metadata["trail_pct"])
+	if !ok || trailPct <= 0 {
+		return false
+	}
+	referencePrice, ok := parseFloat(rule.Metadata["reference_price"])
+	if !ok || referencePrice <= 0 {
+		return false
+	}
+	triggerPrice, active := protectedTrailingTriggerPrice(currentPosition, rule, referencePrice, trailPct)
+	if !active {
+		return false
+	}
+	return barPriceTouched(currentPosition.Side, rule.Type, price, price, triggerPrice)
+}
+
+func protectedTrailingTriggerPrice(
+	currentPosition strategy.Position,
+	rule strategy.ExitRule,
+	referencePrice float64,
+	trailPct float64,
+) (float64, bool) {
+	activationBps, activationOK := parseFloat(rule.Metadata["profit_guard_activation_bps"])
+	floorBps, floorOK := parseFloat(rule.Metadata["profit_guard_floor_bps"])
+	if !activationOK || !floorOK || activationBps <= 0 || floorBps <= 0 {
+		return trailingTriggerPrice(currentPosition.Side, referencePrice, trailPct), true
+	}
+	entryPrice, ok := parseFloat(currentPosition.EntryPrice)
+	if !ok || entryPrice <= 0 {
+		return 0, false
+	}
+
+	trailTrigger := trailingTriggerPrice(currentPosition.Side, referencePrice, trailPct)
+	switch currentPosition.Side {
+	case strategy.PositionSideLong:
+		if referencePrice < entryPrice*(1+activationBps/10000) {
+			return 0, false
+		}
+		profitFloor := entryPrice * (1 + floorBps/10000)
+		if profitFloor > trailTrigger {
+			return profitFloor, true
+		}
+		return trailTrigger, true
+	case strategy.PositionSideShort:
+		if referencePrice > entryPrice*(1-activationBps/10000) {
+			return 0, false
+		}
+		profitFloor := entryPrice * (1 - floorBps/10000)
+		if profitFloor < trailTrigger {
+			return profitFloor, true
+		}
+		return trailTrigger, true
+	default:
+		return 0, false
+	}
+}
+
 func RefreshPositionExtremes(currentPosition strategy.Position, price string) strategy.Position {
 	value, ok := parseFloat(price)
 	if !ok {
@@ -197,6 +382,11 @@ func RefreshPositionExtremes(currentPosition strategy.Position, price string) st
 		currentPosition.ExitRules[index] = refreshExitRule(currentPosition.Side, currentPosition.ExitRules[index], highest, lowest)
 	}
 	return currentPosition
+}
+
+func RefreshPositionBarExtremes(currentPosition strategy.Position, high string, low string) strategy.Position {
+	currentPosition = RefreshPositionExtremes(currentPosition, high)
+	return RefreshPositionExtremes(currentPosition, low)
 }
 
 func flatPosition() strategy.Position {

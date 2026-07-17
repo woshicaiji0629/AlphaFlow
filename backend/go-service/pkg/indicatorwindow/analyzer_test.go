@@ -37,6 +37,28 @@ func TestAllNumericKeysUsesTypedValuesAndLegacyFallback(t *testing.T) {
 	}
 }
 
+func TestMoneyFlowSemanticRecognizesDirectionalPriceVolumeConfirmation(t *testing.T) {
+	for _, confirmation := range []string{"confirm_up", "confirm_down"} {
+		t.Run(confirmation, func(t *testing.T) {
+			ctx := &analysisContext{
+				values:        map[string]string{},
+				numericValues: map[string]float64{},
+				signals:       map[string]string{},
+				points: []point{{
+					signals: map[string]string{"price_volume_confirmation": confirmation},
+				}},
+			}
+			addMoneyFlowSemanticAnalysis(ctx)
+			if ctx.signals["volume_window_support"] != "true" {
+				t.Fatalf("volume support = %q, want true", ctx.signals["volume_window_support"])
+			}
+			if ctx.signals["price_volume_window_confirmed"] != "true" {
+				t.Fatalf("price-volume confirmed = %q, want true", ctx.signals["price_volume_window_confirmed"])
+			}
+		})
+	}
+}
+
 func TestAnalyzeOrderedTypedMatchesLegacyFields(t *testing.T) {
 	assertAnalyzeOrderedTypedMatchesLegacy(t, benchmarkSnapshots(DefaultLookback))
 }

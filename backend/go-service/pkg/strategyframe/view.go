@@ -41,6 +41,10 @@ func WindowView(snapshot marketmodel.IndicatorWindowSnapshot) (strategy.Indicato
 	if err != nil {
 		return strategy.IndicatorWindowView{}, err
 	}
+	if err := applySignalStatsFromStrings(signals, snapshot.Values); err != nil {
+		return strategy.IndicatorWindowView{}, err
+	}
+	applySignalStatsFromNumbers(signals, snapshot.NumericValues)
 	return strategy.IndicatorWindowView{
 		OpenTime:    snapshot.OpenTime,
 		CloseTime:   snapshot.CloseTime,
@@ -81,23 +85,32 @@ type signalWindowPlan struct {
 	signalIndex         int
 }
 
-// WindowViewBuilder caches a stable field schema for one interval worker.
+// WindowViewBuilder caches a stable field schema for one symbol/interval worker.
 // Unknown fields are discovered and cached when they first appear.
 type WindowViewBuilder struct {
-	schema             *strategy.IndicatorWindowSchema
-	numericDescriptors map[string]fieldDescriptor
-	signalDescriptors  map[string]fieldDescriptor
-	numericPlan        []fieldPlan
-	signalPlan         []fieldPlan
-	numericScratch     []strategy.DenseNumericSeries
-	numericDirections  []string
-	signalScratch      []strategy.SignalSeries
-	numericActive      []bool
-	signalActive       []bool
-	numericUsed        []int
-	signalUsed         []int
-	numericWindowPlans map[string]numericWindowPlan
-	signalWindowPlans  map[string]signalWindowPlan
+	schema               *strategy.IndicatorWindowSchema
+	numericDescriptors   map[string]fieldDescriptor
+	signalDescriptors    map[string]fieldDescriptor
+	numericPlan          []fieldPlan
+	signalPlan           []fieldPlan
+	numericScratch       []strategy.DenseNumericSeries
+	numericDirections    []string
+	signalScratch        []strategy.SignalSeries
+	signalNames          []string
+	numericActive        []bool
+	signalActive         []bool
+	numericUsed          []int
+	signalUsed           []int
+	numericWindowPlans   map[string]numericWindowPlan
+	signalWindowPlans    map[string]signalWindowPlan
+	derivedCloseTime     int64
+	derivedTimeSet       bool
+	derivedBase          []strategy.SignalSeries
+	derivedCurrent       []strategy.SignalSeries
+	derivedBaseActive    []bool
+	derivedCurrentActive []bool
+	derivedBaseUsed      []int
+	derivedCurrentUsed   []int
 }
 
 func NewWindowViewBuilder() *WindowViewBuilder {
@@ -150,6 +163,10 @@ func windowViewFromResult(result indicatorwindow.Result, updatedAt int64, builde
 	if err != nil {
 		return strategy.IndicatorWindowView{}, err
 	}
+	if err := applySignalStatsFromStrings(signals, result.Values); err != nil {
+		return strategy.IndicatorWindowView{}, err
+	}
+	applySignalStatsFromNumbers(signals, result.NumericValues)
 	return strategy.IndicatorWindowView{
 		OpenTime:    result.OpenTime,
 		CloseTime:   result.CloseTime,
@@ -574,6 +591,9 @@ func signalSeriesCached(fields map[string]string, builder *WindowViewBuilder) (m
 		if err := applySignalValue(&series, descriptor.suffix, value); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", field, err)
 		}
+		if isDerivedSignalField(field) && series.StableCount == 0 {
+			series.StableCount = 1
+		}
 		signals[descriptor.base] = series
 	}
 	return signals, nil
@@ -599,8 +619,14 @@ func (b *WindowViewBuilder) ensureSignalBase(base string) int {
 	index := b.schema.EnsureSignal(base)
 	for len(b.signalScratch) <= index {
 		b.signalScratch = append(b.signalScratch, strategy.SignalSeries{})
+		b.signalNames = append(b.signalNames, "")
 		b.signalActive = append(b.signalActive, false)
+		b.derivedBase = append(b.derivedBase, strategy.SignalSeries{})
+		b.derivedCurrent = append(b.derivedCurrent, strategy.SignalSeries{})
+		b.derivedBaseActive = append(b.derivedBaseActive, false)
+		b.derivedCurrentActive = append(b.derivedCurrentActive, false)
 	}
+	b.signalNames[index] = base
 	return index
 }
 
@@ -632,12 +658,17 @@ func (b *WindowViewBuilder) signalDenseFromResult(result indicatorwindow.Result)
 		b.markSignalUsed(plan.signalIndex)
 		b.signalScratch[plan.signalIndex] = strategy.SignalSeries{
 			Latest: window.Latest, Previous: window.Previous,
-			Changed: window.Count > 1 && window.Latest != window.Previous,
+			Changed:     window.Count > 1 && window.Latest != window.Previous,
+			StableCount: window.StableCount, LastChangedAgo: window.LastChangedAgo,
 		}
 	}
 	if err := b.applySignalFields(result.Signals); err != nil {
 		return nil, nil, err
 	}
+	if err := b.applySignalStatsFromResult(result); err != nil {
+		return nil, nil, err
+	}
+	b.applyDerivedSignalStats(result.CloseTime, result.Signals)
 	return b.signalDenseResult()
 }
 
@@ -731,4 +762,145 @@ func applySignalValue(series *strategy.SignalSeries, suffix string, value string
 		return fmt.Errorf("unsupported signal suffix %q", suffix)
 	}
 	return nil
+}
+
+func applySignalStatsFromStrings(signals map[string]strategy.SignalSeries, fields map[string]string) error {
+	for name, series := range signals {
+		stableKey := name + "_win_stable_count"
+		if value, ok := fields[stableKey]; ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", stableKey, err)
+			}
+			series.StableCount = parsed
+		}
+		changedKey := name + "_win_last_changed_ago"
+		if value, ok := fields[changedKey]; ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", changedKey, err)
+			}
+			series.LastChangedAgo = parsed
+		}
+		signals[name] = series
+	}
+	return nil
+}
+
+func applySignalStatsFromNumbers(signals map[string]strategy.SignalSeries, fields map[string]float64) {
+	for name, series := range signals {
+		if value, ok := fields[name+"_win_stable_count"]; ok {
+			series.StableCount = int(value)
+		}
+		if value, ok := fields[name+"_win_last_changed_ago"]; ok {
+			series.LastChangedAgo = int(value)
+		}
+		signals[name] = series
+	}
+}
+
+func (b *WindowViewBuilder) applySignalStatsFromResult(result indicatorwindow.Result) error {
+	for _, index := range b.signalUsed {
+		name := b.signalNames[index]
+		series := b.signalScratch[index]
+		stableKey := name + "_win_stable_count"
+		if value, ok := result.NumericValues[stableKey]; ok {
+			series.StableCount = int(value)
+		} else if value, ok := result.Values[stableKey]; ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", stableKey, err)
+			}
+			series.StableCount = parsed
+		}
+		changedKey := name + "_win_last_changed_ago"
+		if value, ok := result.NumericValues[changedKey]; ok {
+			series.LastChangedAgo = int(value)
+		} else if value, ok := result.Values[changedKey]; ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", changedKey, err)
+			}
+			series.LastChangedAgo = parsed
+		}
+		b.signalScratch[index] = series
+	}
+	return nil
+}
+
+func (b *WindowViewBuilder) applyDerivedSignalStats(closeTime int64, fields map[string]string) {
+	base, baseActive, commit := b.beginDerivedFrame(closeTime)
+	for field, latest := range fields {
+		if !isDerivedSignalField(field) {
+			continue
+		}
+		name, _ := splitSignalSuffix(field)
+		index := b.ensureSignalBase(name)
+		previous := strategy.SignalSeries{}
+		previousOK := index < len(baseActive) && baseActive[index]
+		if previousOK {
+			previous = base[index]
+		}
+		series := nextDerivedSignalSeries(latest, previous, previousOK)
+		b.markSignalUsed(index)
+		b.signalScratch[index] = series
+		if commit {
+			b.derivedCurrent[index] = series
+			if !b.derivedCurrentActive[index] {
+				b.derivedCurrentActive[index] = true
+				b.derivedCurrentUsed = append(b.derivedCurrentUsed, index)
+			}
+		}
+	}
+}
+
+func isDerivedSignalField(field string) bool {
+	signalBase, signalSuffix := splitSignalSuffix(field)
+	if field != signalBase || signalSuffix != "_win_latest" {
+		return false
+	}
+	numericBase, numericSuffix := splitNumericSuffix(field)
+	return field == numericBase && numericSuffix == "_win_latest"
+}
+
+func (b *WindowViewBuilder) beginDerivedFrame(closeTime int64) ([]strategy.SignalSeries, []bool, bool) {
+	if !b.derivedTimeSet {
+		b.derivedTimeSet = true
+		b.derivedCloseTime = closeTime
+		b.clearDerivedCurrent()
+		return b.derivedBase, b.derivedBaseActive, true
+	}
+	if closeTime < b.derivedCloseTime {
+		return nil, nil, false
+	}
+	if closeTime > b.derivedCloseTime {
+		b.derivedBase, b.derivedCurrent = b.derivedCurrent, b.derivedBase
+		b.derivedBaseActive, b.derivedCurrentActive = b.derivedCurrentActive, b.derivedBaseActive
+		b.derivedBaseUsed, b.derivedCurrentUsed = b.derivedCurrentUsed, b.derivedBaseUsed
+		b.derivedCloseTime = closeTime
+	}
+	b.clearDerivedCurrent()
+	return b.derivedBase, b.derivedBaseActive, true
+}
+
+func (b *WindowViewBuilder) clearDerivedCurrent() {
+	for _, index := range b.derivedCurrentUsed {
+		b.derivedCurrent[index] = strategy.SignalSeries{}
+		b.derivedCurrentActive[index] = false
+	}
+	b.derivedCurrentUsed = b.derivedCurrentUsed[:0]
+}
+
+func nextDerivedSignalSeries(latest string, previous strategy.SignalSeries, previousOK bool) strategy.SignalSeries {
+	series := strategy.SignalSeries{Latest: latest, StableCount: 1}
+	if !previousOK {
+		return series
+	}
+	series.Previous = previous.Latest
+	series.Changed = latest != previous.Latest
+	if !series.Changed {
+		series.StableCount = previous.StableCount + 1
+	}
+	series.LastChangedAgo = series.StableCount
+	return series
 }

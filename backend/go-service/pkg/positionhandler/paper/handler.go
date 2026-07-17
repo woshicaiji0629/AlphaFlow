@@ -78,15 +78,26 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	now := h.now()
 	currentPosition := input.Positions[result.StrategyName]
 	price := currentPrice(input)
-	refreshedPosition, err := h.refreshLocalPosition(ctx, input.Target, result.StrategyName, currentPosition, price)
-	if err != nil {
-		return err
+	barOpen, barHigh, barLow := currentBarPrices(input)
+	var plan *strategy.OrderPlan
+	if input.Target.Scope == strategy.PositionScopeBacktest {
+		var riskPrice string
+		plan, riskPrice = h.positionManager.RiskExitBar(currentPosition, barOpen, barHigh, barLow)
+		if plan != nil {
+			price = riskPrice
+		}
 	}
-	currentPosition = refreshedPosition
+	if plan == nil {
+		refreshedPosition, err := h.refreshLocalPosition(ctx, input.Target, result.StrategyName, currentPosition, price, barHigh, barLow)
+		if err != nil {
+			return err
+		}
+		currentPosition = refreshedPosition
+		plan = h.positionManager.PlanWithPrice(result, currentPosition, price)
+	}
 	if err := h.appendEvent(ctx, signalEvent(input.Target, result, now)); err != nil {
 		return err
 	}
-	plan := h.positionManager.PlanWithPrice(result, currentPosition, price)
 	orderPlan, err := h.orderPlanWithQuantity(input.Target, *plan, price)
 	if err != nil {
 		return fmt.Errorf("build order quantity for strategy %s: %w", result.StrategyName, err)
@@ -225,6 +236,14 @@ func currentPrice(input strategy.Context) string {
 	return snapshot.Current.Close
 }
 
+func currentBarPrices(input strategy.Context) (string, string, string) {
+	snapshot, ok := input.Snapshots[input.Target.Interval]
+	if !ok {
+		return "", "", ""
+	}
+	return snapshot.Current.Open, snapshot.Current.High, snapshot.Current.Low
+}
+
 func (h *Handler) orderPlanWithQuantity(target strategy.Target, plan strategy.OrderPlan, price string) (strategy.OrderPlan, error) {
 	switch plan.Action {
 	case strategy.PositionActionOpenLong, strategy.PositionActionOpenShort:
@@ -258,6 +277,8 @@ func (h *Handler) refreshLocalPosition(
 	strategyName string,
 	currentPosition *strategy.Position,
 	price string,
+	barHigh string,
+	barLow string,
 ) (*strategy.Position, error) {
 	if currentPosition == nil || currentPosition.IsFlat() || price == "" {
 		return currentPosition, nil
@@ -266,6 +287,9 @@ func (h *Handler) refreshLocalPosition(
 		return currentPosition, nil
 	}
 	refreshed := position.RefreshPositionExtremes(*currentPosition, price)
+	if target.Scope == strategy.PositionScopeBacktest && barHigh != "" && barLow != "" {
+		refreshed = position.RefreshPositionBarExtremes(*currentPosition, barHigh, barLow)
+	}
 	refreshed.UpdatedAt = h.now()
 	if err := h.positionStore.SavePosition(ctx, refreshed); err != nil {
 		return nil, fmt.Errorf("refresh position extremes for strategy %s: %w", strategyName, err)

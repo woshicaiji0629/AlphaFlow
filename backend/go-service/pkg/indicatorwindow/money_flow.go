@@ -60,7 +60,9 @@ func addMoneyFlowSemanticAnalysis(ctx *analysisContext) {
 		volumeSupport = directionBias(value) != "neutral" || signalIs(value, "true", "yes", "confirmed")
 	}
 	if value, ok := latestSignal(ctx, "price_volume_confirmation"); ok {
-		volumeSupport = volumeSupport || signalIs(value, "confirmed", "true", "yes", "bull", "bear")
+		volumeSupport = volumeSupport || signalIs(value,
+			"confirmed", "true", "yes", "bull", "bear", "confirm_up", "confirm_down",
+		)
 	}
 
 	moneyFlowBias := "neutral"

@@ -7,6 +7,7 @@ import (
 
 	"alphaflow/go-service/pkg/indicatorwindow"
 	"alphaflow/go-service/pkg/marketmodel"
+	"alphaflow/go-service/pkg/strategy"
 )
 
 func TestWindowViewAcceptsOnlineAndAnalyzerSampleCountKeys(t *testing.T) {
@@ -377,5 +378,128 @@ func TestWindowViewFromResultMatchesSnapshotPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fromResult, fromSnapshot) {
 		t.Fatalf("result path = %#v snapshot path = %#v", fromResult, fromSnapshot)
+	}
+}
+
+func TestWindowViewBuilderTracksDerivedSignalStableCount(t *testing.T) {
+	builder := NewWindowViewBuilder()
+	steps := []struct {
+		closeTime int64
+		latest    string
+		want      strategy.SignalSeries
+	}{
+		{closeTime: 1, latest: "false", want: strategy.SignalSeries{Latest: "false", StableCount: 1}},
+		{closeTime: 2, latest: "true", want: strategy.SignalSeries{Latest: "true", Previous: "false", Changed: true, StableCount: 1, LastChangedAgo: 1}},
+		{closeTime: 3, latest: "true", want: strategy.SignalSeries{Latest: "true", Previous: "true", StableCount: 2, LastChangedAgo: 2}},
+		{closeTime: 4, latest: "true", want: strategy.SignalSeries{Latest: "true", Previous: "true", StableCount: 3, LastChangedAgo: 3}},
+		{closeTime: 5, latest: "false", want: strategy.SignalSeries{Latest: "false", Previous: "true", Changed: true, StableCount: 1, LastChangedAgo: 1}},
+	}
+	for _, step := range steps {
+		view, err := builder.FromResult(indicatorwindow.Result{
+			OpenTime: step.closeTime - 1, CloseTime: step.closeTime,
+			Signals: map[string]string{"pump_window_signal": step.latest},
+		}, step.closeTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := view.Signal("pump_window_signal")
+		if !ok || !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("close_time=%d signal=%#v/%v, want %#v", step.closeTime, got, ok, step.want)
+		}
+	}
+}
+
+func TestWindowViewBuilderRecomputesSameCloseTimeReplacement(t *testing.T) {
+	builder := NewWindowViewBuilder()
+	build := func(closeTime int64, latest string) strategy.SignalSeries {
+		t.Helper()
+		view, err := builder.FromResult(indicatorwindow.Result{
+			OpenTime: closeTime - 1, CloseTime: closeTime,
+			Signals: map[string]string{"pump_window_signal": latest},
+		}, closeTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		series, ok := view.Signal("pump_window_signal")
+		if !ok {
+			t.Fatal("pump_window_signal missing")
+		}
+		return series
+	}
+
+	build(1, "false")
+	if got := build(2, "true"); got.StableCount != 1 {
+		t.Fatalf("first close_time=2 stable_count=%d, want 1", got.StableCount)
+	}
+	if got := build(2, "true"); got.StableCount != 1 {
+		t.Fatalf("same-time duplicate stable_count=%d, want 1", got.StableCount)
+	}
+	wantReplacement := strategy.SignalSeries{Latest: "false", Previous: "false", StableCount: 2, LastChangedAgo: 2}
+	if got := build(2, "false"); !reflect.DeepEqual(got, wantReplacement) {
+		t.Fatalf("same-time replacement=%#v, want %#v", got, wantReplacement)
+	}
+	if got := build(1, "true"); got.StableCount != 1 {
+		t.Fatalf("out-of-order view stable_count=%d, want isolated value 1", got.StableCount)
+	}
+	if got := build(3, "false"); got.StableCount != 3 {
+		t.Fatalf("post-stale stable_count=%d, want 3", got.StableCount)
+	}
+}
+
+func TestWindowViewBuilderDerivedSignalStateIsBuilderLocal(t *testing.T) {
+	first := NewWindowViewBuilder()
+	for closeTime := int64(1); closeTime <= 2; closeTime++ {
+		if _, err := first.FromResult(indicatorwindow.Result{
+			CloseTime: closeTime, Signals: map[string]string{"pump_window_signal": "true"},
+		}, closeTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	second := NewWindowViewBuilder()
+	view, err := second.FromSnapshot(marketmodel.IndicatorWindowSnapshot{
+		CloseTime: 2, UpdatedAt: 2, Signals: map[string]string{"pump_window_signal": "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := view.Signal("pump_window_signal")
+	if !ok || got.StableCount != 1 {
+		t.Fatalf("second builder signal=%#v/%v, want stable_count=1", got, ok)
+	}
+}
+
+func TestWindowViewBuilderGroupedSignalStatsMatchExpandedResult(t *testing.T) {
+	grouped := indicatorwindow.Result{
+		CloseTime: 10,
+		SignalWindows: []indicatorwindow.SignalWindow{{
+			Name: "trend", Count: 5, Latest: "bullish", Previous: "bullish",
+			StableCount: 4, LastChangedAgo: 4,
+		}},
+	}
+	expanded := indicatorwindow.Result{
+		CloseTime: 10,
+		NumericValues: map[string]float64{
+			"trend_win_stable_count":     4,
+			"trend_win_last_changed_ago": 4,
+		},
+		Signals: map[string]string{
+			"trend_win_latest":   "bullish",
+			"trend_win_previous": "bullish",
+			"trend_win_changed":  "false",
+		},
+	}
+	denseView, err := NewWindowViewBuilder().FromResult(grouped, grouped.CloseTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expandedView, err := WindowViewFromResult(expanded, expanded.CloseTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, gotOK := denseView.Signal("trend")
+	want, wantOK := expandedView.Signal("trend")
+	if !gotOK || !wantOK || !reflect.DeepEqual(got, want) {
+		t.Fatalf("grouped signal=%#v/%v, expanded=%#v/%v", got, gotOK, want, wantOK)
 	}
 }

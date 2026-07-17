@@ -15,6 +15,7 @@
 | 文档 | 文件 | 说明 |
 | --- | --- | --- |
 | Go 策略引擎 | [go-strategy-engine.md](go-strategy-engine.md) | Go-only 在线策略引擎、回测批处理和公共策略包边界设计。 |
+| Supertrend 优化记录 | [supertrend-optimization.md](supertrend-optimization.md) | Supertrend 优化假设、实现变化、重点行情与年度回测结论。 |
 
 ## 通用约定
 

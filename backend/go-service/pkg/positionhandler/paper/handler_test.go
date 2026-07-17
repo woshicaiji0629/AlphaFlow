@@ -231,3 +231,68 @@ func TestHandlerUsesSymbolCapabilityForContractQuantity(t *testing.T) {
 		t.Fatalf("position size = %f, want 100 contracts", currentPosition.Size)
 	}
 }
+
+func TestHandlerBacktestStopUsesIntrabarTriggerPrice(t *testing.T) {
+	store := position.NewMemoryStore()
+	target := strategy.Target{Scope: strategy.PositionScopeBacktest, RunID: "run-1", Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"}
+	currentPosition := strategy.Position{
+		Scope:        target.Scope,
+		RunID:        target.RunID,
+		Exchange:     target.Exchange,
+		Market:       target.Market,
+		Symbol:       target.Symbol,
+		StrategyName: "supertrend",
+		Side:         strategy.PositionSideLong,
+		Size:         1,
+		EntryPrice:   "100",
+		ExitRules: []strategy.ExitRule{{
+			Type:         strategy.ExitReasonStopLoss,
+			Reason:       "strategy stop loss",
+			TriggerPrice: "90",
+			SizePct:      1,
+		}},
+	}
+	if err := store.SavePosition(context.Background(), currentPosition); err != nil {
+		t.Fatalf("SavePosition() error = %v", err)
+	}
+	handler, err := New(Options{
+		PositionManager: position.NewManager(position.ManagerConfig{}),
+		PositionStore:   store,
+		EventStore:      store,
+		Broker:          execution.NewPaperBroker("", func() int64 { return 2000 }),
+		Now:             func() int64 { return 2000 },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	input := strategy.Context{
+		Target: target,
+		Snapshots: map[string]strategy.Snapshot{
+			"3m": {Current: marketmodel.Kline{Open: "100", High: "105", Low: "89", Close: "100"}},
+		},
+		Positions: map[string]*strategy.Position{"supertrend": &currentPosition},
+	}
+	result := strategy.Result{StrategyName: "supertrend", Signal: strategy.Signal{Strategy: "supertrend", Side: strategy.SignalSideHold, OpenTime: 1000}}
+
+	if err := handler.HandleResult(context.Background(), input, result, strategyroute.Route{Sink: strategyroute.SinkBacktest}); err != nil {
+		t.Fatalf("HandleResult() error = %v", err)
+	}
+	stored, err := store.GetPosition(context.Background(), position.KeyFromPosition(currentPosition))
+	if err != nil {
+		t.Fatalf("GetPosition() error = %v", err)
+	}
+	if stored != nil {
+		t.Fatalf("position = %#v, want closed", stored)
+	}
+	events := store.Events()
+	if len(events) != 3 {
+		t.Fatalf("events len = %d, want 3", len(events))
+	}
+	filled := events[len(events)-1]
+	if filled.EventType != strategy.EventTypeOrderFilled || filled.Price != "90" {
+		t.Fatalf("filled event = %#v, want intrabar fill at 90", filled)
+	}
+	if filled.Metadata["trigger_price"] != "90" {
+		t.Fatalf("trigger price = %q, want 90", filled.Metadata["trigger_price"])
+	}
+}

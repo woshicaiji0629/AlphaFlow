@@ -24,6 +24,22 @@ func TestSupportedMatchesBuildableStrategies(t *testing.T) {
 	if len(items) != 1 || items[0].Code != "supertrend" {
 		t.Fatalf("Supported()=%#v", items)
 	}
+	for _, name := range []string{
+		"entry_threshold",
+		"max_blocking_timeframes",
+		"min_take_profit_bps",
+		"min_reward_risk_ratio",
+		"max_stop_loss_bps",
+		"exit_mode",
+		"trailing_stop_pct",
+		"profit_guard_activation_bps",
+		"profit_guard_floor_bps",
+		"profit_decay_activation_bps",
+	} {
+		if _, ok := items[0].Parameters[name]; !ok {
+			t.Fatalf("Supported() missing parameter %q: %#v", name, items[0].Parameters)
+		}
+	}
 	if !IsSupported(" SUPERTrend ") || IsSupported("unknown") {
 		t.Fatal("IsSupported returned unexpected result")
 	}
@@ -56,6 +72,9 @@ func TestBuildSpecUsesConfiguredParameters(t *testing.T) {
 		Params: map[string]string{
 			"entry_threshold":         "0.80",
 			"max_blocking_timeframes": "2",
+			"min_take_profit_bps":     "26",
+			"min_reward_risk_ratio":   "1.25",
+			"max_stop_loss_bps":       "50",
 		},
 	})
 	if err != nil {
@@ -72,6 +91,26 @@ func TestBuildSpecUsesConfiguredParameters(t *testing.T) {
 	}
 	if result.StrategyName != "supertrend" || result.Signal.Strategy != "supertrend" {
 		t.Fatalf("result strategy identity = %q/%q", result.StrategyName, result.Signal.Strategy)
+	}
+}
+
+func TestBuildSpecUsesTrailingExitMode(t *testing.T) {
+	item, err := BuildSpec(strategyspec.Spec{
+		Name:    "supertrend",
+		Enabled: true,
+		Params: map[string]string{
+			"exit_mode":                   " Trailing ",
+			"trailing_stop_pct":           "0.5",
+			"profit_guard_activation_bps": "35",
+			"profit_guard_floor_bps":      "18",
+			"profit_decay_activation_bps": "60",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildSpec() error = %v", err)
+	}
+	if item.Name() != supertrend.Name {
+		t.Fatalf("strategy name = %q, want %q", item.Name(), supertrend.Name)
 	}
 }
 
@@ -93,5 +132,70 @@ func TestBuildSpecRejectsUnknownParameter(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("BuildSpec() error = nil, want unknown parameter error")
+	}
+}
+
+func TestBuildSpecRejectsInvalidExitParameter(t *testing.T) {
+	tests := map[string]map[string]string{
+		"negative take profit":      {"min_take_profit_bps": "-1"},
+		"infinite take profit":      {"min_take_profit_bps": "+Inf"},
+		"negative ratio":            {"min_reward_risk_ratio": "-0.1"},
+		"nan ratio":                 {"min_reward_risk_ratio": "NaN"},
+		"negative stop loss":        {"max_stop_loss_bps": "-1"},
+		"infinite stop loss":        {"max_stop_loss_bps": "+Inf"},
+		"stop loss at full price":   {"max_stop_loss_bps": "10000"},
+		"unknown exit mode":         {"exit_mode": "partial"},
+		"trailing distance missing": {"exit_mode": "trailing"},
+		"negative trailing distance": {
+			"exit_mode":         "trailing",
+			"trailing_stop_pct": "-0.5",
+		},
+		"nan trailing distance": {
+			"exit_mode":         "trailing",
+			"trailing_stop_pct": "NaN",
+		},
+		"trailing distance without mode": {"trailing_stop_pct": "0.5"},
+		"trailing with take profit distance": {
+			"exit_mode":           "trailing",
+			"trailing_stop_pct":   "0.5",
+			"min_take_profit_bps": "26",
+		},
+		"trailing with reward risk ratio": {
+			"exit_mode":             "trailing",
+			"trailing_stop_pct":     "0.5",
+			"min_reward_risk_ratio": "1.25",
+		},
+		"profit guard without trailing mode": {
+			"profit_guard_activation_bps": "30",
+		},
+		"negative profit guard activation": {
+			"exit_mode":                   "trailing",
+			"trailing_stop_pct":           "0.5",
+			"profit_guard_activation_bps": "-1",
+		},
+		"profit floor reaches activation": {
+			"exit_mode":                   "trailing",
+			"trailing_stop_pct":           "0.5",
+			"profit_guard_activation_bps": "30",
+			"profit_guard_floor_bps":      "30",
+		},
+		"profit decay before guard activation": {
+			"exit_mode":                   "trailing",
+			"trailing_stop_pct":           "0.5",
+			"profit_guard_activation_bps": "60",
+			"profit_decay_activation_bps": "50",
+		},
+	}
+	for name, params := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := BuildSpec(strategyspec.Spec{
+				Name:    "supertrend",
+				Enabled: true,
+				Params:  params,
+			})
+			if err == nil {
+				t.Fatal("BuildSpec() error = nil, want invalid parameter error")
+			}
+		})
 	}
 }
