@@ -1,4 +1,3 @@
-PY_SERVICE_DIR := backend/python-service/alphaflow-core
 GO_SERVICE_DIR := backend/go-service
 GO_SERVICE_BIN_DIR := $(GO_SERVICE_DIR)/bin
 KLINE_TASK_CONFIG ?= configs/tasks/kline-default.toml
@@ -8,14 +7,6 @@ export GO111MODULE := on
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  make py-sync          Sync Python service dependencies"
-	@echo "  make py-run           Run Python service"
-	@echo "  make py-lint          Run ruff check"
-	@echo "  make py-format        Run ruff format"
-	@echo "  make py-format-check  Check ruff formatting"
-	@echo "  make py-typecheck     Run pyright"
-	@echo "  make py-test          Run pytest"
-	@echo "  make py-check         Run Python lint, format check, typecheck, and tests"
 	@echo "  make go-market-data-run"
 	@echo "  make go-market-data-admin"
 	@echo "  make go-market-data-build"
@@ -55,37 +46,6 @@ help:
 	@echo "  make stack-up          Start Redis, NATS, ClickHouse, PostgreSQL, and market-data"
 	@echo "  make stack-down        Stop all Docker Compose profile services"
 	@echo "  make check            Run all available checks"
-
-.PHONY: py-sync
-py-sync:
-	cd $(PY_SERVICE_DIR) && uv sync --dev
-
-.PHONY: py-run
-py-run:
-	cd $(PY_SERVICE_DIR) && uv run python src/alphaflow/main.py
-
-.PHONY: py-lint
-py-lint:
-	cd $(PY_SERVICE_DIR) && uv run ruff check .
-
-.PHONY: py-format
-py-format:
-	cd $(PY_SERVICE_DIR) && uv run ruff format .
-
-.PHONY: py-format-check
-py-format-check:
-	cd $(PY_SERVICE_DIR) && uv run ruff format --check .
-
-.PHONY: py-typecheck
-py-typecheck:
-	cd $(PY_SERVICE_DIR) && uv run pyright
-
-.PHONY: py-test
-py-test:
-	cd $(PY_SERVICE_DIR) && uv run pytest
-
-.PHONY: py-check
-py-check: py-lint py-format-check py-typecheck py-test
 
 .PHONY: go-market-data-run
 go-market-data-run:
@@ -247,4 +207,4 @@ stack-down:
 	docker compose --profile infra --profile live --profile jobs down --remove-orphans
 
 .PHONY: check
-check: py-check go-market-data-check
+check: go-market-data-check

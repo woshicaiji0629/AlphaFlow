@@ -28,8 +28,6 @@ AlphaFlow/
       polymarket-research/     # Polymarket 事件合约采集与研究
       control-api/             # 控制面 API
       pkg/                     # Go 公共模型与基础能力
-    python-service/
-      alphaflow-core/          # 旧 Python 策略原型
   frontend/                    # React + TypeScript + Vite 控制台
   docs/                        # 架构、服务和研究文档
   data/                        # 本地基础设施数据

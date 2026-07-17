@@ -41,8 +41,6 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 AlphaFlow/
   frontend/                         # React + TypeScript + Vite 量化控制台
   backend/
-    python-service/                 # Python 服务，每个服务维护自己的依赖
-      alphaflow-core/               # 当前 Python 策略框架，使用 uv 管理
     go-service/                     # Go 服务，位于同一个 Go module 下
       market-data/                  # 当前活跃的行情数据服务
       strategy-engine/              # 在线策略引擎
@@ -134,8 +132,6 @@ NATS JetStream market.snapshot.closed / market.snapshot.realtime
 - `strategy-engine` 会校验 market snapshot 的 `created_at`、`expires_at`、open time 和 updated at，旧消息不会覆盖更新的内存态。
 - 当行情输入缺失或过期时，在线策略进入降级状态：拒绝新开仓，保留平仓、减仓和止损等退出路径。
 
-Python `alphaflow-core` 保留为旧策略原型参考，不作为新策略架构的主路径。
-
 已实现的策略框架行为：
 
 - 一个 `StrategyEngine` 可以注册多个策略。
@@ -210,7 +206,7 @@ ClickHouse 写入失败会通过 NATS JetStream pending 队列补偿，因此临
 
 ## PostgreSQL 职责
 
-PostgreSQL 当前只作为本地基础设施保留，主要兼容旧 Python 原型路径。Go 主路径的 K 线、策略事件、回测交易明细和回测摘要当前落在 ClickHouse。
+PostgreSQL 保存控制面业务数据。Go 主路径的 K 线、策略事件、回测交易明细和回测摘要当前落在 ClickHouse。
 
 ## 未来 Go 服务
 
@@ -229,21 +225,6 @@ backend/go-service/
 ```
 
 当前聚合和指标逻辑仍在 `market-data` 内部。只有当出现明确的运维或职责边界原因时，才考虑拆分。
-
-## 未来 Python 服务
-
-潜在未来 Python 服务：
-
-```text
-backend/python-service/
-  alphaflow-core/       # 当前策略框架；未来可能承担编排/API 入口
-  research/             # 策略研究和实验
-  backtest/             # 回测服务
-  model-service/        # AI/模型信号服务
-  reporting/            # 报表和分析
-```
-
-`alphaflow-core` 已不再只是脚手架。它当前包含第一版策略框架实现。未来服务拆分仍是开放问题，应在策略、回测和 API 职责增长后再重新评估。
 
 ## 运行可靠性约定
 

@@ -23,6 +23,5 @@
 - 具体入场、出场、过滤、评分和仓位规则由策略自己决定。
 - 当前策略仓位模型是一锤子买卖：每个交易所、市场、交易对和策略组合最多一个活跃仓位。
 - Go 在线策略引擎启动时可从 Redis `indwin` 和 `indrt` 恢复，启动后主要消费 NATS market snapshot 并维护内存态。
-- 旧 Python 原型仍可读取 Redis `indwin` 和 `indrt` 特征 hash。
 - 如果特征 freshness 校验失败，策略不应继续使用该快照。
 - ClickHouse 只保留 K 线历史；研究、回放和重新计算窗口特征时按需从 K 线计算指标。
