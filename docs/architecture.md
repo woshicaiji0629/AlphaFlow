@@ -132,6 +132,22 @@ NATS JetStream market.snapshot.closed / market.snapshot.realtime
 - `strategy-engine` 会校验 market snapshot 的 `created_at`、`expires_at`、open time 和 updated at，旧消息不会覆盖更新的内存态。
 - 当行情输入缺失或过期时，在线策略进入降级状态：拒绝新开仓，保留平仓、减仓和止损等退出路径。
 
+## 公共市场能力层
+
+AlphaFlow 的目标不是让每个策略重复计算趋势、波动、结构和多周期状态，而是开发一次公共市场能力，由在线、回测和多个策略共同消费：
+
+```text
+K 线
+  -> pkg/indicatorcalc 基础指标
+  -> pkg/indicatorwindow 窗口统计与单周期市场能力
+  -> pkg/strategyframe 多周期上下文
+  -> 策略触发、组合、仓位和退出
+```
+
+当前窗口层已经存在大量可复用语义字段，但部分公共判断仍位于 Supertrend 策略中。后续按能力板块逐步迁移，不一次性重写策略。公共能力只描述市场，不输出开仓许可、阻断或仓位结论；多周期上下文也应输出一致、反向、中性和可信度，而不是某个策略专用的 `blocking` 语义。
+
+完整职责、版本、验证和迁移约定见 [市场能力层架构](market-capability-architecture.md)。
+
 已实现的策略框架行为：
 
 - 一个 `StrategyEngine` 可以注册多个策略。
