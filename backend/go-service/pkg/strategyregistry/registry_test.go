@@ -25,11 +25,10 @@ func TestSupportedMatchesBuildableStrategies(t *testing.T) {
 		t.Fatalf("Supported()=%#v", items)
 	}
 	for _, name := range []string{
-		"entry_profile",
 		"entry_threshold",
 		"max_blocking_timeframes",
-		"intraday_min_aligned_timeframes",
 		"min_take_profit_bps",
+		"take_profit_cost_floor_bps",
 		"min_reward_risk_ratio",
 		"max_stop_loss_bps",
 		"exit_mode",
@@ -77,11 +76,12 @@ func TestBuildSpecUsesConfiguredParameters(t *testing.T) {
 		Name:    "supertrend",
 		Enabled: true,
 		Params: map[string]string{
-			"entry_threshold":         "0.80",
-			"max_blocking_timeframes": "2",
-			"min_take_profit_bps":     "26",
-			"min_reward_risk_ratio":   "1.25",
-			"max_stop_loss_bps":       "50",
+			"entry_threshold":            "0.80",
+			"max_blocking_timeframes":    "2",
+			"min_take_profit_bps":        "26",
+			"take_profit_cost_floor_bps": "20",
+			"min_reward_risk_ratio":      "1.25",
+			"max_stop_loss_bps":          "50",
 		},
 	})
 	if err != nil {
@@ -121,30 +121,6 @@ func TestBuildSpecUsesTrailingExitMode(t *testing.T) {
 	}
 }
 
-func TestBuildSpecUsesIntradayAdaptiveProfile(t *testing.T) {
-	item, err := BuildSpec(strategyspec.Spec{
-		Name:    "supertrend",
-		Enabled: true,
-		Params: map[string]string{
-			"entry_profile":                   "intraday_adaptive",
-			"intraday_min_aligned_timeframes": "2",
-			"exit_mode":                       "adaptive",
-			"max_stop_loss_bps":               "70",
-			"round_trip_cost_bps":             "16",
-			"profit_buffer_bps":               "8",
-			"micro_profit_quote":              "10",
-			"target_profit_quote":             "20",
-			"runner_profit_quote":             "30",
-		},
-	})
-	if err != nil {
-		t.Fatalf("BuildSpec() error = %v", err)
-	}
-	if item.Name() != supertrend.Name {
-		t.Fatalf("strategy name = %q, want %q", item.Name(), supertrend.Name)
-	}
-}
-
 func TestBuildSpecsRejectsDuplicateName(t *testing.T) {
 	_, err := BuildSpecs([]strategyspec.Spec{
 		{Name: "supertrend", Enabled: true},
@@ -168,27 +144,17 @@ func TestBuildSpecRejectsUnknownParameter(t *testing.T) {
 
 func TestBuildSpecRejectsInvalidExitParameter(t *testing.T) {
 	tests := map[string]map[string]string{
-		"unknown entry profile": {"entry_profile": "scalper"},
-		"zero intraday alignment": {
-			"entry_profile":                   "intraday_adaptive",
-			"intraday_min_aligned_timeframes": "0",
-		},
-		"too many intraday alignments": {
-			"entry_profile":                   "intraday_adaptive",
-			"intraday_min_aligned_timeframes": "5",
-		},
-		"intraday alignment without profile": {
-			"intraday_min_aligned_timeframes": "2",
-		},
-		"negative take profit":      {"min_take_profit_bps": "-1"},
-		"infinite take profit":      {"min_take_profit_bps": "+Inf"},
-		"negative ratio":            {"min_reward_risk_ratio": "-0.1"},
-		"nan ratio":                 {"min_reward_risk_ratio": "NaN"},
-		"negative stop loss":        {"max_stop_loss_bps": "-1"},
-		"infinite stop loss":        {"max_stop_loss_bps": "+Inf"},
-		"stop loss at full price":   {"max_stop_loss_bps": "10000"},
-		"unknown exit mode":         {"exit_mode": "partial"},
-		"trailing distance missing": {"exit_mode": "trailing"},
+		"negative take profit":                 {"min_take_profit_bps": "-1"},
+		"infinite take profit":                 {"min_take_profit_bps": "+Inf"},
+		"negative take profit cost floor":      {"take_profit_cost_floor_bps": "-1"},
+		"take profit cost floor at full price": {"take_profit_cost_floor_bps": "10000"},
+		"negative ratio":                       {"min_reward_risk_ratio": "-0.1"},
+		"nan ratio":                            {"min_reward_risk_ratio": "NaN"},
+		"negative stop loss":                   {"max_stop_loss_bps": "-1"},
+		"infinite stop loss":                   {"max_stop_loss_bps": "+Inf"},
+		"stop loss at full price":              {"max_stop_loss_bps": "10000"},
+		"unknown exit mode":                    {"exit_mode": "partial"},
+		"trailing distance missing":            {"exit_mode": "trailing"},
 		"negative trailing distance": {
 			"exit_mode":         "trailing",
 			"trailing_stop_pct": "-0.5",
@@ -202,6 +168,11 @@ func TestBuildSpecRejectsInvalidExitParameter(t *testing.T) {
 			"exit_mode":           "trailing",
 			"trailing_stop_pct":   "0.5",
 			"min_take_profit_bps": "26",
+		},
+		"trailing with take profit cost floor": {
+			"exit_mode":                  "trailing",
+			"trailing_stop_pct":          "0.5",
+			"take_profit_cost_floor_bps": "20",
 		},
 		"trailing with reward risk ratio": {
 			"exit_mode":             "trailing",

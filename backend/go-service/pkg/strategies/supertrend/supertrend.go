@@ -12,8 +12,6 @@ import (
 
 const (
 	Name                            = "supertrend"
-	EntryProfileTrend               = "trend"
-	EntryProfileIntradayAdaptive    = "intraday_adaptive"
 	ExitModeStructure               = "structure"
 	ExitModeTrailing                = "trailing"
 	ExitModeAdaptive                = "adaptive"
@@ -38,30 +36,25 @@ const (
 	adaptiveMinExpandingTrailPct        = 0.35
 	adaptiveMaxExpandingTrailPct        = 0.75
 	adaptiveMaxRunnerTrailPct           = 1.20
-	intradayMinImpulseBps               = 8.0
-	intradayMaxImpulseBps               = 20.0
-	intradayMinImpulseATRMultiplier     = 0.25
-	intradayMaxImpulseATRMultiplier     = 0.75
 )
 
 type Config struct {
-	EntryProfile                 string
-	EntryThreshold               float64
-	MaxBlockingTimeframes        int
-	IntradayMinAlignedTimeframes int
-	MinTakeProfitBps             float64
-	MinRewardRiskRatio           float64
-	MaxStopLossBps               float64
-	ExitMode                     string
-	TrailingStopPct              float64
-	ProfitGuardActivationBps     float64
-	ProfitGuardFloorBps          float64
-	ProfitDecayActivationBps     float64
-	RoundTripCostBps             float64
-	ProfitBufferBps              float64
-	MicroProfitQuote             float64
-	TargetProfitQuote            float64
-	RunnerProfitQuote            float64
+	EntryThreshold           float64
+	MaxBlockingTimeframes    int
+	MinTakeProfitBps         float64
+	TakeProfitCostFloorBps   float64
+	MinRewardRiskRatio       float64
+	MaxStopLossBps           float64
+	ExitMode                 string
+	TrailingStopPct          float64
+	ProfitGuardActivationBps float64
+	ProfitGuardFloorBps      float64
+	ProfitDecayActivationBps float64
+	RoundTripCostBps         float64
+	ProfitBufferBps          float64
+	MicroProfitQuote         float64
+	TargetProfitQuote        float64
+	RunnerProfitQuote        float64
 }
 
 type Strategy struct {
@@ -88,18 +81,11 @@ type adaptiveExitParameters struct {
 }
 
 func New(config Config) *Strategy {
-	config.EntryProfile = normalize(config.EntryProfile)
-	if config.EntryProfile == "" {
-		config.EntryProfile = EntryProfileTrend
-	}
 	if config.EntryThreshold <= 0 {
 		config.EntryThreshold = 0.72
 	}
 	if config.MaxBlockingTimeframes <= 0 {
 		config.MaxBlockingTimeframes = 1
-	}
-	if config.IntradayMinAlignedTimeframes <= 0 {
-		config.IntradayMinAlignedTimeframes = 1
 	}
 	config.ExitMode = normalize(config.ExitMode)
 	if config.ExitMode == "" {
@@ -158,24 +144,21 @@ func (s *Strategy) Evaluate(
 	if err := ctx.Err(); err != nil {
 		return strategy.Result{}, err
 	}
-	contextChecks := s.intradayMarketContextChecks(snapshot.Window)
 	if !snapshot.Health.OK {
-		return s.holdWithChecks(snapshot, "snapshot health not ok", contextChecks), nil
+		return s.hold(snapshot, "snapshot health not ok"), nil
 	}
 	if !dataQualityOK(snapshot.Window) {
-		return s.holdWithChecks(snapshot, "data quality not ok", contextChecks), nil
+		return s.hold(snapshot, "data quality not ok"), nil
 	}
 	if currentPosition != nil && !currentPosition.IsFlat() {
-		result := s.evaluateExit(snapshot, currentPosition)
-		result.Analysis.Checks = append(contextChecks, result.Analysis.Checks...)
-		return result, nil
+		return s.evaluateExit(snapshot, currentPosition), nil
 	}
 
 	longDecision := s.entry(snapshot, strategy.SignalSideBuy)
 	shortDecision := s.entry(snapshot, strategy.SignalSideSell)
 	longDecision = withThresholdCheck(longDecision, s.config.EntryThreshold)
 	shortDecision = withThresholdCheck(shortDecision, s.config.EntryThreshold)
-	checks := append([]strategy.DiagnosticCheck{}, contextChecks...)
+	checks := make([]strategy.DiagnosticCheck, 0, len(longDecision.checks)+len(shortDecision.checks))
 	checks = append(checks, longDecision.checks...)
 	checks = append(checks, shortDecision.checks...)
 	selected := selectEntry(longDecision, shortDecision, s.config.EntryThreshold)
@@ -214,42 +197,45 @@ func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *str
 	default:
 		return s.hold(snapshot, "position side not actionable")
 	}
+	stcCheck := stcObservationCheck(snapshot.Window, holdingSide)
+	exitContextChecks := []strategy.DiagnosticCheck{stcCheck}
 	if s.config.ExitMode == ExitModeAdaptive {
 		invalidationCheck, invalidated := adaptiveDirectionInvalidated(snapshot, currentPosition, holdingSide)
 		if invalidated {
-			return s.signalWithChecks(snapshot, opposite, 1, "intraday direction invalidated", nil, []strategy.DiagnosticCheck{invalidationCheck})
+			invalidationCheck.Status = strategy.DiagnosticStatusInfo
+			invalidationCheck.Reason = "intraday direction invalidated; background only"
 		}
+		exitContextChecks = append(exitContextChecks, invalidationCheck)
 	}
 	if reversed, values := higherTimeframeReversed(snapshot, opposite); reversed {
-		check := diagnosticCheck("structure_invalidation", opposite, true, 0, "10m and 15m confirmed reversal", values)
-		return s.signalWithChecks(snapshot, opposite, 1, "10m and 15m confirmed reversal", nil, []strategy.DiagnosticCheck{check})
+		exitContextChecks = append(exitContextChecks, infoDiagnostic("structure_invalidation", opposite, "10m and 15m reversal observed; background only", values))
 	}
-	profitCheck, profitState := s.profitProtectionCheck(snapshot, currentPosition, holdingSide)
-	if profitState == "weak_exit" {
-		return s.signalWithChecks(snapshot, opposite, 1, "protected profit momentum decayed", nil, []strategy.DiagnosticCheck{profitCheck})
-	}
+	profitCheck, _ := s.profitProtectionCheck(snapshot, currentPosition, holdingSide)
+	exitContextChecks = append(exitContextChecks, profitCheck)
 	decision := s.reversalEntry(snapshot, opposite)
 	decision = withThresholdCheck(decision, s.config.EntryThreshold)
 	if decision.blocked {
-		return s.holdWithChecks(snapshot, strings.Join(decision.reasons, "; "), append(decision.checks, profitCheck))
+		return s.holdWithChecks(snapshot, strings.Join(decision.reasons, "; "), append(decision.checks, exitContextChecks...))
 	}
 	if !reverseConfirmed(snapshot, opposite) {
-		checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, false, 0, "reverse signal not confirmed", nil), profitCheck)
+		checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, false, 0, "reverse signal not confirmed", nil))
+		checks = append(checks, exitContextChecks...)
 		return s.holdWithChecks(snapshot, "reverse signal not confirmed", checks)
 	}
-	checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, true, 0, "reverse signal confirmed", nil), profitCheck)
+	checks := append(decision.checks, diagnosticCheck("reverse_confirmation", opposite, true, 0, "reverse signal confirmed", nil))
+	checks = append(checks, exitContextChecks...)
 	return s.signalWithChecks(snapshot, opposite, decision.score, strings.Join(decision.reasons, "; "), nil, checks)
 }
 
 func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
-	return s.evaluateEntry(snapshot, side, false)
+	return s.evaluateEntry(snapshot, side)
 }
 
 func (s *Strategy) reversalEntry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
-	return s.evaluateEntry(snapshot, side, true)
+	return s.evaluateEntry(snapshot, side)
 }
 
-func (s *Strategy) evaluateEntry(snapshot strategy.Snapshot, side strategy.SignalSide, allowSMCBOSOnly bool) entryDecision {
+func (s *Strategy) evaluateEntry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
 	window := snapshot.Window
 	decision := entryDecision{
 		side:    side,
@@ -262,197 +248,195 @@ func (s *Strategy) evaluateEntry(snapshot strategy.Snapshot, side strategy.Signa
 		return decision
 	}
 	triggerSources := standardEntryTriggerSources(window, side)
-	intradayProfile := s.config.EntryProfile == EntryProfileIntradayAdaptive
-	intradayEnvironmentOK := intradayContinuationTriggered(window, side)
-	intradayImpulseOK, intradayImpulseValues := intradayImpulseTriggered(window, side)
-	if intradayProfile && intradayEnvironmentOK && intradayImpulseOK && !containsString(triggerSources, "intraday_impulse") {
-		triggerSources = append(triggerSources, "intraday_impulse")
-	}
+	supertrendSources := supertrendEntryTriggerSources(triggerSources)
 	triggerValues := entryTriggerValues(window, side, triggerSources)
-	triggerValues["intraday_environment_authorized"] = strconv.FormatBool(intradayEnvironmentOK)
-	for key, value := range intradayImpulseValues {
-		triggerValues[key] = value
-	}
-	standardTriggered := standardTrendContinuationTriggered(triggerSources)
-	if allowSMCBOSOnly {
-		standardTriggered = len(triggerSources) > 0
-	}
+	standardTriggered := len(supertrendSources) > 0
 	triggerValues["standard_trigger_authorized"] = strconv.FormatBool(standardTriggered)
-	triggerValues["smc_bos_only"] = strconv.FormatBool(len(triggerSources) == 1 && triggerSources[0] == "smc_bos")
-	triggered := standardTriggered || confirmedTruthySignal(window, continuationSignalKey(side))
-	if !triggered {
+	triggerValues["supertrend_trigger_sources"] = strings.Join(supertrendSources, ",")
+	triggerValues["supertrend_trigger_count"] = strconv.Itoa(len(supertrendSources))
+	if !standardTriggered {
 		decision.blocked = true
-		reason := fmt.Sprintf("%s trigger missing", side)
+		reason := fmt.Sprintf("%s supertrend trigger missing", side)
 		if len(triggerSources) > 0 {
-			reason = fmt.Sprintf("%s trigger not authorized", side)
+			reason = fmt.Sprintf("%s auxiliary trigger cannot authorize entry", side)
 		}
 		decision.reasons = append(decision.reasons, reason)
 		decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, false, 0, reason, triggerValues))
 		return decision
 	}
-	decision.score = 0.30
 	decision.reasons = append(decision.reasons, fmt.Sprintf("%s trigger", side))
-	decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, true, 0.30, fmt.Sprintf("%s trigger", side), triggerValues))
+	decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, true, 0, fmt.Sprintf("%s trigger", side), triggerValues))
 
-	energyOK, energyScore, energyReasons, energyValues := momentumEnergy(window, side)
-	energyConfirmations, _ := strconv.Atoi(energyValues["confirmations"])
+	energyOK, _, energyReasons, energyValues := momentumEnergy(window, side)
 	fakeRisk := fakeRiskLevel(window, side)
-	shockOK, shockValues := shockBreakoutAuthorized(snapshot, side, fakeRisk, energyConfirmations)
 	regimeOK, regimeValues := higherTimeframeAuthorized(snapshot, side)
 	pullbackOK, pullbackValues := pullbackResolved(snapshot, side)
-	intradayContextOK, intradayContextValues := intradayContextAuthorized(snapshot, side)
 	aligned, blocked := classifyTimeframes(snapshot, side)
-	intradayContextValues["required_aligned"] = strconv.Itoa(s.config.IntradayMinAlignedTimeframes)
-	intradayContextValues["max_blocking"] = strconv.Itoa(s.config.MaxBlockingTimeframes)
-	intradayContextValues["aligned"] = strconv.Itoa(aligned)
-	intradayContextValues["blocked"] = strconv.Itoa(blocked)
-	intradayAuthorized := intradayContextOK && intradayEnvironmentOK &&
-		aligned >= s.config.IntradayMinAlignedTimeframes && blocked <= s.config.MaxBlockingTimeframes
-	entryMode := ""
-	switch {
-	case shockOK:
-		entryMode = "shock_breakout"
-		decision.score += 0.10
-		decision.reasons = append(decision.reasons, "shock breakout authorized")
-	case intradayProfile && standardTriggered && intradayAuthorized:
-		entryMode = "intraday_event"
-		decision.reasons = append(decision.reasons, "intraday event authorized")
-	case standardTriggered && regimeOK && pullbackOK:
-		entryMode = "trend_continuation"
-		decision.reasons = append(decision.reasons, "trend continuation authorized")
-	default:
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "entry mode not authorized")
-	}
+	entryMode := "supertrend_signal"
+	decision.reasons = append(decision.reasons, "supertrend signal authorized")
 	modeValues := map[string]string{
-		"mode":                            entryMode,
-		"entry_profile":                   s.config.EntryProfile,
-		"trigger_sources":                 entryModeTriggerSources(entryMode, triggerSources),
-		"trigger_source_count":            strconv.Itoa(entryModeTriggerSourceCount(entryMode, triggerSources)),
-		"ma_tangled":                      strconv.FormatBool(truthySignal(window, "ma_window_tangled")),
-		"volatility_state":                latestSignal(window, "volatility_window_state"),
-		"local_supertrend_direction":      latestSignal(window, "supertrend_direction"),
-		"local_trend_bias":                latestSignal(window, "trend_window_bias"),
-		"local_ma_bias":                   latestSignal(window, "ma_window_bias"),
-		"local_macd_bias":                 latestSignal(window, "macd_window_bias"),
-		"shock_authorized":                strconv.FormatBool(shockOK),
-		"regime_authorized":               strconv.FormatBool(regimeOK),
-		"pullback_resolved":               strconv.FormatBool(pullbackOK),
-		"breakout_structure":              shockValues["structure"],
-		"shock_structure":                 shockValues["structure"],
-		"shock_impulse":                   shockValues["impulse"],
-		"shock_impulse_stable_count":      shockValues["impulse_stable_count"],
-		"shock_price_volume":              shockValues["price_volume"],
-		"shock_volume_expanded":           shockValues["volume_expanded"],
-		"shock_3m":                        shockValues["3m"],
-		"shock_5m":                        shockValues["5m"],
-		"shock_10m":                       shockValues["10m"],
-		"shock_15m":                       shockValues["15m"],
-		"shock_30m":                       shockValues["30m"],
-		"shock_higher_timeframes_clear":   shockValues["higher_timeframes_clear"],
-		"shock_higher_timeframes_aligned": shockValues["higher_timeframes_aligned"],
-		"shock_fake_risk":                 shockValues["fake_risk"],
-		"shock_fake_risk_low":             shockValues["fake_risk_low"],
-		"shock_momentum_confirmations":    shockValues["momentum_confirmations"],
-		"shock_momentum_required":         shockValues["momentum_required"],
+		"mode":                       entryMode,
+		"trigger_sources":            strings.Join(supertrendSources, ","),
+		"trigger_source_count":       strconv.Itoa(len(supertrendSources)),
+		"ma_tangled":                 strconv.FormatBool(truthySignal(window, "ma_window_tangled")),
+		"volatility_state":           latestSignal(window, "volatility_window_state"),
+		"local_supertrend_direction": latestSignal(window, "supertrend_direction"),
+		"local_trend_bias":           latestSignal(window, "trend_window_bias"),
+		"local_ma_bias":              latestSignal(window, "ma_window_bias"),
+		"local_macd_bias":            latestSignal(window, "macd_window_bias"),
+		"regime_authorized":          strconv.FormatBool(regimeOK),
+		"pullback_resolved":          strconv.FormatBool(pullbackOK),
 	}
-	decision.checks = append(decision.checks, diagnosticCheck("entry_mode", side, entryMode != "", 0.10*boolFloat(shockOK), checkReason(entryMode == "", "entry mode not authorized", entryMode+" authorized"), modeValues))
+	decision.checks = append(decision.checks, diagnosticCheck("entry_mode", side, true, 0, entryMode+" authorized", modeValues))
+	decision.checks = append(decision.checks, entryFeatureSnapshotCheck(window, side))
+	stcCheck, stcVetoed := stcEntryCheck(window, side)
+	decision.checks = append(decision.checks, stcCheck)
+	if stcVetoed {
+		decision.blocked = true
+		decision.reasons = append(decision.reasons, "stc 25-line entry veto")
+	}
 
 	fakeBlocked := fakeRisk == "high"
 	fakeAccepted := !fakeBlocked
-	if !fakeAccepted {
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "fake signal risk blocked")
-	}
 	fakeReason := "fake signal risk accepted"
-	decision.checks = append(decision.checks, diagnosticCheck("fake_signal_risk", side, fakeAccepted, 0, checkReason(!fakeAccepted, "high fake signal risk blocked", fakeReason), map[string]string{
+	if !fakeAccepted {
+		fakeReason = "high fake signal risk observed"
+	}
+	decision.checks = append(decision.checks, entryConfirmationCheck("fake_signal_risk", side, fakeAccepted, false, 0, fakeReason, map[string]string{
 		"risk": fakeRisk,
 	}))
 
-	regimeAccepted := regimeOK || shockOK
+	regimeAccepted := regimeOK
 	regimeCheckValues := regimeValues
-	if intradayProfile && !shockOK {
-		regimeAccepted = intradayAuthorized
-		regimeCheckValues = intradayContextValues
-	}
-	if !regimeAccepted {
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "higher timeframe regime blocked")
-	}
 	regimeReason := "higher timeframe regime authorized"
-	if !regimeOK && shockOK {
-		regimeReason = "higher timeframe wait overridden by shock breakout"
+	if !regimeAccepted {
+		regimeReason = "higher timeframe opposition observed"
 	}
-	decision.checks = append(decision.checks, diagnosticCheck("higher_timeframe_regime", side, regimeAccepted, 0, checkReason(!regimeAccepted, "higher timeframe regime blocked", regimeReason), regimeCheckValues))
+	decision.checks = append(decision.checks, entryConfirmationCheck("higher_timeframe_regime", side, regimeAccepted, false, 0, regimeReason, regimeCheckValues))
 
-	pullbackAccepted := pullbackOK
-	if intradayProfile && !shockOK {
-		pullbackAccepted = intradayAuthorized
-		pullbackValues = intradayContextValues
+	pullbackReason := "5m direction aligned"
+	if !pullbackOK {
+		pullbackReason = "5m direction is background only"
 	}
-	if !pullbackAccepted {
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "5m direction blocked")
-	}
-	decision.checks = append(decision.checks, diagnosticCheck("pullback_resolution", side, pullbackAccepted, 0, checkReason(!pullbackAccepted, "5m direction blocked", "5m direction accepted"), pullbackValues))
+	decision.checks = append(decision.checks, entryConfirmationCheck("pullback_resolution", side, pullbackOK, false, 0, pullbackReason, pullbackValues))
 
-	trendOK, trendScore, trendReasons := trendConfirmationForEntry(window, side, shockOK)
-	if !trendOK {
-		decision.blocked = true
-	}
-	decision.score += trendScore
+	trendOK, _, trendReasons := trendConfirmationForEntry(window, side)
 	decision.reasons = append(decision.reasons, trendReasons...)
-	decision.checks = append(decision.checks, diagnosticCheck("trend", side, trendOK, trendScore, strings.Join(trendReasons, "; "), nil))
+	decision.checks = append(decision.checks, entryConfirmationCheck("trend", side, trendOK, false, 0, strings.Join(trendReasons, "; "), nil))
 
-	maOK, maScore, maReasons := maConfirmationForEntry(window, side)
-	if !maOK {
-		decision.blocked = true
-	}
-	decision.score += maScore
+	maOK, _, maReasons := maConfirmationForEntry(window, side)
 	decision.reasons = append(decision.reasons, maReasons...)
-	decision.checks = append(decision.checks, diagnosticCheck("moving_average", side, maOK, maScore, strings.Join(maReasons, "; "), nil))
+	decision.checks = append(decision.checks, entryConfirmationCheck("moving_average", side, maOK, false, 0, strings.Join(maReasons, "; "), nil))
 
-	macdOK, macdScore, macdReasons := macdConfirmation(window, side)
-	if !macdOK && !shockOK {
-		decision.blocked = true
-	}
-	decision.score += macdScore
+	macdOK, _, macdReasons := macdConfirmation(window, side)
 	decision.reasons = append(decision.reasons, macdReasons...)
-	decision.checks = append(decision.checks, entryConfirmationCheck("macd", side, macdOK, !shockOK, macdScore, strings.Join(macdReasons, "; "), nil))
+	decision.checks = append(decision.checks, entryConfirmationCheck("macd", side, macdOK, false, 0, strings.Join(macdReasons, "; "), nil))
 
-	volumeOK, volumeScore, volumeReasons := volumeConfirmation(window, side)
-	if !volumeOK && !shockOK {
-		decision.blocked = true
-	}
-	decision.score += volumeScore
+	volumeOK, _, volumeReasons := volumeConfirmation(window, side)
 	decision.reasons = append(decision.reasons, volumeReasons...)
-	decision.checks = append(decision.checks, entryConfirmationCheck("volume", side, volumeOK, !shockOK, volumeScore, strings.Join(volumeReasons, "; "), nil))
+	decision.checks = append(decision.checks, entryConfirmationCheck("volume", side, volumeOK, false, 0, strings.Join(volumeReasons, "; "), nil))
 
-	energyBlocking := !intradayProfile && !shockOK
-	if !energyOK && energyBlocking {
-		decision.blocked = true
-	}
-	decision.score += energyScore
 	decision.reasons = append(decision.reasons, energyReasons...)
-	decision.checks = append(decision.checks, entryConfirmationCheck("momentum_energy", side, energyOK, energyBlocking, energyScore, strings.Join(energyReasons, "; "), energyValues))
+	decision.checks = append(decision.checks, entryConfirmationCheck("momentum_energy", side, energyOK, false, 0, strings.Join(energyReasons, "; "), energyValues))
 
 	shortBlocked := shortTimeframesBlocked(snapshot, side)
 	timeframesOK := blocked <= s.config.MaxBlockingTimeframes && !shortBlocked
-	if intradayProfile {
-		timeframesOK = intradayAuthorized
-	}
-	if !timeframesOK {
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "timeframe blocked")
-	}
-	if aligned > 0 {
-		decision.score += 0.04 * float64(aligned)
-		decision.reasons = append(decision.reasons, "timeframes aligned")
-	}
-	decision.checks = append(decision.checks, diagnosticCheck("timeframes", side, timeframesOK, 0.04*float64(aligned), checkReason(!timeframesOK, "timeframe blocked", "timeframes evaluated"), map[string]string{
+	decision.checks = append(decision.checks, entryConfirmationCheck("timeframes", side, timeframesOK, false, 0, checkReason(!timeframesOK, "timeframe opposition observed", "timeframes evaluated"), map[string]string{
 		"aligned": strconv.Itoa(aligned), "blocked": strconv.Itoa(blocked),
 	}))
+	qualityScore, qualityValues := entryQualityScore(regimeValues["state"], pullbackValues["5m"], energyValues["confirmations"], modeValues["volatility_state"])
+	decision.score = qualityScore
+	decision.checks = append(decision.checks, diagnosticCheck("entry_quality", side, true, decision.score, "entry quality scored", qualityValues))
 	return decision
+}
+
+func entryFeatureSnapshotCheck(window strategy.IndicatorWindowView, side strategy.SignalSide) strategy.DiagnosticCheck {
+	values := map[string]string{}
+	for _, key := range []string{
+		"supertrend_distance_pct",
+		"supertrend_stop_distance_pct",
+		"supertrend_zone_position_pct",
+		"atr_pct14",
+		"adx14",
+		"plus_di14",
+		"minus_di14",
+		"stc",
+		"stc_delta",
+		"vwap_distance_pct",
+		"dynamic_swing_vwap_distance_pct",
+		"dynamic_swing_vwap_anchor_age",
+		"squeeze_momentum",
+		"squeeze_momentum_delta",
+		"price_ema7_distance_pct",
+		"price_ema25_distance_pct",
+		"price_ema99_distance_pct",
+		"ema25_slope5_pct",
+	} {
+		series, ok := window.Numeric(key)
+		if !ok {
+			continue
+		}
+		values[key] = formatFloat(series.Latest)
+		values[key+"_previous"] = formatFloat(series.Previous)
+	}
+	for _, key := range []string{
+		"supertrend_direction",
+		"supertrend_zone_area",
+		"stc_direction",
+		"stc_zone",
+		"stc_cross",
+		"ema_alignment",
+		"trend_direction",
+		"volatility_window_state",
+	} {
+		value := latestSignal(window, key)
+		if value != "" {
+			values[key] = value
+		}
+	}
+	return infoDiagnostic("entry_feature_snapshot", side, "entry features captured for offline analysis", values)
+}
+
+func entryQualityScore(regime string, fiveMinuteState string, momentumConfirmations string, volatilityState string) (float64, map[string]string) {
+	const baseScore = 0.50
+	regimeAdjustment := 0.0
+	switch normalize(regime) {
+	case "macro_blocked", "countertrend":
+		regimeAdjustment = 0.10
+	case "trend":
+		regimeAdjustment = -0.15
+	}
+	fiveMinuteAdjustment := 0.0
+	switch normalize(fiveMinuteState) {
+	case "blocking":
+		fiveMinuteAdjustment = 0.10
+	case "aligned":
+		fiveMinuteAdjustment = -0.10
+	}
+	momentumAdjustment := 0.0
+	switch momentumConfirmations {
+	case "1":
+		momentumAdjustment = 0.05
+	case "4":
+		momentumAdjustment = -0.10
+	}
+	volatilityAdjustment := 0.0
+	if normalize(volatilityState) == "contracting" {
+		volatilityAdjustment = -0.05
+	}
+	score := baseScore + regimeAdjustment + fiveMinuteAdjustment + momentumAdjustment + volatilityAdjustment
+	return score, map[string]string{
+		"base":                   formatFloat(baseScore),
+		"regime":                 regime,
+		"regime_adjustment":      formatFloat(regimeAdjustment),
+		"five_minute_state":      fiveMinuteState,
+		"five_minute_adjustment": formatFloat(fiveMinuteAdjustment),
+		"momentum_confirmations": momentumConfirmations,
+		"momentum_adjustment":    formatFloat(momentumAdjustment),
+		"volatility_state":       volatilityState,
+		"volatility_adjustment":  formatFloat(volatilityAdjustment),
+		"quality_score":          formatFloat(score),
+	}
 }
 
 func withThresholdCheck(decision entryDecision, threshold float64) entryDecision {
@@ -475,7 +459,41 @@ func entryConfirmationCheck(name string, side strategy.SignalSide, passed bool, 
 	if passed || blocking {
 		return diagnosticCheck(name, side, passed, score, reason, values)
 	}
-	return infoDiagnostic(name, side, reason+"; shock breakout score only", values)
+	return infoDiagnostic(name, side, reason+"; non-blocking confirmation", values)
+}
+
+func stcObservationCheck(window strategy.IndicatorWindowView, side strategy.SignalSide) strategy.DiagnosticCheck {
+	series, ok := window.Numeric("stc")
+	if !ok {
+		return strategy.DiagnosticCheck{Name: "stc", Side: side, Status: strategy.DiagnosticStatusMissing, Reason: "stc unavailable"}
+	}
+	values := map[string]string{
+		"value":     formatFloat(series.Latest),
+		"previous":  formatFloat(series.Previous),
+		"delta":     formatFloat(series.Latest - series.Previous),
+		"direction": latestSignal(window, "stc_direction"),
+		"zone":      latestSignal(window, "stc_zone"),
+		"cross":     latestSignal(window, "stc_cross"),
+	}
+	return infoDiagnostic("stc", side, "stc observed without decision impact", values)
+}
+
+func stcEntryCheck(window strategy.IndicatorWindowView, side strategy.SignalSide) (strategy.DiagnosticCheck, bool) {
+	check := stcObservationCheck(window, side)
+	if check.Values == nil {
+		return check, false
+	}
+	cross := check.Values["cross"]
+	vetoed := (side == strategy.SignalSideBuy && cross == "up_25") ||
+		(side == strategy.SignalSideSell && cross == "down_25")
+	check.Values["entry_veto"] = strconv.FormatBool(vetoed)
+	if vetoed {
+		check.Status = strategy.DiagnosticStatusBlocked
+		check.Reason = "stc 25-line entry veto"
+	} else {
+		check.Reason = "stc entry state accepted"
+	}
+	return check, vetoed
 }
 
 func checkReason(blocked bool, blockedReason string, passReason string) string {
@@ -483,13 +501,6 @@ func checkReason(blocked bool, blockedReason string, passReason string) string {
 		return blockedReason
 	}
 	return passReason
-}
-
-func boolFloat(value bool) float64 {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 func selectEntry(longDecision entryDecision, shortDecision entryDecision, threshold float64) entryDecision {
@@ -562,82 +573,37 @@ func dataQualityOK(window strategy.IndicatorWindowView) bool {
 }
 
 func entryTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
-	continuationKey := continuationSignalKey(side)
-	if confirmedTruthySignal(window, continuationKey) {
-		return true
-	}
-	return standardEntryTriggered(window, side)
+	return len(supertrendEntryTriggerSources(standardEntryTriggerSources(window, side))) > 0
 }
 
-func standardEntryTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
-	return len(standardEntryTriggerSources(window, side)) > 0
-}
-
-func standardTrendContinuationTriggered(sources []string) bool {
+func supertrendEntryTriggerSources(sources []string) []string {
+	result := make([]string, 0, 2)
 	for _, source := range sources {
-		if source != "smc_bos" {
-			return true
+		if source == "wick_reclaim" || source == "supertrend_flip" {
+			result = append(result, source)
 		}
 	}
-	return false
+	return result
 }
 
 func standardEntryTriggerSources(window strategy.IndicatorWindowView, side strategy.SignalSide) []string {
-	sources := make([]string, 0, 5)
+	sources := make([]string, 0, 2)
 	if previousWickReclaimed(window, side) {
 		sources = append(sources, "wick_reclaim")
 	}
 	if freshSignalValue(window, "supertrend_direction", directionForSide(side)) {
 		sources = append(sources, "supertrend_flip")
 	}
-	if freshNumericEvent(window, "trend_signal_age") && signalIs(latestSignal(window, "trend_signal_event"), eventForSide(side)) {
-		sources = append(sources, "trend_event")
-	}
-	if freshNumericEvent(window, "ma_window_cross_age") && signalIs(latestSignal(window, "ma_window_cross_event"), maCrossForSide(side)) {
-		sources = append(sources, "ma_cross")
-	}
-	if freshNumericEvent(window, "smc_window_bos_age") &&
-		truthySignal(window, "smc_window_bos_recent") &&
-		latestSignal(window, "smc_window_bias") == biasForSide(side) {
-		sources = append(sources, "smc_bos")
-	}
 	return sources
 }
 
-func entryTriggerValues(window strategy.IndicatorWindowView, side strategy.SignalSide, standardSources []string) map[string]string {
-	continuationKey := continuationSignalKey(side)
+func entryTriggerValues(_ strategy.IndicatorWindowView, _ strategy.SignalSide, standardSources []string) map[string]string {
 	return map[string]string{
-		"standard_trigger_sources":   strings.Join(standardSources, ","),
-		"standard_trigger_count":     strconv.Itoa(len(standardSources)),
-		"wick_reclaim":               strconv.FormatBool(containsString(standardSources, "wick_reclaim")),
-		"supertrend_flip":            strconv.FormatBool(containsString(standardSources, "supertrend_flip")),
-		"trend_event":                strconv.FormatBool(containsString(standardSources, "trend_event")),
-		"ma_cross":                   strconv.FormatBool(containsString(standardSources, "ma_cross")),
-		"smc_bos":                    strconv.FormatBool(containsString(standardSources, "smc_bos")),
-		"shock_impulse_signal":       latestSignal(window, continuationKey),
-		"shock_impulse_stable_count": strconv.Itoa(latestSignalStableCount(window, continuationKey)),
-		"shock_second_bar_confirmed": strconv.FormatBool(confirmedTruthySignal(window, continuationKey)),
+		"standard_trigger_sources": strings.Join(standardSources, ","),
+		"standard_trigger_count":   strconv.Itoa(len(standardSources)),
+		"wick_reclaim":             strconv.FormatBool(containsString(standardSources, "wick_reclaim")),
+		"supertrend_flip":          strconv.FormatBool(containsString(standardSources, "supertrend_flip")),
 	}
-}
-
-func entryModeTriggerSources(entryMode string, standardSources []string) string {
-	if entryMode == "shock_breakout" {
-		return "shock_second_bar"
-	}
-	if entryMode == "trend_continuation" || entryMode == "intraday_event" {
-		return strings.Join(standardSources, ",")
-	}
-	return ""
-}
-
-func entryModeTriggerSourceCount(entryMode string, standardSources []string) int {
-	if entryMode == "shock_breakout" {
-		return 1
-	}
-	if entryMode == "trend_continuation" || entryMode == "intraday_event" {
-		return len(standardSources)
-	}
-	return 0
 }
 
 func containsString(values []string, target string) bool {
@@ -647,117 +613,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func intradayContinuationTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
-	if truthySignal(window, "trend_window_continuation") {
-		return true
-	}
-	return localTrendAligned(window, side) &&
-		latestSignal(window, "trend_price_progress") == "advancing" &&
-		!truthySignal(window, "trend_window_reversal_risk") &&
-		!truthySignal(window, "ma_window_tangled") &&
-		fakeRiskLevel(window, side) != "high"
-}
-
-func (s *Strategy) intradayMarketContextChecks(window strategy.IndicatorWindowView) []strategy.DiagnosticCheck {
-	if s.config.EntryProfile != EntryProfileIntradayAdaptive {
-		return nil
-	}
-	return []strategy.DiagnosticCheck{infoDiagnostic(
-		"intraday_market_context",
-		strategy.SignalSideHold,
-		"intraday market context captured",
-		intradayMarketContextValues(window),
-	)}
-}
-
-func intradayMarketContextValues(window strategy.IndicatorWindowView) map[string]string {
-	_, values := intradayImpulseTriggered(window, strategy.SignalSideBuy)
-	delete(values, "intraday_impulse")
-	delete(values, "intraday_price_volume_aligned")
-	values["volatility_state"] = marketContextSignal(window, "volatility_window_state")
-	values["channel_volatility_state"] = marketContextSignal(window, "channel_volatility_state")
-	values["channel_position_state"] = marketContextSignal(window, "channel_position_state")
-	values["channel_breakout_quality"] = marketContextSignal(window, "channel_breakout_quality")
-	values["channel_bias"] = marketContextSignal(window, "channel_window_bias")
-	values["volume_state"] = marketContextSignal(window, "volume_window_state")
-	values["volume_ratio"] = marketContextNumeric(window, "volume_window_ratio")
-	values["price_volume_confirmation"] = marketContextSignal(window, "price_volume_confirmation")
-	values["vwap_distance_pct"] = marketContextNumeric(window, "vwap_distance_pct")
-	values["rolling_vwap_distance_pct"] = marketContextNumeric(window, "rolling_vwap_distance_pct")
-	values["support_distance_pct"] = marketContextNumeric(window, "support_distance_pct")
-	values["resistance_distance_pct"] = marketContextNumeric(window, "resistance_distance_pct")
-	values["sr_position"] = marketContextSignal(window, "sr_position")
-	values["volume_profile_position"] = marketContextSignal(window, "volume_profile_window_position")
-	values["volume_profile_acceptance"] = marketContextSignal(window, "volume_profile_window_acceptance")
-	values["volume_profile_near_poc"] = marketContextSignal(window, "volume_profile_window_near_poc")
-	values["volume_profile_near_value_edge"] = marketContextSignal(window, "volume_profile_window_near_value_edge")
-	values["volume_profile_rejection_risk"] = marketContextSignal(window, "volume_profile_window_rejection_risk")
-	values["smc_liquidity_sweep"] = marketContextSignal(window, "smc_window_liquidity_sweep")
-	values["smc_sweep_age"] = marketContextNumeric(window, "smc_window_sweep_age")
-	values["liquidity_sweep_type"] = marketContextSignal(window, "liquidity_sweep_type")
-	values["momentum_sd_retest"] = marketContextSignal(window, "momentum_sd_retest")
-	values["premium_discount_zone"] = marketContextSignal(window, "smc_window_premium_discount_zone")
-	values["exhaustion_risk"] = marketContextSignal(window, "exhaustion_risk")
-	values["range_filter_state"] = marketContextSignal(window, "range_filter_window_state")
-	return values
-}
-
-func marketContextSignal(window strategy.IndicatorWindowView, key string) string {
-	value := normalize(latestSignal(window, key))
-	if value == "" {
-		return "missing"
-	}
-	return value
-}
-
-func marketContextNumeric(window strategy.IndicatorWindowView, key string) string {
-	series, ok := window.Numeric(key)
-	if !ok {
-		return "missing"
-	}
-	return formatFloat(series.Latest)
-}
-
-func intradayImpulseTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) (bool, map[string]string) {
-	closeSeries, ok := window.Numeric("close")
-	atrBps := latestNumeric(window, "atr_pct14") * 100
-	minimumMoveBps := math.Max(intradayMinImpulseBps, atrBps*intradayMinImpulseATRMultiplier)
-	maximumMoveBps := math.Min(intradayMaxImpulseBps, atrBps*intradayMaxImpulseATRMultiplier)
-	validRange := maximumMoveBps >= minimumMoveBps
-	moveBps := 0.0
-	if ok && closeSeries.Latest > 0 && closeSeries.Previous > 0 {
-		moveBps = (closeSeries.Latest - closeSeries.Previous) / closeSeries.Previous * 10000
-		if side == strategy.SignalSideSell {
-			moveBps = -moveBps
-		}
-	}
-	expectedPriceVolume := "confirm_up"
-	if side == strategy.SignalSideSell {
-		expectedPriceVolume = "confirm_down"
-	}
-	priceVolume := latestSignal(window, "price_volume_confirmation")
-	priceVolumeOK := priceVolume == expectedPriceVolume
-	impulseOK := ok && validRange && moveBps >= minimumMoveBps && moveBps <= maximumMoveBps && priceVolumeOK
-	values := map[string]string{
-		"intraday_impulse":              strconv.FormatBool(impulseOK),
-		"intraday_close_move_bps":       formatFloat(moveBps),
-		"intraday_minimum_move_bps":     formatFloat(minimumMoveBps),
-		"intraday_maximum_move_bps":     formatFloat(maximumMoveBps),
-		"intraday_impulse_range_valid":  strconv.FormatBool(validRange),
-		"intraday_atr_bps":              formatFloat(atrBps),
-		"intraday_price_volume":         priceVolume,
-		"intraday_price_volume_aligned": strconv.FormatBool(priceVolumeOK),
-	}
-	return impulseOK, values
-}
-
-func continuationSignalKey(side strategy.SignalSide) string {
-	if side == strategy.SignalSideSell {
-		return "dump_window_signal"
-	}
-	return "pump_window_signal"
 }
 
 func previousWickReclaimed(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
@@ -784,73 +639,12 @@ func previousWickReclaimed(window strategy.IndicatorWindowView, side strategy.Si
 	}
 }
 
-func fakeRiskBlocked(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
-	return fakeRiskLevel(window, side) == "high"
-}
-
 func fakeRiskLevel(window strategy.IndicatorWindowView, side strategy.SignalSide) string {
 	key := "pump_window_fake_risk"
 	if side == strategy.SignalSideSell {
 		key = "dump_window_fake_risk"
 	}
 	return latestSignal(window, key)
-}
-
-func shockBreakoutAuthorized(snapshot strategy.Snapshot, side strategy.SignalSide, fakeRisk string, energyConfirmations int) (bool, map[string]string) {
-	window := snapshot.Window
-	structureConfirmed := signalIs(latestSignal(window, "breakout_window_quality"), "improving", "confirmed") ||
-		(truthySignal(window, "smc_window_bos_recent") && latestSignal(window, "smc_window_bias") == biasForSide(side))
-	continuationKey := continuationSignalKey(side)
-	priceVolume := "confirm_up"
-	if side == strategy.SignalSideSell {
-		priceVolume = "confirm_down"
-	}
-	impulseConfirmed := confirmedTruthySignal(window, continuationKey)
-	priceVolumeConfirmed := latestSignal(window, "price_volume_confirmation") == priceVolume
-	volumeExpanded := signalIs(latestSignal(window, "volume_window_state"),
-		"spike", "expanding", "expansion", "breakout", "above_average", "climax")
-	localAligned := localTrendAligned(window, side)
-	fiveAligned, _ := pullbackResolved(snapshot, side)
-
-	values := map[string]string{
-		"structure":              strconv.FormatBool(structureConfirmed),
-		"impulse":                strconv.FormatBool(impulseConfirmed),
-		"impulse_stable_count":   strconv.Itoa(latestSignalStableCount(window, continuationKey)),
-		"price_volume":           strconv.FormatBool(priceVolumeConfirmed),
-		"volume_expanded":        strconv.FormatBool(volumeExpanded),
-		"3m":                     checkReason(!localAligned, "not_aligned", "aligned"),
-		"5m":                     checkReason(!fiveAligned, "not_aligned", "aligned"),
-		"10m":                    "missing",
-		"15m":                    "missing",
-		"30m":                    "missing",
-		"fake_risk":              fakeRisk,
-		"fake_risk_low":          strconv.FormatBool(fakeRisk == "low"),
-		"momentum_confirmations": strconv.Itoa(energyConfirmations),
-		"momentum_required":      "3",
-	}
-	higherTimeframesClear := true
-	higherTimeframesAligned := true
-	for _, interval := range []string{"10m", "15m", "30m"} {
-		timeframe, ok := snapshot.Timeframes[interval]
-		if !ok {
-			higherTimeframesClear = false
-			higherTimeframesAligned = false
-			continue
-		}
-		state := classifyTimeframe(timeframe.Window, side)
-		values[interval] = state
-		if state == "blocking" || state == "missing" {
-			higherTimeframesClear = false
-		}
-		if state != "aligned" {
-			higherTimeframesAligned = false
-		}
-	}
-	values["higher_timeframes_clear"] = strconv.FormatBool(higherTimeframesClear)
-	values["higher_timeframes_aligned"] = strconv.FormatBool(higherTimeframesAligned)
-	return structureConfirmed && impulseConfirmed && priceVolumeConfirmed && volumeExpanded &&
-		localAligned && fiveAligned && higherTimeframesClear && higherTimeframesAligned &&
-		fakeRisk == "low" && energyConfirmations >= 3, values
 }
 
 func localTrendAligned(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
@@ -861,7 +655,7 @@ func localTrendAligned(window strategy.IndicatorWindowView, side strategy.Signal
 		latestSignal(window, "alphatrend_direction") == expectedDirection
 }
 
-func trendConfirmationForEntry(window strategy.IndicatorWindowView, side strategy.SignalSide, shockBreakout bool) (bool, float64, []string) {
+func trendConfirmationForEntry(window strategy.IndicatorWindowView, side strategy.SignalSide) (bool, float64, []string) {
 	direction := directionForSide(side)
 	oppositeDirection := oppositeDirectionForSide(side)
 	oppositeBias := oppositeBias(side)
@@ -892,10 +686,7 @@ func trendConfirmationForEntry(window strategy.IndicatorWindowView, side strateg
 	case "weak":
 		return true, 0, []string{"trend aligned but quality weak"}
 	case "flat", "choppy":
-		if !shockBreakout {
-			return false, 0, []string{"trend quality blocked"}
-		}
-		return true, 0, []string{"trend compression overridden by shock breakout"}
+		return false, 0, []string{"trend quality blocked"}
 	default:
 		return true, 0.16, []string{"trend aligned"}
 	}
@@ -1140,7 +931,7 @@ func higherTimeframeAuthorized(snapshot strategy.Snapshot, side strategy.SignalS
 	default:
 		values["state"] = "neutral"
 	}
-	return values["state"] == "trend", values
+	return values["state"] != "macro_blocked" && values["state"] != "countertrend", values
 }
 
 func pullbackResolved(snapshot strategy.Snapshot, side strategy.SignalSide) (bool, map[string]string) {
@@ -1152,48 +943,6 @@ func pullbackResolved(snapshot strategy.Snapshot, side strategy.SignalSide) (boo
 	state := classifyTimeframe(five.Window, side)
 	values["5m"] = state
 	return state == "aligned", values
-}
-
-func intradayContextAuthorized(snapshot strategy.Snapshot, side strategy.SignalSide) (bool, map[string]string) {
-	values := map[string]string{
-		"5m":      "missing",
-		"10m":     "missing",
-		"15m":     "missing",
-		"30m":     "missing",
-		"state":   "missing",
-		"aligned": "0",
-		"blocked": "0",
-	}
-	five, ok := snapshot.Timeframes["5m"]
-	if !ok {
-		return false, values
-	}
-	fiveState := classifyTimeframe(five.Window, side)
-	values["5m"] = fiveState
-	aligned := 0
-	blocked := 0
-	for _, interval := range []string{"10m", "15m", "30m"} {
-		timeframe, exists := snapshot.Timeframes[interval]
-		if !exists {
-			continue
-		}
-		state := classifyTimeframe(timeframe.Window, side)
-		values[interval] = state
-		switch state {
-		case "aligned":
-			aligned++
-		case "blocking":
-			blocked++
-		}
-	}
-	values["aligned"] = strconv.Itoa(aligned)
-	values["blocked"] = strconv.Itoa(blocked)
-	if fiveState == "blocking" || fiveState == "missing" {
-		values["state"] = "short_term_blocked"
-		return false, values
-	}
-	values["state"] = "intraday"
-	return true, values
 }
 
 func shortTimeframesBlocked(snapshot strategy.Snapshot, side strategy.SignalSide) bool {
@@ -1566,9 +1315,9 @@ func (s *Strategy) exitRules(snapshot strategy.Snapshot, side strategy.SignalSid
 		)
 	}
 	if side == strategy.SignalSideBuy {
-		return buildExitRules(takeProfit(snapshot, "resistance_1"), s.boundedStopLoss(snapshot, side, "supertrend", "support_1"))
+		return buildExitRules(s.costFlooredTakeProfit(snapshot, side, "resistance_1"), s.boundedStopLoss(snapshot, side, "supertrend", "support_1"))
 	}
-	return buildExitRules(takeProfit(snapshot, "support_1"), s.boundedStopLoss(snapshot, side, "supertrend", "resistance_1"))
+	return buildExitRules(s.costFlooredTakeProfit(snapshot, side, "support_1"), s.boundedStopLoss(snapshot, side, "supertrend", "resistance_1"))
 }
 
 func hasExitRule(rules []strategy.ExitRule, ruleType strategy.ExitReasonType) bool {
@@ -1730,6 +1479,27 @@ func takeProfit(snapshot strategy.Snapshot, key string) string {
 	return numericString(snapshot, key)
 }
 
+func (s *Strategy) costFlooredTakeProfit(snapshot strategy.Snapshot, side strategy.SignalSide, key string) string {
+	structural := takeProfit(snapshot, key)
+	if structural == "" || s.config.TakeProfitCostFloorBps <= 0 {
+		return structural
+	}
+	referencePrice, referenceOK := numericValue(snapshot, "close")
+	structuralPrice, structuralErr := strconv.ParseFloat(structural, 64)
+	if !referenceOK || structuralErr != nil || structuralPrice <= 0 {
+		return structural
+	}
+	distance := referencePrice * s.config.TakeProfitCostFloorBps / 10000
+	switch side {
+	case strategy.SignalSideBuy:
+		return formatFloat(math.Max(structuralPrice, referencePrice+distance))
+	case strategy.SignalSideSell:
+		return formatFloat(math.Min(structuralPrice, referencePrice-distance))
+	default:
+		return structural
+	}
+}
+
 func stopLoss(snapshot strategy.Snapshot, primary string, fallback string) string {
 	if value := numericString(snapshot, primary); value != "" {
 		return value
@@ -1840,11 +1610,6 @@ func confirmedTruthySignal(window strategy.IndicatorWindowView, key string) bool
 	return latestSignalStableCount(window, key) == 2
 }
 
-func freshNumericEvent(window strategy.IndicatorWindowView, key string) bool {
-	series, ok := window.Numeric(key)
-	return ok && series.Latest == 0
-}
-
 func truthySignal(window strategy.IndicatorWindowView, key string) bool {
 	return truthy(latestSignal(window, key))
 }
@@ -1903,13 +1668,6 @@ func eventForSide(side strategy.SignalSide) string {
 		return "buy"
 	}
 	return "sell"
-}
-
-func maCrossForSide(side strategy.SignalSide) string {
-	if side == strategy.SignalSideBuy {
-		return "golden"
-	}
-	return "dead"
 }
 
 func biasForSide(side strategy.SignalSide) string {

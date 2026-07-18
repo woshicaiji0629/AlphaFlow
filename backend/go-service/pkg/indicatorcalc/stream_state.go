@@ -100,6 +100,7 @@ type basicIndicatorState struct {
 	waveTrend     streamWaveTrendState
 	moneyFlow     streamMoneyFlowState
 	macd          map[macdConfig]*streamMACDState
+	stc           streamSTCState
 	obv           float64
 	vwapWeighted  float64
 	vwapVolumeSum float64
@@ -160,6 +161,7 @@ func newBasicIndicatorState() *basicIndicatorState {
 		waveTrend:  newStreamWaveTrendState(10, 21),
 		moneyFlow:  streamMoneyFlowState{},
 		macd:       macdStates,
+		stc:        newStreamSTCState(),
 	}
 }
 
@@ -191,6 +193,7 @@ func (s *basicIndicatorState) cloneWithExtraCapacity(extra int) *basicIndicatorS
 		waveTrend:     s.waveTrend.clone(),
 		moneyFlow:     s.moneyFlow,
 		macd:          make(map[macdConfig]*streamMACDState, len(s.macd)),
+		stc:           s.stc,
 		obv:           s.obv,
 		vwapWeighted:  s.vwapWeighted,
 		vwapVolumeSum: s.vwapVolumeSum,
@@ -223,6 +226,7 @@ func (s *basicIndicatorState) append(highs []float64, lows []float64, closes []f
 	for _, state := range s.macd {
 		state.append(closeValue)
 	}
+	s.stc.append(closeValue)
 	for _, period := range s.smaPeriods {
 		if value, ok := sma(closes, period); ok {
 			s.smaValues[period] = value

@@ -203,6 +203,11 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	} else if series, ok := macdSeries(closes, 7, 19, 9); ok {
 		addMACDSeriesFeaturesToSet(numericSet, values, signals, closes, series, "macd_fast")
 	}
+	if current, previous, ok := basic.stcValue(); ok {
+		addSTCFeaturesToSet(numericSet, values, signals, current, previous)
+	} else if current, previous, ok := stcValue(closes); ok {
+		addSTCFeaturesToSet(numericSet, values, signals, current, previous)
+	}
 	addOscillatorFeaturesWithRSIToSet(numericSet, values, signals, highs, lows, closes, rsi14Series, basic)
 	if atr14Series, ok := features.atrSeries(14); ok {
 		addVolatilityCoreFeaturesWithATRToSet(numericSet, values, signals, highs, lows, closes, 14, atr14Series, basic)

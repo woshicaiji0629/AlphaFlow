@@ -210,6 +210,14 @@ func entryMetadata(entryEvent strategy.StrategyEvent) map[string]string {
 			copyDiagnosticValue(metadata, check.Values, "macd", "entry_momentum_macd")
 			copyDiagnosticValue(metadata, check.Values, "price_volume", "entry_momentum_price_volume")
 			copyDiagnosticValue(metadata, check.Values, "volume_expansion", "entry_momentum_volume_expansion")
+		case "stc":
+			copyDiagnosticValue(metadata, check.Values, "value", "entry_stc")
+			copyDiagnosticValue(metadata, check.Values, "previous", "entry_stc_previous")
+			copyDiagnosticValue(metadata, check.Values, "delta", "entry_stc_delta")
+			copyDiagnosticValue(metadata, check.Values, "direction", "entry_stc_direction")
+			copyDiagnosticValue(metadata, check.Values, "zone", "entry_stc_zone")
+			copyDiagnosticValue(metadata, check.Values, "cross", "entry_stc_cross")
+			copyDiagnosticValue(metadata, check.Values, "entry_veto", "entry_stc_veto")
 		}
 	}
 	return metadata

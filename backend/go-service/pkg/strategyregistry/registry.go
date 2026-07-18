@@ -25,23 +25,22 @@ type ParameterDefinition struct {
 
 func Supported() []Definition {
 	items := []Definition{{Code: StrategySupertrend, Parameters: map[string]ParameterDefinition{
-		"entry_profile":                   {Type: "string", Description: "开仓画像：trend 或 intraday_adaptive"},
-		"entry_threshold":                 {Type: "number", Description: "开仓置信度阈值，范围(0,1]"},
-		"max_blocking_timeframes":         {Type: "integer", Description: "允许阻塞的确认周期数量，必须为正整数"},
-		"intraday_min_aligned_timeframes": {Type: "integer", Description: "日内开仓要求的同向确认周期数量，范围[1,4]"},
-		"min_take_profit_bps":             {Type: "number", Description: "最小止盈距离（基点），0 表示禁用"},
-		"min_reward_risk_ratio":           {Type: "number", Description: "最小预期盈亏比，0 表示禁用"},
-		"max_stop_loss_bps":               {Type: "number", Description: "最大固定止损距离（基点），0 表示禁用"},
-		"exit_mode":                       {Type: "string", Description: "全仓出场模式：structure、trailing 或 adaptive"},
-		"trailing_stop_pct":               {Type: "number", Description: "全仓跟踪止损距离（百分比），仅 trailing 模式使用"},
-		"profit_guard_activation_bps":     {Type: "number", Description: "保盈保护激活距离（基点），仅 trailing 模式使用"},
-		"profit_guard_floor_bps":          {Type: "number", Description: "保盈保护最低利润（基点），仅 trailing 模式使用"},
-		"profit_decay_activation_bps":     {Type: "number", Description: "指标衰减退出激活距离（基点），仅 trailing 模式使用"},
-		"round_trip_cost_bps":             {Type: "number", Description: "预估往返手续费与滑点（基点），仅 adaptive 模式使用"},
-		"profit_buffer_bps":               {Type: "number", Description: "覆盖交易成本后的保盈缓冲（基点），仅 adaptive 模式使用"},
-		"micro_profit_quote":              {Type: "number", Description: "弱波动可接受的最小报价货币价差，仅 adaptive 模式使用"},
-		"target_profit_quote":             {Type: "number", Description: "普通波动目标报价货币价差，仅 adaptive 模式使用"},
-		"runner_profit_quote":             {Type: "number", Description: "强波动 runner 起始报价货币价差，仅 adaptive 模式使用"},
+		"entry_threshold":             {Type: "number", Description: "开仓置信度阈值，范围(0,1]"},
+		"max_blocking_timeframes":     {Type: "integer", Description: "允许阻塞的确认周期数量，必须为正整数"},
+		"min_take_profit_bps":         {Type: "number", Description: "最小止盈距离（基点），0 表示禁用"},
+		"take_profit_cost_floor_bps":  {Type: "number", Description: "结构止盈覆盖往返成本后的最小距离（基点），0 表示禁用"},
+		"min_reward_risk_ratio":       {Type: "number", Description: "最小预期盈亏比，0 表示禁用"},
+		"max_stop_loss_bps":           {Type: "number", Description: "最大固定止损距离（基点），0 表示禁用"},
+		"exit_mode":                   {Type: "string", Description: "全仓出场模式：structure、trailing 或 adaptive"},
+		"trailing_stop_pct":           {Type: "number", Description: "全仓跟踪止损距离（百分比），仅 trailing 模式使用"},
+		"profit_guard_activation_bps": {Type: "number", Description: "保盈保护激活距离（基点），仅 trailing 模式使用"},
+		"profit_guard_floor_bps":      {Type: "number", Description: "保盈保护最低利润（基点），仅 trailing 模式使用"},
+		"profit_decay_activation_bps": {Type: "number", Description: "指标衰减退出激活距离（基点），仅 trailing 模式使用"},
+		"round_trip_cost_bps":         {Type: "number", Description: "预估往返手续费与滑点（基点），仅 adaptive 模式使用"},
+		"profit_buffer_bps":           {Type: "number", Description: "覆盖交易成本后的保盈缓冲（基点），仅 adaptive 模式使用"},
+		"micro_profit_quote":          {Type: "number", Description: "弱波动可接受的最小报价货币价差，仅 adaptive 模式使用"},
+		"target_profit_quote":         {Type: "number", Description: "普通波动目标报价货币价差，仅 adaptive 模式使用"},
+		"runner_profit_quote":         {Type: "number", Description: "强波动 runner 起始报价货币价差，仅 adaptive 模式使用"},
 	}}}
 	sort.Slice(items, func(i, j int) bool { return items[i].Code < items[j].Code })
 	return items
@@ -118,8 +117,6 @@ func buildSupertrend(params map[string]string) (strategy.Strategy, error) {
 	config := supertrend.Config{}
 	for key, value := range params {
 		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "entry_profile":
-			config.EntryProfile = strings.ToLower(strings.TrimSpace(value))
 		case "entry_threshold":
 			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 			if err != nil || parsed <= 0 || parsed > 1 {
@@ -132,18 +129,18 @@ func buildSupertrend(params map[string]string) (strategy.Strategy, error) {
 				return nil, fmt.Errorf("max_blocking_timeframes must be a positive integer")
 			}
 			config.MaxBlockingTimeframes = parsed
-		case "intraday_min_aligned_timeframes":
-			parsed, err := strconv.Atoi(strings.TrimSpace(value))
-			if err != nil || parsed < 1 || parsed > 4 {
-				return nil, fmt.Errorf("intraday_min_aligned_timeframes must be an integer in [1,4]")
-			}
-			config.IntradayMinAlignedTimeframes = parsed
 		case "min_take_profit_bps":
 			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 			if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 				return nil, fmt.Errorf("min_take_profit_bps must be a non-negative finite number")
 			}
 			config.MinTakeProfitBps = parsed
+		case "take_profit_cost_floor_bps":
+			parsed, err := parseBasisPoints(value)
+			if err != nil {
+				return nil, fmt.Errorf("take_profit_cost_floor_bps must be a finite number in [0,10000)")
+			}
+			config.TakeProfitCostFloorBps = parsed
 		case "min_reward_risk_ratio":
 			parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 			if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
@@ -216,15 +213,6 @@ func buildSupertrend(params map[string]string) (strategy.Strategy, error) {
 			return nil, fmt.Errorf("unknown parameter %q", key)
 		}
 	}
-	if config.EntryProfile == "" {
-		config.EntryProfile = supertrend.EntryProfileTrend
-	}
-	if config.EntryProfile != supertrend.EntryProfileTrend && config.EntryProfile != supertrend.EntryProfileIntradayAdaptive {
-		return nil, fmt.Errorf("entry_profile must be %q or %q", supertrend.EntryProfileTrend, supertrend.EntryProfileIntradayAdaptive)
-	}
-	if config.EntryProfile != supertrend.EntryProfileIntradayAdaptive && config.IntradayMinAlignedTimeframes > 0 {
-		return nil, fmt.Errorf("intraday_min_aligned_timeframes requires entry_profile %q", supertrend.EntryProfileIntradayAdaptive)
-	}
 	if config.ExitMode == "" {
 		config.ExitMode = supertrend.ExitModeStructure
 	}
@@ -240,7 +228,7 @@ func buildSupertrend(params map[string]string) (strategy.Strategy, error) {
 		if config.TrailingStopPct <= 0 {
 			return nil, fmt.Errorf("trailing_stop_pct must be positive when exit_mode is %q", supertrend.ExitModeTrailing)
 		}
-		if config.MinTakeProfitBps > 0 || config.MinRewardRiskRatio > 0 {
+		if config.MinTakeProfitBps > 0 || config.TakeProfitCostFloorBps > 0 || config.MinRewardRiskRatio > 0 {
 			return nil, fmt.Errorf("fixed take-profit geometry parameters cannot be used with exit_mode %q", supertrend.ExitModeTrailing)
 		}
 		guardActivation := config.ProfitGuardActivationBps
@@ -268,7 +256,7 @@ func buildSupertrend(params map[string]string) (strategy.Strategy, error) {
 		if config.TrailingStopPct > 0 || config.ProfitGuardActivationBps > 0 || config.ProfitGuardFloorBps > 0 || config.ProfitDecayActivationBps > 0 {
 			return nil, fmt.Errorf("fixed trailing parameters cannot be used with exit_mode %q", supertrend.ExitModeAdaptive)
 		}
-		if config.MinTakeProfitBps > 0 || config.MinRewardRiskRatio > 0 {
+		if config.MinTakeProfitBps > 0 || config.TakeProfitCostFloorBps > 0 || config.MinRewardRiskRatio > 0 {
 			return nil, fmt.Errorf("fixed take-profit geometry parameters cannot be used with exit_mode %q", supertrend.ExitModeAdaptive)
 		}
 		micro := defaultPositive(config.MicroProfitQuote, supertrend.DefaultMicroProfitQuote)

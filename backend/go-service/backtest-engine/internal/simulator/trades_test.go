@@ -19,6 +19,7 @@ func TestBuildBacktestTradesPairsEntryAndExit(t *testing.T) {
 		}},
 		{Name: "higher_timeframe_regime", Side: strategy.SignalSideBuy, Values: map[string]string{"state": "trend", "10m": "aligned", "15m": "aligned", "30m": "neutral"}},
 		{Name: "pullback_resolution", Side: strategy.SignalSideBuy, Values: map[string]string{"5m": "aligned"}},
+		{Name: "stc", Side: strategy.SignalSideBuy, Values: map[string]string{"value": "82", "previous": "79", "delta": "3", "direction": "rising", "zone": "overbought", "cross": "up_75", "entry_veto": "false"}},
 		{Name: "entry_mode", Side: strategy.SignalSideSell, Values: map[string]string{"mode": "", "trigger_sources": ""}},
 	}})
 	if err != nil {
@@ -68,6 +69,13 @@ func TestBuildBacktestTradesPairsEntryAndExit(t *testing.T) {
 		"entry_10m_state":            "aligned",
 		"entry_volatility_state":     "expanding",
 		"entry_supertrend_direction": "up",
+		"entry_stc":                  "82",
+		"entry_stc_previous":         "79",
+		"entry_stc_delta":            "3",
+		"entry_stc_direction":        "rising",
+		"entry_stc_zone":             "overbought",
+		"entry_stc_cross":            "up_75",
+		"entry_stc_veto":             "false",
 		"mfe_bps":                    "150",
 		"mae_bps":                    "30",
 		"profit_giveback_bps":        "50",

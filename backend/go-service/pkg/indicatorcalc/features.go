@@ -11,7 +11,7 @@ import (
 
 const (
 	FeatureSchemaVersion = "indicators.v1"
-	CalculatorVersion    = "go-indicator.v1"
+	CalculatorVersion    = "go-indicator.v2"
 )
 
 type FeatureKind string
@@ -51,6 +51,8 @@ var coreFeatureDefinitions = []FeatureDefinition{
 	{Name: "rsi14", Kind: FeatureKindIndicator, ValueType: ValueTypeFloat, Unit: "ratio", Description: "14-period relative strength index", WarmupBars: 14},
 	{Name: "atr14", Kind: FeatureKindIndicator, ValueType: ValueTypeFloat, Unit: "price", Description: "14-period average true range", WarmupBars: 14},
 	{Name: "macd", Kind: FeatureKindIndicator, ValueType: ValueTypeFloat, Description: "MACD line", WarmupBars: 26},
+	{Name: "stc", Kind: FeatureKindIndicator, ValueType: ValueTypeFloat, Unit: "ratio", Description: "Schaff Trend Cycle", WarmupBars: 74},
+	{Name: "stc_direction", Kind: FeatureKindSignal, ValueType: ValueTypeString, Description: "STC slope direction", WarmupBars: 74},
 	{Name: "supertrend", Kind: FeatureKindIndicator, ValueType: ValueTypeFloat, Unit: "price", Description: "Supertrend price level", WarmupBars: 10},
 	{Name: "supertrend_direction", Kind: FeatureKindSignal, ValueType: ValueTypeString, Description: "Supertrend direction", WarmupBars: 10},
 	{Name: "data_quality", Kind: FeatureKindSignal, ValueType: ValueTypeString, Description: "Input data quality classification", WarmupBars: 1},
