@@ -25,8 +25,10 @@ func TestSupportedMatchesBuildableStrategies(t *testing.T) {
 		t.Fatalf("Supported()=%#v", items)
 	}
 	for _, name := range []string{
+		"entry_profile",
 		"entry_threshold",
 		"max_blocking_timeframes",
+		"intraday_min_aligned_timeframes",
 		"min_take_profit_bps",
 		"min_reward_risk_ratio",
 		"max_stop_loss_bps",
@@ -35,6 +37,11 @@ func TestSupportedMatchesBuildableStrategies(t *testing.T) {
 		"profit_guard_activation_bps",
 		"profit_guard_floor_bps",
 		"profit_decay_activation_bps",
+		"round_trip_cost_bps",
+		"profit_buffer_bps",
+		"micro_profit_quote",
+		"target_profit_quote",
+		"runner_profit_quote",
 	} {
 		if _, ok := items[0].Parameters[name]; !ok {
 			t.Fatalf("Supported() missing parameter %q: %#v", name, items[0].Parameters)
@@ -114,6 +121,30 @@ func TestBuildSpecUsesTrailingExitMode(t *testing.T) {
 	}
 }
 
+func TestBuildSpecUsesIntradayAdaptiveProfile(t *testing.T) {
+	item, err := BuildSpec(strategyspec.Spec{
+		Name:    "supertrend",
+		Enabled: true,
+		Params: map[string]string{
+			"entry_profile":                   "intraday_adaptive",
+			"intraday_min_aligned_timeframes": "2",
+			"exit_mode":                       "adaptive",
+			"max_stop_loss_bps":               "70",
+			"round_trip_cost_bps":             "16",
+			"profit_buffer_bps":               "8",
+			"micro_profit_quote":              "10",
+			"target_profit_quote":             "20",
+			"runner_profit_quote":             "30",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildSpec() error = %v", err)
+	}
+	if item.Name() != supertrend.Name {
+		t.Fatalf("strategy name = %q, want %q", item.Name(), supertrend.Name)
+	}
+}
+
 func TestBuildSpecsRejectsDuplicateName(t *testing.T) {
 	_, err := BuildSpecs([]strategyspec.Spec{
 		{Name: "supertrend", Enabled: true},
@@ -137,6 +168,18 @@ func TestBuildSpecRejectsUnknownParameter(t *testing.T) {
 
 func TestBuildSpecRejectsInvalidExitParameter(t *testing.T) {
 	tests := map[string]map[string]string{
+		"unknown entry profile": {"entry_profile": "scalper"},
+		"zero intraday alignment": {
+			"entry_profile":                   "intraday_adaptive",
+			"intraday_min_aligned_timeframes": "0",
+		},
+		"too many intraday alignments": {
+			"entry_profile":                   "intraday_adaptive",
+			"intraday_min_aligned_timeframes": "5",
+		},
+		"intraday alignment without profile": {
+			"intraday_min_aligned_timeframes": "2",
+		},
 		"negative take profit":      {"min_take_profit_bps": "-1"},
 		"infinite take profit":      {"min_take_profit_bps": "+Inf"},
 		"negative ratio":            {"min_reward_risk_ratio": "-0.1"},
@@ -184,6 +227,23 @@ func TestBuildSpecRejectsInvalidExitParameter(t *testing.T) {
 			"trailing_stop_pct":           "0.5",
 			"profit_guard_activation_bps": "60",
 			"profit_decay_activation_bps": "50",
+		},
+		"adaptive quote profits out of order": {
+			"exit_mode":           "adaptive",
+			"micro_profit_quote":  "20",
+			"target_profit_quote": "20",
+			"runner_profit_quote": "30",
+		},
+		"adaptive with fixed trailing distance": {
+			"exit_mode":         "adaptive",
+			"trailing_stop_pct": "0.5",
+		},
+		"adaptive parameter without adaptive mode": {
+			"micro_profit_quote": "10",
+		},
+		"negative adaptive cost": {
+			"exit_mode":           "adaptive",
+			"round_trip_cost_bps": "-1",
 		},
 	}
 	for name, params := range tests {

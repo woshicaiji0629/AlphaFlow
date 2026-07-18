@@ -1,6 +1,7 @@
 package simulator
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -96,7 +97,7 @@ func buildTrade(entryEvent strategy.StrategyEvent, exitEvent strategy.StrategyEv
 		ExitEventID:          exitEvent.EventID,
 		EntryExchangeOrderID: entryEvent.ExchangeOrderID,
 		ExitExchangeOrderID:  exitEvent.ExchangeOrderID,
-		Metadata:             tradeMetadata(exitEvent),
+		Metadata:             tradeMetadata(entryEvent, exitEvent),
 		CreatedAt:            exitEvent.CreatedAt,
 	}
 }
@@ -126,7 +127,7 @@ func tradePairingKey(event strategy.StrategyEvent) string {
 	}, ":")
 }
 
-func tradeMetadata(exitEvent strategy.StrategyEvent) map[string]string {
+func tradeMetadata(entryEvent strategy.StrategyEvent, exitEvent strategy.StrategyEvent) map[string]string {
 	metadata := map[string]string{}
 	for _, key := range []string{
 		"gross_pnl",
@@ -138,15 +139,86 @@ func tradeMetadata(exitEvent strategy.StrategyEvent) map[string]string {
 		"leverage",
 		"rule_reason",
 		"trigger_price",
+		"mfe_price",
+		"mae_price",
+		"mfe_bps",
+		"mae_bps",
+		"mfe_bar_open_time_ms",
+		"mae_bar_open_time_ms",
+		"exit_move_bps",
+		"profit_giveback_bps",
+		"holding_time_ms",
 	} {
 		if value := exitEvent.Metadata[key]; value != "" {
 			metadata[key] = value
 		}
 	}
+	for key, value := range entryMetadata(entryEvent) {
+		metadata[key] = value
+	}
 	if len(metadata) == 0 {
 		return nil
 	}
 	return metadata
+}
+
+func entryMetadata(entryEvent strategy.StrategyEvent) map[string]string {
+	metadata := map[string]string{}
+	if entryEvent.Score > 0 {
+		metadata["entry_score"] = formatSummaryFloat(entryEvent.Score)
+	}
+	if entryEvent.Confidence > 0 {
+		metadata["entry_confidence"] = formatSummaryFloat(entryEvent.Confidence)
+	}
+	payload := entryEvent.Metadata["analysis"]
+	if payload == "" {
+		return metadata
+	}
+	var analysis strategy.Analysis
+	if err := json.Unmarshal([]byte(payload), &analysis); err != nil {
+		metadata["entry_analysis_error"] = err.Error()
+		return metadata
+	}
+	for _, check := range analysis.Checks {
+		if check.Side != "" && check.Side != entryEvent.Side {
+			continue
+		}
+		switch check.Name {
+		case "entry_mode":
+			copyDiagnosticValue(metadata, check.Values, "mode", "entry_mode")
+			copyDiagnosticValue(metadata, check.Values, "trigger_sources", "trigger_source")
+			copyDiagnosticValue(metadata, check.Values, "trigger_source_count", "trigger_source_count")
+			copyDiagnosticValue(metadata, check.Values, "ma_tangled", "entry_ma_tangled")
+			copyDiagnosticValue(metadata, check.Values, "volatility_state", "entry_volatility_state")
+			copyDiagnosticValue(metadata, check.Values, "local_supertrend_direction", "entry_supertrend_direction")
+			copyDiagnosticValue(metadata, check.Values, "local_trend_bias", "entry_trend_bias")
+			copyDiagnosticValue(metadata, check.Values, "local_ma_bias", "entry_ma_bias")
+			copyDiagnosticValue(metadata, check.Values, "local_macd_bias", "entry_macd_bias")
+		case "higher_timeframe_regime":
+			copyDiagnosticValue(metadata, check.Values, "state", "entry_regime_state")
+			copyDiagnosticValue(metadata, check.Values, "10m", "entry_10m_state")
+			copyDiagnosticValue(metadata, check.Values, "15m", "entry_15m_state")
+			copyDiagnosticValue(metadata, check.Values, "30m", "entry_30m_state")
+			copyDiagnosticValue(metadata, check.Values, "10m_stable", "entry_10m_stable")
+		case "pullback_resolution":
+			copyDiagnosticValue(metadata, check.Values, "5m", "entry_5m_state")
+		case "fake_signal_risk":
+			copyDiagnosticValue(metadata, check.Values, "risk", "entry_fake_risk")
+		case "momentum_energy":
+			copyDiagnosticValue(metadata, check.Values, "confirmations", "entry_momentum_confirmations")
+			copyDiagnosticValue(metadata, check.Values, "ma", "entry_momentum_ma")
+			copyDiagnosticValue(metadata, check.Values, "macd", "entry_momentum_macd")
+			copyDiagnosticValue(metadata, check.Values, "price_volume", "entry_momentum_price_volume")
+			copyDiagnosticValue(metadata, check.Values, "volume_expansion", "entry_momentum_volume_expansion")
+		}
+	}
+	return metadata
+}
+
+func copyDiagnosticValue(target map[string]string, values map[string]string, sourceKey string, targetKey string) {
+	if value := values[sourceKey]; value != "" {
+		target[targetKey] = value
+	}
 }
 
 func minFloat(left float64, right float64) float64 {

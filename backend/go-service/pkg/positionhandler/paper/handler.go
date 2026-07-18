@@ -88,7 +88,7 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 		}
 	}
 	if plan == nil {
-		refreshedPosition, err := h.refreshLocalPosition(ctx, input.Target, result.StrategyName, currentPosition, price, barHigh, barLow)
+		refreshedPosition, err := h.refreshLocalPosition(ctx, input.Target, result.StrategyName, currentPosition, price, barHigh, barLow, result.Signal.OpenTime)
 		if err != nil {
 			return err
 		}
@@ -279,6 +279,7 @@ func (h *Handler) refreshLocalPosition(
 	price string,
 	barHigh string,
 	barLow string,
+	barOpenTime int64,
 ) (*strategy.Position, error) {
 	if currentPosition == nil || currentPosition.IsFlat() || price == "" {
 		return currentPosition, nil
@@ -286,9 +287,9 @@ func (h *Handler) refreshLocalPosition(
 	if target.Scope != strategy.PositionScopeBacktest && target.Scope != strategy.PositionScopePaper {
 		return currentPosition, nil
 	}
-	refreshed := position.RefreshPositionExtremes(*currentPosition, price)
+	refreshed := position.RefreshPositionExtremesAt(*currentPosition, price, barOpenTime)
 	if target.Scope == strategy.PositionScopeBacktest && barHigh != "" && barLow != "" {
-		refreshed = position.RefreshPositionBarExtremes(*currentPosition, barHigh, barLow)
+		refreshed = position.RefreshPositionBarExtremesAt(refreshed, barHigh, barLow, barOpenTime)
 	}
 	refreshed.UpdatedAt = h.now()
 	if err := h.positionStore.SavePosition(ctx, refreshed); err != nil {
@@ -373,7 +374,11 @@ func orderFilledEvent(
 	event.Fee = formatFloat(metrics.Fee)
 	event.PnL = formatFloat(metrics.NetPnL)
 	event.Reason = fillReason(report, plan)
-	event.Metadata = exitMetadata(plan, metrics)
+	event.Metadata = mergeMetadata(
+		event.Metadata,
+		exitMetadata(plan, metrics),
+		positionExcursionMetadata(currentPosition, report, plan, result.Signal.OpenTime),
+	)
 	if report.Error != "" {
 		if event.Metadata == nil {
 			event.Metadata = map[string]string{}
@@ -531,6 +536,111 @@ func exitMetadata(plan *strategy.OrderPlan, metrics *Metrics) map[string]string 
 		return nil
 	}
 	return metadata
+}
+
+func positionExcursionMetadata(
+	currentPosition *strategy.Position,
+	report execution.ExecutionReport,
+	plan *strategy.OrderPlan,
+	barOpenTime int64,
+) map[string]string {
+	if currentPosition == nil || currentPosition.IsFlat() {
+		return nil
+	}
+	entryPrice, entryOK := parseFloat(currentPosition.EntryPrice)
+	exitPrice, exitOK := parseFloat(report.AveragePrice)
+	if !entryOK || !exitOK || entryPrice <= 0 || exitPrice <= 0 {
+		return nil
+	}
+
+	highestPrice := entryPrice
+	highestTime := currentPosition.HighestPriceBarOpenTime
+	if value, ok := parseFloat(currentPosition.HighestPrice); ok && value > highestPrice {
+		highestPrice = value
+	}
+	lowestPrice := entryPrice
+	lowestTime := currentPosition.LowestPriceBarOpenTime
+	if value, ok := parseFloat(currentPosition.LowestPrice); ok && value < lowestPrice {
+		lowestPrice = value
+	}
+	if plan != nil && plan.TriggeredRule != nil && plan.TriggeredRule.Type == strategy.ExitReasonTrailingStop {
+		if reference, ok := parseFloat(plan.TriggeredRule.Metadata["reference_price"]); ok {
+			switch currentPosition.Side {
+			case strategy.PositionSideLong:
+				if reference > highestPrice {
+					highestPrice = reference
+					highestTime = barOpenTime
+				}
+			case strategy.PositionSideShort:
+				if reference < lowestPrice {
+					lowestPrice = reference
+					lowestTime = barOpenTime
+				}
+			}
+		}
+	}
+	if exitPrice > highestPrice {
+		highestPrice = exitPrice
+		highestTime = barOpenTime
+	}
+	if exitPrice < lowestPrice {
+		lowestPrice = exitPrice
+		lowestTime = barOpenTime
+	}
+
+	var mfePrice, maePrice, mfeBps, maeBps, exitMoveBps float64
+	var mfeTime, maeTime int64
+	switch currentPosition.Side {
+	case strategy.PositionSideLong:
+		mfePrice, mfeTime = highestPrice, highestTime
+		maePrice, maeTime = lowestPrice, lowestTime
+		mfeBps = (mfePrice - entryPrice) / entryPrice * 10000
+		maeBps = (entryPrice - maePrice) / entryPrice * 10000
+		exitMoveBps = (exitPrice - entryPrice) / entryPrice * 10000
+	case strategy.PositionSideShort:
+		mfePrice, mfeTime = lowestPrice, lowestTime
+		maePrice, maeTime = highestPrice, highestTime
+		mfeBps = (entryPrice - mfePrice) / entryPrice * 10000
+		maeBps = (maePrice - entryPrice) / entryPrice * 10000
+		exitMoveBps = (entryPrice - exitPrice) / entryPrice * 10000
+	default:
+		return nil
+	}
+	metadata := map[string]string{
+		"mfe_price":           formatFloat(mfePrice),
+		"mae_price":           formatFloat(maePrice),
+		"mfe_bps":             formatFloat(mfeBps),
+		"mae_bps":             formatFloat(maeBps),
+		"exit_move_bps":       formatFloat(exitMoveBps),
+		"profit_giveback_bps": formatFloat(math.Max(mfeBps-exitMoveBps, 0)),
+	}
+	if mfeTime > 0 {
+		metadata["mfe_bar_open_time_ms"] = strconv.FormatInt(mfeTime, 10)
+	}
+	if maeTime > 0 {
+		metadata["mae_bar_open_time_ms"] = strconv.FormatInt(maeTime, 10)
+	}
+	if report.UpdatedAt >= currentPosition.EntryTime && currentPosition.EntryTime > 0 {
+		metadata["holding_time_ms"] = strconv.FormatInt(report.UpdatedAt-currentPosition.EntryTime, 10)
+	}
+	return metadata
+}
+
+func mergeMetadata(items ...map[string]string) map[string]string {
+	size := 0
+	for _, item := range items {
+		size += len(item)
+	}
+	if size == 0 {
+		return nil
+	}
+	merged := make(map[string]string, size)
+	for _, item := range items {
+		for key, value := range item {
+			merged[key] = value
+		}
+	}
+	return merged
 }
 
 func normalizedRebatePct(value float64) float64 {

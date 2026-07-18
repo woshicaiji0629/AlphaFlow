@@ -133,7 +133,7 @@ func TestRefreshPositionExtremesUpdatesTrailingReference(t *testing.T) {
 		},
 	}
 
-	refreshed := RefreshPositionExtremes(currentPosition, "120")
+	refreshed := RefreshPositionExtremesAt(currentPosition, "120", 2000)
 
 	if refreshed.HighestPrice != "120" {
 		t.Fatalf("highest price = %q, want 120", refreshed.HighestPrice)
@@ -143,6 +143,28 @@ func TestRefreshPositionExtremesUpdatesTrailingReference(t *testing.T) {
 	}
 	if refreshed.ExitRules[0].Metadata["reference_price"] != "120" {
 		t.Fatalf("reference price = %q, want 120", refreshed.ExitRules[0].Metadata["reference_price"])
+	}
+	if refreshed.HighestPriceBarOpenTime != 2000 {
+		t.Fatalf("highest price bar open time = %d, want 2000", refreshed.HighestPriceBarOpenTime)
+	}
+}
+
+func TestRefreshPositionBarExtremesPreservesEachExtremeTime(t *testing.T) {
+	currentPosition := strategy.Position{
+		Side:                    strategy.PositionSideShort,
+		HighestPrice:            "105",
+		LowestPrice:             "95",
+		HighestPriceBarOpenTime: 1000,
+		LowestPriceBarOpenTime:  1000,
+	}
+
+	refreshed := RefreshPositionBarExtremesAt(currentPosition, "104", "90", 2000)
+
+	if refreshed.HighestPrice != "105" || refreshed.HighestPriceBarOpenTime != 1000 {
+		t.Fatalf("highest extreme = %s/%d, want 105/1000", refreshed.HighestPrice, refreshed.HighestPriceBarOpenTime)
+	}
+	if refreshed.LowestPrice != "90" || refreshed.LowestPriceBarOpenTime != 2000 {
+		t.Fatalf("lowest extreme = %s/%d, want 90/2000", refreshed.LowestPrice, refreshed.LowestPriceBarOpenTime)
 	}
 }
 
@@ -265,6 +287,46 @@ func TestManagerGuardedTrailingLetsLargeWinnerRunToPeakTrail(t *testing.T) {
 		t.Fatalf("plan = %#v, want peak trailing exit", plan)
 	}
 	assertPriceClose(t, fill, 119.4)
+}
+
+func TestAdaptiveProtectedTrailWidensRunnerWithoutLoweringActivationAnchor(t *testing.T) {
+	tests := []struct {
+		name      string
+		side      strategy.PositionSide
+		reference float64
+		want      float64
+	}{
+		{name: "long", side: strategy.PositionSideLong, reference: 102, want: 100.98},
+		{name: "short", side: strategy.PositionSideShort, reference: 98, want: 98.98},
+	}
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			current := strategy.Position{Side: item.side, EntryPrice: "100"}
+			trigger, active := protectedTrailingTriggerPrice(current, adaptiveTrailingRule(), item.reference, 0.5)
+			if !active || math.Abs(trigger-item.want) > 1e-9 {
+				t.Fatalf("trigger/active = %v/%v, want %v/true", trigger, active, item.want)
+			}
+		})
+	}
+
+	current := strategy.Position{Side: strategy.PositionSideLong, EntryPrice: "100"}
+	trigger, active := protectedTrailingTriggerPrice(current, adaptiveTrailingRule(), 101, 0.5)
+	if !active || math.Abs(trigger-100.495) > 1e-9 {
+		t.Fatalf("runner activation anchor = %v/%v, want 100.495/true", trigger, active)
+	}
+}
+
+func adaptiveTrailingRule() strategy.ExitRule {
+	return strategy.ExitRule{
+		Type: strategy.ExitReasonTrailingStop,
+		Metadata: map[string]string{
+			"profit_guard_activation_bps": "30",
+			"profit_guard_floor_bps":      "16",
+			"adaptive_trailing":           "true",
+			"runner_activation_bps":       "100",
+			"runner_trail_pct":            "1",
+		},
+	}
 }
 
 func guardedTrailingRule(reference string) strategy.ExitRule {

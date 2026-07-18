@@ -338,7 +338,7 @@ func protectedTrailingTriggerPrice(
 		return 0, false
 	}
 
-	trailTrigger := trailingTriggerPrice(currentPosition.Side, referencePrice, trailPct)
+	trailTrigger := protectedTrailPrice(currentPosition, rule, entryPrice, referencePrice, trailPct)
 	switch currentPosition.Side {
 	case strategy.PositionSideLong:
 		if referencePrice < entryPrice*(1+activationBps/10000) {
@@ -363,21 +363,79 @@ func protectedTrailingTriggerPrice(
 	}
 }
 
+func protectedTrailPrice(
+	currentPosition strategy.Position,
+	rule strategy.ExitRule,
+	entryPrice float64,
+	referencePrice float64,
+	baseTrailPct float64,
+) float64 {
+	baseTrigger := trailingTriggerPrice(currentPosition.Side, referencePrice, baseTrailPct)
+	if rule.Metadata["adaptive_trailing"] != "true" {
+		return baseTrigger
+	}
+	runnerActivationBps, activationOK := parseFloat(rule.Metadata["runner_activation_bps"])
+	runnerTrailPct, trailOK := parseFloat(rule.Metadata["runner_trail_pct"])
+	if !activationOK || !trailOK || runnerActivationBps <= 0 || runnerTrailPct <= baseTrailPct {
+		return baseTrigger
+	}
+	switch currentPosition.Side {
+	case strategy.PositionSideLong:
+		runnerReference := entryPrice * (1 + runnerActivationBps/10000)
+		if referencePrice < runnerReference {
+			return baseTrigger
+		}
+		anchor := trailingTriggerPrice(currentPosition.Side, runnerReference, baseTrailPct)
+		runnerTrigger := trailingTriggerPrice(currentPosition.Side, referencePrice, runnerTrailPct)
+		if anchor > runnerTrigger {
+			return anchor
+		}
+		return runnerTrigger
+	case strategy.PositionSideShort:
+		runnerReference := entryPrice * (1 - runnerActivationBps/10000)
+		if referencePrice > runnerReference {
+			return baseTrigger
+		}
+		anchor := trailingTriggerPrice(currentPosition.Side, runnerReference, baseTrailPct)
+		runnerTrigger := trailingTriggerPrice(currentPosition.Side, referencePrice, runnerTrailPct)
+		if anchor < runnerTrigger {
+			return anchor
+		}
+		return runnerTrigger
+	default:
+		return baseTrigger
+	}
+}
+
 func RefreshPositionExtremes(currentPosition strategy.Position, price string) strategy.Position {
+	return RefreshPositionExtremesAt(currentPosition, price, 0)
+}
+
+func RefreshPositionExtremesAt(currentPosition strategy.Position, price string, barOpenTime int64) strategy.Position {
 	value, ok := parseFloat(price)
 	if !ok {
 		return currentPosition
 	}
 	highest := value
-	if current, ok := parseFloat(currentPosition.HighestPrice); ok && current > highest {
+	highestTime := barOpenTime
+	if current, ok := parseFloat(currentPosition.HighestPrice); ok && current >= highest {
 		highest = current
+		if current > value || currentPosition.HighestPriceBarOpenTime > 0 {
+			highestTime = currentPosition.HighestPriceBarOpenTime
+		}
 	}
 	lowest := value
-	if current, ok := parseFloat(currentPosition.LowestPrice); ok && current < lowest {
+	lowestTime := barOpenTime
+	if current, ok := parseFloat(currentPosition.LowestPrice); ok && current <= lowest {
 		lowest = current
+		if current < value || currentPosition.LowestPriceBarOpenTime > 0 {
+			lowestTime = currentPosition.LowestPriceBarOpenTime
+		}
 	}
 	currentPosition.HighestPrice = formatFloat(highest)
 	currentPosition.LowestPrice = formatFloat(lowest)
+	currentPosition.HighestPriceBarOpenTime = highestTime
+	currentPosition.LowestPriceBarOpenTime = lowestTime
 	for index := range currentPosition.ExitRules {
 		currentPosition.ExitRules[index] = refreshExitRule(currentPosition.Side, currentPosition.ExitRules[index], highest, lowest)
 	}
@@ -385,8 +443,12 @@ func RefreshPositionExtremes(currentPosition strategy.Position, price string) st
 }
 
 func RefreshPositionBarExtremes(currentPosition strategy.Position, high string, low string) strategy.Position {
-	currentPosition = RefreshPositionExtremes(currentPosition, high)
-	return RefreshPositionExtremes(currentPosition, low)
+	return RefreshPositionBarExtremesAt(currentPosition, high, low, 0)
+}
+
+func RefreshPositionBarExtremesAt(currentPosition strategy.Position, high string, low string, barOpenTime int64) strategy.Position {
+	currentPosition = RefreshPositionExtremesAt(currentPosition, high, barOpenTime)
+	return RefreshPositionExtremesAt(currentPosition, low, barOpenTime)
 }
 
 func flatPosition() strategy.Position {

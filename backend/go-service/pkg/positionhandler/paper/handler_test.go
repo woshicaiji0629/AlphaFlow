@@ -115,6 +115,9 @@ func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
 	if currentPosition.EntryPrice != "101" {
 		t.Fatalf("entry price = %q, want 101", currentPosition.EntryPrice)
 	}
+	if currentPosition.HighestPriceBarOpenTime != 1000 || currentPosition.LowestPriceBarOpenTime != 1000 {
+		t.Fatalf("position extreme times = %d/%d, want 1000/1000", currentPosition.HighestPriceBarOpenTime, currentPosition.LowestPriceBarOpenTime)
+	}
 	events := store.Events()
 	if got, want := len(events), 3; got != want {
 		t.Fatalf("events len = %d, want %d", got, want)
@@ -128,6 +131,12 @@ func TestHandlerOpensPaperPositionAndAppendsEvents(t *testing.T) {
 	}
 	if len(analysis.Checks) != 1 || analysis.Checks[0].Name != "trend" {
 		t.Fatalf("event analysis = %#v", analysis)
+	}
+	if err := json.Unmarshal([]byte(events[2].Metadata["analysis"]), &analysis); err != nil {
+		t.Fatalf("decode filled event analysis: %v", err)
+	}
+	if len(analysis.Checks) != 1 || analysis.Checks[0].Name != "trend" {
+		t.Fatalf("filled event analysis = %#v", analysis)
 	}
 }
 
@@ -236,15 +245,20 @@ func TestHandlerBacktestStopUsesIntrabarTriggerPrice(t *testing.T) {
 	store := position.NewMemoryStore()
 	target := strategy.Target{Scope: strategy.PositionScopeBacktest, RunID: "run-1", Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "3m"}
 	currentPosition := strategy.Position{
-		Scope:        target.Scope,
-		RunID:        target.RunID,
-		Exchange:     target.Exchange,
-		Market:       target.Market,
-		Symbol:       target.Symbol,
-		StrategyName: "supertrend",
-		Side:         strategy.PositionSideLong,
-		Size:         1,
-		EntryPrice:   "100",
+		Scope:                   target.Scope,
+		RunID:                   target.RunID,
+		Exchange:                target.Exchange,
+		Market:                  target.Market,
+		Symbol:                  target.Symbol,
+		StrategyName:            "supertrend",
+		Side:                    strategy.PositionSideLong,
+		Size:                    1,
+		EntryPrice:              "100",
+		HighestPrice:            "105",
+		LowestPrice:             "95",
+		HighestPriceBarOpenTime: 500,
+		LowestPriceBarOpenTime:  600,
+		EntryTime:               500,
 		ExitRules: []strategy.ExitRule{{
 			Type:         strategy.ExitReasonStopLoss,
 			Reason:       "strategy stop loss",
@@ -294,5 +308,55 @@ func TestHandlerBacktestStopUsesIntrabarTriggerPrice(t *testing.T) {
 	}
 	if filled.Metadata["trigger_price"] != "90" {
 		t.Fatalf("trigger price = %q, want 90", filled.Metadata["trigger_price"])
+	}
+	for key, want := range map[string]string{
+		"mfe_price":            "105",
+		"mae_price":            "90",
+		"mfe_bps":              "500",
+		"mae_bps":              "1000",
+		"exit_move_bps":        "-1000",
+		"profit_giveback_bps":  "1500",
+		"mfe_bar_open_time_ms": "500",
+		"mae_bar_open_time_ms": "1000",
+		"holding_time_ms":      "1500",
+	} {
+		if filled.Metadata[key] != want {
+			t.Fatalf("%s = %q, want %q metadata=%#v", key, filled.Metadata[key], want, filled.Metadata)
+		}
+	}
+}
+
+func TestPositionExcursionMetadataUsesTrailingReferenceForShort(t *testing.T) {
+	currentPosition := &strategy.Position{
+		Side:                    strategy.PositionSideShort,
+		Size:                    1,
+		EntryPrice:              "100",
+		HighestPrice:            "106",
+		LowestPrice:             "90",
+		HighestPriceBarOpenTime: 1200,
+		LowestPriceBarOpenTime:  1400,
+		EntryTime:               1000,
+	}
+	plan := &strategy.OrderPlan{TriggeredRule: &strategy.ExitRule{
+		Type:     strategy.ExitReasonTrailingStop,
+		Metadata: map[string]string{"reference_price": "88"},
+	}}
+
+	metadata := positionExcursionMetadata(currentPosition, execution.ExecutionReport{AveragePrice: "92", UpdatedAt: 3000}, plan, 2000)
+
+	for key, want := range map[string]string{
+		"mfe_price":            "88",
+		"mae_price":            "106",
+		"mfe_bps":              "1200",
+		"mae_bps":              "600",
+		"exit_move_bps":        "800",
+		"profit_giveback_bps":  "400",
+		"mfe_bar_open_time_ms": "2000",
+		"mae_bar_open_time_ms": "1200",
+		"holding_time_ms":      "2000",
+	} {
+		if metadata[key] != want {
+			t.Fatalf("%s = %q, want %q metadata=%#v", key, metadata[key], want, metadata)
+		}
 	}
 }

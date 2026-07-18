@@ -32,7 +32,7 @@ func (a *Applier) Apply(ctx context.Context, intent execution.OrderIntent, repor
 	}
 	switch intent.Action {
 	case execution.OrderActionOpen:
-		return a.store.SavePosition(ctx, strategy.Position{Scope: strategy.PositionScope(intent.Scope), RunID: intent.RunID, Exchange: intent.Exchange, Market: intent.Market, Symbol: intent.Symbol, Account: intent.Account, StrategyName: intent.StrategyName, Mode: strategy.ExchangePositionModeNet, PositionSide: strategy.ExchangePositionSide(intent.PositionSide), Side: positionSide(intent), Size: report.FilledQuantity, InitialSize: report.FilledQuantity, EntryPrice: report.AveragePrice, HighestPrice: report.AveragePrice, LowestPrice: report.AveragePrice, ExitRules: append([]strategy.ExitRule(nil), intent.ExitRules...), EntryTime: report.UpdatedAt, EntryReason: intent.Reason, UpdatedAt: report.UpdatedAt})
+		return a.store.SavePosition(ctx, strategy.Position{Scope: strategy.PositionScope(intent.Scope), RunID: intent.RunID, Exchange: intent.Exchange, Market: intent.Market, Symbol: intent.Symbol, Account: intent.Account, StrategyName: intent.StrategyName, Mode: strategy.ExchangePositionModeNet, PositionSide: strategy.ExchangePositionSide(intent.PositionSide), Side: positionSide(intent), Size: report.FilledQuantity, InitialSize: report.FilledQuantity, EntryPrice: report.AveragePrice, HighestPrice: report.AveragePrice, LowestPrice: report.AveragePrice, HighestPriceBarOpenTime: intent.BarOpenTime, LowestPriceBarOpenTime: intent.BarOpenTime, ExitRules: append([]strategy.ExitRule(nil), intent.ExitRules...), EntryTime: report.UpdatedAt, EntryReason: intent.Reason, UpdatedAt: report.UpdatedAt})
 	case execution.OrderActionClose:
 		return a.store.DeletePosition(ctx, key)
 	case execution.OrderActionReduce:

@@ -34,8 +34,90 @@ func TestEvaluateReturnsBuyWhenLongSetupConfirmed(t *testing.T) {
 	if check, ok := diagnostic(result.Analysis.Checks, "entry_threshold", strategy.SignalSideBuy); !ok || check.Status != strategy.DiagnosticStatusPass {
 		t.Fatalf("buy threshold diagnostic = %#v", check)
 	}
+	modeCheck, ok := diagnostic(result.Analysis.Checks, "entry_mode", strategy.SignalSideBuy)
+	if !ok || modeCheck.Values["mode"] != "trend_continuation" || modeCheck.Values["trigger_sources"] != "trend_event" || modeCheck.Values["trigger_source_count"] != "1" {
+		t.Fatalf("buy entry mode diagnostic = %#v", modeCheck)
+	}
 	if check, ok := diagnostic(result.Analysis.Checks, "exit_geometry", strategy.SignalSideBuy); ok {
 		t.Fatalf("disabled exit geometry diagnostic = %#v, want absent", check)
+	}
+}
+
+func TestStandardEntryTriggerSourcesRecordsAllMatchingSourcesInStableOrder(t *testing.T) {
+	got := window(strategy.SignalSideBuy, map[string]string{
+		"ma_window_cross_event": "golden",
+		"smc_window_bos_recent": "true",
+		"smc_window_bias":       "bull",
+	})
+	got.Signals["supertrend_direction"] = strategy.SignalSeries{Latest: "up", Changed: true, StableCount: 1}
+	got.Values["low"] = strategy.NumericSeries{Previous: 94}
+	got.Values["close"] = strategy.NumericSeries{Previous: 96}
+	got.Values["supertrend"] = strategy.NumericSeries{Latest: 95, Previous: 95}
+	got.Values["ma_window_cross_age"] = strategy.NumericSeries{Latest: 0}
+	got.Values["smc_window_bos_age"] = strategy.NumericSeries{Latest: 0}
+
+	sources := standardEntryTriggerSources(got, strategy.SignalSideBuy)
+	if got, want := fmt.Sprint(sources), "[wick_reclaim supertrend_flip trend_event ma_cross smc_bos]"; got != want {
+		t.Fatalf("trigger sources = %s, want %s", got, want)
+	}
+	values := entryTriggerValues(got, strategy.SignalSideBuy, sources)
+	if values["standard_trigger_sources"] != "wick_reclaim,supertrend_flip,trend_event,ma_cross,smc_bos" ||
+		values["standard_trigger_count"] != "5" {
+		t.Fatalf("trigger values = %#v", values)
+	}
+}
+
+func TestEntryBlocksSMCBOSAsOnlyTrendContinuationTrigger(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, map[string]string{
+		"smc_window_bos_recent": "true",
+		"smc_window_bias":       "bull",
+	})
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["smc_window_bos_age"] = strategy.NumericSeries{Latest: 0}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+
+	item := New(Config{})
+	decision := item.entry(got, strategy.SignalSideBuy)
+	if !decision.blocked {
+		t.Fatalf("opening decision = %#v, want blocked", decision)
+	}
+	check, ok := diagnostic(decision.checks, "entry_trigger", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked || check.Reason != "buy trigger not authorized" ||
+		check.Values["standard_trigger_sources"] != "smc_bos" ||
+		check.Values["standard_trigger_authorized"] != "false" ||
+		check.Values["smc_bos_only"] != "true" {
+		t.Fatalf("opening trigger diagnostic = %#v", check)
+	}
+
+	reversal := item.reversalEntry(got, strategy.SignalSideBuy)
+	if reversal.blocked {
+		t.Fatalf("reversal decision = %#v, want legacy trigger semantics", reversal)
+	}
+	modeCheck, ok := diagnostic(reversal.checks, "entry_mode", strategy.SignalSideBuy)
+	if !ok || modeCheck.Status != strategy.DiagnosticStatusPass || modeCheck.Values["mode"] != "trend_continuation" ||
+		modeCheck.Values["trigger_sources"] != "smc_bos" {
+		t.Fatalf("reversal entry mode diagnostic = %#v", modeCheck)
+	}
+}
+
+func TestStandardTrendContinuationTriggerRequiresNonSMCBOSSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources []string
+		want    bool
+	}{
+		{name: "none", want: false},
+		{name: "smc only", sources: []string{"smc_bos"}, want: false},
+		{name: "trend event", sources: []string{"trend_event"}, want: true},
+		{name: "trend and smc", sources: []string{"trend_event", "smc_bos"}, want: true},
+		{name: "wick reclaim", sources: []string{"wick_reclaim"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := standardTrendContinuationTriggered(tt.sources); got != tt.want {
+				t.Fatalf("standardTrendContinuationTriggered(%v) = %v, want %v", tt.sources, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -595,6 +677,258 @@ func TestEvaluateReturnsSellWhenShortTrendAdvances(t *testing.T) {
 	}
 }
 
+func TestIntradayAdaptiveProfileUsesFreshImpulseWithSoftHigherTimeframes(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2002, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+	got.Timeframes["5m"] = neutralTimeframe(strategy.SignalSideBuy)
+	got.Timeframes["10m"] = timeframe(strategy.SignalSideBuy, nil)
+	got.Timeframes["15m"] = neutralTimeframe(strategy.SignalSideBuy)
+	got.Timeframes["30m"] = neutralTimeframe(strategy.SignalSideBuy)
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideBuy {
+		t.Fatalf("side = %q, want buy", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "entry_mode", strategy.SignalSideBuy)
+	if !ok || check.Values["mode"] != "intraday_event" ||
+		check.Values["trigger_sources"] != "intraday_impulse" {
+		t.Fatalf("intraday entry mode diagnostic = %#v", check)
+	}
+}
+
+func TestIntradayAdaptiveProfileRecordsMarketContextOnHold(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2000.4, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Values["volume_window_ratio"] = strategy.NumericSeries{Latest: 1.4}
+	got.Window.Values["vwap_distance_pct"] = strategy.NumericSeries{Latest: -0.3}
+	got.Window.Values["rolling_vwap_distance_pct"] = strategy.NumericSeries{Latest: -0.2}
+	got.Window.Values["support_distance_pct"] = strategy.NumericSeries{Latest: 0.15}
+	got.Window.Values["resistance_distance_pct"] = strategy.NumericSeries{Latest: 0.8}
+	got.Window.Values["smc_window_sweep_age"] = strategy.NumericSeries{Latest: 0}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+	got.Window.Signals["volatility_window_state"] = strategy.SignalSeries{Latest: "normal"}
+	got.Window.Signals["channel_volatility_state"] = strategy.SignalSeries{Latest: "contracting"}
+	got.Window.Signals["channel_position_state"] = strategy.SignalSeries{Latest: "lower"}
+	got.Window.Signals["channel_breakout_quality"] = strategy.SignalSeries{Latest: "weak"}
+	got.Window.Signals["channel_window_bias"] = strategy.SignalSeries{Latest: "bull"}
+	got.Window.Signals["volume_profile_window_position"] = strategy.SignalSeries{Latest: "inside_value_area"}
+	got.Window.Signals["volume_profile_window_acceptance"] = strategy.SignalSeries{Latest: "inside_value_area"}
+	got.Window.Signals["volume_profile_window_near_poc"] = strategy.SignalSeries{Latest: "false"}
+	got.Window.Signals["volume_profile_window_near_value_edge"] = strategy.SignalSeries{Latest: "true"}
+	got.Window.Signals["volume_profile_window_rejection_risk"] = strategy.SignalSeries{Latest: "true"}
+	got.Window.Signals["smc_window_liquidity_sweep"] = strategy.SignalSeries{Latest: "true"}
+	got.Window.Signals["liquidity_sweep_type"] = strategy.SignalSeries{Latest: "wick_low"}
+	got.Window.Signals["momentum_sd_retest"] = strategy.SignalSeries{Latest: "demand_retest"}
+	got.Window.Signals["smc_window_premium_discount_zone"] = strategy.SignalSeries{Latest: "discount"}
+	got.Window.Signals["exhaustion_risk"] = strategy.SignalSeries{Latest: "medium"}
+	got.Window.Signals["range_filter_window_state"] = strategy.SignalSeries{Latest: "up"}
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold while recording context", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "intraday_market_context", strategy.SignalSideHold)
+	if !ok || check.Status != strategy.DiagnosticStatusInfo {
+		t.Fatalf("market context diagnostic = %#v", check)
+	}
+	closeSeries := got.Window.Values["close"]
+	moveBps := (closeSeries.Latest - closeSeries.Previous) / closeSeries.Previous * 10000
+	wantValues := map[string]string{
+		"intraday_atr_bps":               "20",
+		"intraday_close_move_bps":        formatFloat(moveBps),
+		"intraday_minimum_move_bps":      "8",
+		"intraday_maximum_move_bps":      "15",
+		"volatility_state":               "normal",
+		"channel_volatility_state":       "contracting",
+		"channel_position_state":         "lower",
+		"volume_ratio":                   "1.4",
+		"vwap_distance_pct":              "-0.3",
+		"support_distance_pct":           "0.15",
+		"volume_profile_near_value_edge": "true",
+		"volume_profile_rejection_risk":  "true",
+		"smc_liquidity_sweep":            "true",
+		"smc_sweep_age":                  "0",
+		"liquidity_sweep_type":           "wick_low",
+		"premium_discount_zone":          "discount",
+		"price_volume_confirmation":      "confirm_up",
+		"range_filter_state":             "up",
+	}
+	for key, want := range wantValues {
+		if check.Values[key] != want {
+			t.Fatalf("context[%q] = %q, want %q; values=%#v", key, check.Values[key], want, check.Values)
+		}
+	}
+	for _, removed := range []string{"intraday_impulse", "intraday_price_volume_aligned"} {
+		if _, ok := check.Values[removed]; ok {
+			t.Fatalf("context contains direction-specific field %q: %#v", removed, check.Values)
+		}
+	}
+}
+
+func TestIntradayAdaptiveProfileRecordsMarketContextWhilePositionOpen(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	position := &strategy.Position{Side: strategy.PositionSideLong, Size: 1, EntryPrice: "100"}
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, position)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "intraday_market_context", strategy.SignalSideHold)
+	if !ok || check.Status != strategy.DiagnosticStatusInfo {
+		t.Fatalf("market context diagnostic = %#v", check)
+	}
+}
+
+func TestDefaultEntryProfileDoesNotRecordIntradayMarketContext(t *testing.T) {
+	result, err := New(Config{}).Evaluate(context.Background(), snapshot(strategy.SignalSideBuy, nil), nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if check, ok := diagnostic(result.Analysis.Checks, "intraday_market_context", strategy.SignalSideHold); ok {
+		t.Fatalf("default profile market context diagnostic = %#v, want absent", check)
+	}
+}
+
+func TestIntradayAdaptiveProfileDoesNotTradeContinuationWithoutFreshImpulse(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2000.4, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold without fresh impulse", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "entry_trigger", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked ||
+		check.Values["intraday_environment_authorized"] != "true" ||
+		check.Values["intraday_impulse"] != "false" {
+		t.Fatalf("intraday trigger diagnostic = %#v", check)
+	}
+}
+
+func TestIntradayAdaptiveProfileRejectsExhaustedImpulse(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2005, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold for exhausted impulse", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "entry_trigger", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked ||
+		check.Values["intraday_impulse"] != "false" ||
+		check.Values["intraday_close_move_bps"] != "25" ||
+		check.Values["intraday_maximum_move_bps"] != "15" {
+		t.Fatalf("intraday trigger diagnostic = %#v", check)
+	}
+}
+
+func TestIntradayAdaptiveProfileRequiresConfiguredAlignedTimeframes(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2002, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+	got.Timeframes["5m"] = neutralTimeframe(strategy.SignalSideBuy)
+	got.Timeframes["10m"] = timeframe(strategy.SignalSideBuy, nil)
+	got.Timeframes["15m"] = neutralTimeframe(strategy.SignalSideBuy)
+	got.Timeframes["30m"] = neutralTimeframe(strategy.SignalSideBuy)
+
+	blocked, err := New(Config{
+		EntryProfile:                 EntryProfileIntradayAdaptive,
+		IntradayMinAlignedTimeframes: 2,
+	}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if blocked.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold with only one aligned timeframe", blocked.Signal.Side)
+	}
+	check, ok := diagnostic(blocked.Analysis.Checks, "higher_timeframe_regime", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked ||
+		check.Values["aligned"] != "1" || check.Values["required_aligned"] != "2" {
+		t.Fatalf("intraday timeframe diagnostic = %#v", check)
+	}
+
+	allowed, err := New(Config{
+		EntryProfile:                 EntryProfileIntradayAdaptive,
+		IntradayMinAlignedTimeframes: 1,
+	}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if allowed.Signal.Side != strategy.SignalSideBuy {
+		t.Fatalf("side = %q, want buy with one required aligned timeframe", allowed.Signal.Side)
+	}
+}
+
+func TestIntradayAdaptiveProfileHonorsMaximumBlockingTimeframes(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["trend_signal_age"] = strategy.NumericSeries{Latest: 2}
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2002, Previous: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.20}
+	got.Window.Signals["pump_window_signal"] = strategy.SignalSeries{Latest: "true", StableCount: 1}
+	got.Timeframes["5m"] = neutralTimeframe(strategy.SignalSideBuy)
+	got.Timeframes["10m"] = timeframe(strategy.SignalSideSell, nil)
+	got.Timeframes["15m"] = timeframe(strategy.SignalSideSell, nil)
+	got.Timeframes["30m"] = timeframe(strategy.SignalSideBuy, nil)
+
+	result, err := New(Config{
+		EntryProfile:          EntryProfileIntradayAdaptive,
+		MaxBlockingTimeframes: 1,
+	}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold with two blocking timeframes", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "higher_timeframe_regime", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked ||
+		check.Values["blocked"] != "2" || check.Values["max_blocking"] != "1" {
+		t.Fatalf("intraday timeframe diagnostic = %#v", check)
+	}
+}
+
+func TestIntradayAdaptiveProfileBlocksStrongFiveMinuteOpposition(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Timeframes["5m"] = timeframe(strategy.SignalSideSell, nil)
+
+	result, err := New(Config{EntryProfile: EntryProfileIntradayAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold", result.Signal.Side)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "pullback_resolution", strategy.SignalSideBuy)
+	if !ok || check.Status != strategy.DiagnosticStatusBlocked || check.Values["5m"] != "blocking" {
+		t.Fatalf("5m direction diagnostic = %#v", check)
+	}
+}
+
 func TestEvaluateBuildsFullPositionTrailingExitRules(t *testing.T) {
 	for _, side := range []strategy.SignalSide{strategy.SignalSideBuy, strategy.SignalSideSell} {
 		t.Run(string(side), func(t *testing.T) {
@@ -629,6 +963,66 @@ func TestEvaluateBuildsFullPositionTrailingExitRules(t *testing.T) {
 			}
 			if trailing.Metadata["profit_guard_activation_bps"] != "150" || trailing.Metadata["profit_guard_floor_bps"] != "100" {
 				t.Fatalf("profit guard metadata = %#v", trailing.Metadata)
+			}
+		})
+	}
+}
+
+func TestEvaluateBuildsAdaptiveQuoteAndATRExitRules(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, nil)
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 2000}
+	got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.30}
+
+	result, err := New(Config{ExitMode: ExitModeAdaptive}).Evaluate(context.Background(), got, nil)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	stop, ok := exitRule(result.ExitRules, strategy.ExitReasonStopLoss)
+	if !ok || stop.TriggerPrice != "1986" {
+		t.Fatalf("adaptive hard stop = %#v, want 1986", stop)
+	}
+	trailing, ok := exitRule(result.ExitRules, strategy.ExitReasonTrailingStop)
+	if !ok {
+		t.Fatalf("adaptive trailing rule missing: %#v", result.ExitRules)
+	}
+	want := map[string]string{
+		"trail_pct":                   "0.3",
+		"reference_price":             "2000",
+		"profit_guard_activation_bps": "50",
+		"profit_guard_floor_bps":      "40",
+		"adaptive_trailing":           "true",
+		"runner_activation_bps":       "150",
+		"runner_trail_pct":            "0.525",
+		"volatility_state":            "neutral",
+		"atr_pct14":                   "0.3",
+	}
+	for key, value := range want {
+		if trailing.Metadata[key] != value {
+			t.Fatalf("adaptive trailing metadata[%q] = %q, want %q; metadata=%#v", key, trailing.Metadata[key], value, trailing.Metadata)
+		}
+	}
+	if _, ok := exitRule(result.ExitRules, strategy.ExitReasonTakeProfit); ok {
+		t.Fatalf("adaptive exit rules = %#v, want no fixed take profit", result.ExitRules)
+	}
+}
+
+func TestAdaptiveExitUsesMicroTargetForProtectionAndKeepsUnlimitedRunner(t *testing.T) {
+	for _, state := range []string{"contracting", "normal", "expanding"} {
+		t.Run(state, func(t *testing.T) {
+			got := snapshot(strategy.SignalSideBuy, map[string]string{
+				"volatility_window_state": state,
+			})
+			got.Window.Values["atr_pct14"] = strategy.NumericSeries{Latest: 0.30}
+			params := New(Config{ExitMode: ExitModeAdaptive}).adaptiveExitParameters(got, 2000)
+
+			if params.activationBps != 50 {
+				t.Fatalf("activation bps = %v, want 50", params.activationBps)
+			}
+			if params.decayActivationBps != 100 {
+				t.Fatalf("decay activation bps = %v, want 100", params.decayActivationBps)
+			}
+			if params.runnerActivationBps != 150 {
+				t.Fatalf("runner activation bps = %v, want 150", params.runnerActivationBps)
 			}
 		})
 	}
@@ -866,6 +1260,53 @@ func TestEvaluateExitsWhenTenAndFifteenMinuteTrendsReverse(t *testing.T) {
 	check, ok := diagnostic(result.Analysis.Checks, "structure_invalidation", strategy.SignalSideSell)
 	if !ok || check.Status != strategy.DiagnosticStatusPass || check.Values["10m"] != "aligned" || check.Values["15m"] != "aligned" {
 		t.Fatalf("structure invalidation diagnostic = %#v", check)
+	}
+}
+
+func TestAdaptiveExitCutsLosingPositionAfterIndependentDirectionFailures(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, map[string]string{
+		"trend_window_bias": "bear",
+		"ma_window_bias":    "bear",
+	})
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 1990}
+	position := &strategy.Position{
+		Side:         strategy.PositionSideLong,
+		Size:         1,
+		EntryPrice:   "2000",
+		HighestPrice: "2000",
+		LowestPrice:  "1990",
+	}
+
+	result, err := New(Config{ExitMode: ExitModeAdaptive}).Evaluate(context.Background(), got, position)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideSell || result.Signal.Reason != "intraday direction invalidated" {
+		t.Fatalf("signal = %#v, want fast direction-invalidated exit", result.Signal)
+	}
+	check, ok := diagnostic(result.Analysis.Checks, "direction_invalidation", strategy.SignalSideBuy)
+	if !ok || check.Values["state"] != "invalidated" || check.Values["confirmations"] != "2" {
+		t.Fatalf("direction invalidation diagnostic = %#v", check)
+	}
+}
+
+func TestAdaptiveExitDoesNotLeaveOnOneLocalWarning(t *testing.T) {
+	got := snapshot(strategy.SignalSideBuy, map[string]string{"trend_window_reversal_risk": "true"})
+	got.Window.Values["close"] = strategy.NumericSeries{Latest: 1990}
+	position := &strategy.Position{
+		Side:         strategy.PositionSideLong,
+		Size:         1,
+		EntryPrice:   "2000",
+		HighestPrice: "2000",
+		LowestPrice:  "1990",
+	}
+
+	result, err := New(Config{ExitMode: ExitModeAdaptive}).Evaluate(context.Background(), got, position)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if result.Signal.Side != strategy.SignalSideHold {
+		t.Fatalf("side = %q, want hold on one local warning", result.Signal.Side)
 	}
 }
 

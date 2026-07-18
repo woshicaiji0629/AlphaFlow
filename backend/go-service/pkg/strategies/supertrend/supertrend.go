@@ -3,6 +3,7 @@ package supertrend
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -11,24 +12,56 @@ import (
 
 const (
 	Name                            = "supertrend"
+	EntryProfileTrend               = "trend"
+	EntryProfileIntradayAdaptive    = "intraday_adaptive"
 	ExitModeStructure               = "structure"
 	ExitModeTrailing                = "trailing"
+	ExitModeAdaptive                = "adaptive"
 	DefaultProfitGuardActivationBps = 150.0
 	DefaultProfitGuardFloorBps      = 100.0
 	DefaultProfitDecayActivationBps = 150.0
+	DefaultAdaptiveMaxStopLossBps   = 70.0
+	DefaultRoundTripCostBps         = 16.0
+	DefaultProfitBufferBps          = 8.0
+	DefaultMicroProfitQuote         = 10.0
+	DefaultTargetProfitQuote        = 20.0
+	DefaultRunnerProfitQuote        = 30.0
+
+	adaptiveLowTrailATRMultiplier       = 0.75
+	adaptiveNormalTrailATRMultiplier    = 1.0
+	adaptiveExpandingTrailATRMultiplier = 1.25
+	adaptiveRunnerTrailMultiplier       = 1.75
+	adaptiveMinLowTrailPct              = 0.18
+	adaptiveMaxLowTrailPct              = 0.35
+	adaptiveMinNormalTrailPct           = 0.25
+	adaptiveMaxNormalTrailPct           = 0.55
+	adaptiveMinExpandingTrailPct        = 0.35
+	adaptiveMaxExpandingTrailPct        = 0.75
+	adaptiveMaxRunnerTrailPct           = 1.20
+	intradayMinImpulseBps               = 8.0
+	intradayMaxImpulseBps               = 20.0
+	intradayMinImpulseATRMultiplier     = 0.25
+	intradayMaxImpulseATRMultiplier     = 0.75
 )
 
 type Config struct {
-	EntryThreshold           float64
-	MaxBlockingTimeframes    int
-	MinTakeProfitBps         float64
-	MinRewardRiskRatio       float64
-	MaxStopLossBps           float64
-	ExitMode                 string
-	TrailingStopPct          float64
-	ProfitGuardActivationBps float64
-	ProfitGuardFloorBps      float64
-	ProfitDecayActivationBps float64
+	EntryProfile                 string
+	EntryThreshold               float64
+	MaxBlockingTimeframes        int
+	IntradayMinAlignedTimeframes int
+	MinTakeProfitBps             float64
+	MinRewardRiskRatio           float64
+	MaxStopLossBps               float64
+	ExitMode                     string
+	TrailingStopPct              float64
+	ProfitGuardActivationBps     float64
+	ProfitGuardFloorBps          float64
+	ProfitDecayActivationBps     float64
+	RoundTripCostBps             float64
+	ProfitBufferBps              float64
+	MicroProfitQuote             float64
+	TargetProfitQuote            float64
+	RunnerProfitQuote            float64
 }
 
 type Strategy struct {
@@ -43,12 +76,30 @@ type entryDecision struct {
 	checks  []strategy.DiagnosticCheck
 }
 
+type adaptiveExitParameters struct {
+	volatilityState     string
+	atrPct              float64
+	activationBps       float64
+	floorBps            float64
+	decayActivationBps  float64
+	runnerActivationBps float64
+	trailPct            float64
+	runnerTrailPct      float64
+}
+
 func New(config Config) *Strategy {
+	config.EntryProfile = normalize(config.EntryProfile)
+	if config.EntryProfile == "" {
+		config.EntryProfile = EntryProfileTrend
+	}
 	if config.EntryThreshold <= 0 {
 		config.EntryThreshold = 0.72
 	}
 	if config.MaxBlockingTimeframes <= 0 {
 		config.MaxBlockingTimeframes = 1
+	}
+	if config.IntradayMinAlignedTimeframes <= 0 {
+		config.IntradayMinAlignedTimeframes = 1
 	}
 	config.ExitMode = normalize(config.ExitMode)
 	if config.ExitMode == "" {
@@ -63,6 +114,25 @@ func New(config Config) *Strategy {
 		}
 		if config.ProfitDecayActivationBps <= 0 {
 			config.ProfitDecayActivationBps = DefaultProfitDecayActivationBps
+		}
+	} else if config.ExitMode == ExitModeAdaptive {
+		if config.MaxStopLossBps <= 0 {
+			config.MaxStopLossBps = DefaultAdaptiveMaxStopLossBps
+		}
+		if config.RoundTripCostBps <= 0 {
+			config.RoundTripCostBps = DefaultRoundTripCostBps
+		}
+		if config.ProfitBufferBps <= 0 {
+			config.ProfitBufferBps = DefaultProfitBufferBps
+		}
+		if config.MicroProfitQuote <= 0 {
+			config.MicroProfitQuote = DefaultMicroProfitQuote
+		}
+		if config.TargetProfitQuote <= 0 {
+			config.TargetProfitQuote = DefaultTargetProfitQuote
+		}
+		if config.RunnerProfitQuote <= 0 {
+			config.RunnerProfitQuote = DefaultRunnerProfitQuote
 		}
 	}
 	return &Strategy{config: config}
@@ -88,27 +158,32 @@ func (s *Strategy) Evaluate(
 	if err := ctx.Err(); err != nil {
 		return strategy.Result{}, err
 	}
+	contextChecks := s.intradayMarketContextChecks(snapshot.Window)
 	if !snapshot.Health.OK {
-		return s.hold(snapshot, "snapshot health not ok"), nil
+		return s.holdWithChecks(snapshot, "snapshot health not ok", contextChecks), nil
 	}
 	if !dataQualityOK(snapshot.Window) {
-		return s.hold(snapshot, "data quality not ok"), nil
+		return s.holdWithChecks(snapshot, "data quality not ok", contextChecks), nil
 	}
 	if currentPosition != nil && !currentPosition.IsFlat() {
-		return s.evaluateExit(snapshot, currentPosition), nil
+		result := s.evaluateExit(snapshot, currentPosition)
+		result.Analysis.Checks = append(contextChecks, result.Analysis.Checks...)
+		return result, nil
 	}
 
 	longDecision := s.entry(snapshot, strategy.SignalSideBuy)
 	shortDecision := s.entry(snapshot, strategy.SignalSideSell)
 	longDecision = withThresholdCheck(longDecision, s.config.EntryThreshold)
 	shortDecision = withThresholdCheck(shortDecision, s.config.EntryThreshold)
-	checks := append(append([]strategy.DiagnosticCheck{}, longDecision.checks...), shortDecision.checks...)
+	checks := append([]strategy.DiagnosticCheck{}, contextChecks...)
+	checks = append(checks, longDecision.checks...)
+	checks = append(checks, shortDecision.checks...)
 	selected := selectEntry(longDecision, shortDecision, s.config.EntryThreshold)
 	if selected.side == strategy.SignalSideHold {
 		return s.holdWithChecks(snapshot, strings.Join(append(longDecision.reasons, shortDecision.reasons...), "; "), checks), nil
 	}
 	rules := s.exitRules(snapshot, selected.side)
-	if s.config.ExitMode == ExitModeTrailing && !hasExitRule(rules, strategy.ExitReasonTrailingStop) {
+	if (s.config.ExitMode == ExitModeTrailing || s.config.ExitMode == ExitModeAdaptive) && !hasExitRule(rules, strategy.ExitReasonTrailingStop) {
 		check := diagnosticCheck("exit_rules", selected.side, false, 0, "trailing stop reference price missing", map[string]string{
 			"exit_mode":         s.config.ExitMode,
 			"trailing_stop_pct": formatFloat(s.config.TrailingStopPct),
@@ -139,6 +214,12 @@ func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *str
 	default:
 		return s.hold(snapshot, "position side not actionable")
 	}
+	if s.config.ExitMode == ExitModeAdaptive {
+		invalidationCheck, invalidated := adaptiveDirectionInvalidated(snapshot, currentPosition, holdingSide)
+		if invalidated {
+			return s.signalWithChecks(snapshot, opposite, 1, "intraday direction invalidated", nil, []strategy.DiagnosticCheck{invalidationCheck})
+		}
+	}
 	if reversed, values := higherTimeframeReversed(snapshot, opposite); reversed {
 		check := diagnosticCheck("structure_invalidation", opposite, true, 0, "10m and 15m confirmed reversal", values)
 		return s.signalWithChecks(snapshot, opposite, 1, "10m and 15m confirmed reversal", nil, []strategy.DiagnosticCheck{check})
@@ -147,7 +228,7 @@ func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *str
 	if profitState == "weak_exit" {
 		return s.signalWithChecks(snapshot, opposite, 1, "protected profit momentum decayed", nil, []strategy.DiagnosticCheck{profitCheck})
 	}
-	decision := s.entry(snapshot, opposite)
+	decision := s.reversalEntry(snapshot, opposite)
 	decision = withThresholdCheck(decision, s.config.EntryThreshold)
 	if decision.blocked {
 		return s.holdWithChecks(snapshot, strings.Join(decision.reasons, "; "), append(decision.checks, profitCheck))
@@ -161,6 +242,14 @@ func (s *Strategy) evaluateExit(snapshot strategy.Snapshot, currentPosition *str
 }
 
 func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
+	return s.evaluateEntry(snapshot, side, false)
+}
+
+func (s *Strategy) reversalEntry(snapshot strategy.Snapshot, side strategy.SignalSide) entryDecision {
+	return s.evaluateEntry(snapshot, side, true)
+}
+
+func (s *Strategy) evaluateEntry(snapshot strategy.Snapshot, side strategy.SignalSide, allowSMCBOSOnly bool) entryDecision {
 	window := snapshot.Window
 	decision := entryDecision{
 		side:    side,
@@ -172,13 +261,33 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 		decision.checks = append(decision.checks, strategy.DiagnosticCheck{Name: "indicator_window", Side: side, Status: strategy.DiagnosticStatusMissing, Reason: "indicator window missing"})
 		return decision
 	}
-	triggerValues := entryTriggerValues(window, side)
-	triggered := entryTriggered(window, side)
-	standardTriggered := standardEntryTriggered(window, side)
+	triggerSources := standardEntryTriggerSources(window, side)
+	intradayProfile := s.config.EntryProfile == EntryProfileIntradayAdaptive
+	intradayEnvironmentOK := intradayContinuationTriggered(window, side)
+	intradayImpulseOK, intradayImpulseValues := intradayImpulseTriggered(window, side)
+	if intradayProfile && intradayEnvironmentOK && intradayImpulseOK && !containsString(triggerSources, "intraday_impulse") {
+		triggerSources = append(triggerSources, "intraday_impulse")
+	}
+	triggerValues := entryTriggerValues(window, side, triggerSources)
+	triggerValues["intraday_environment_authorized"] = strconv.FormatBool(intradayEnvironmentOK)
+	for key, value := range intradayImpulseValues {
+		triggerValues[key] = value
+	}
+	standardTriggered := standardTrendContinuationTriggered(triggerSources)
+	if allowSMCBOSOnly {
+		standardTriggered = len(triggerSources) > 0
+	}
+	triggerValues["standard_trigger_authorized"] = strconv.FormatBool(standardTriggered)
+	triggerValues["smc_bos_only"] = strconv.FormatBool(len(triggerSources) == 1 && triggerSources[0] == "smc_bos")
+	triggered := standardTriggered || confirmedTruthySignal(window, continuationSignalKey(side))
 	if !triggered {
 		decision.blocked = true
-		decision.reasons = append(decision.reasons, fmt.Sprintf("%s trigger missing", side))
-		decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, false, 0, fmt.Sprintf("%s trigger missing", side), triggerValues))
+		reason := fmt.Sprintf("%s trigger missing", side)
+		if len(triggerSources) > 0 {
+			reason = fmt.Sprintf("%s trigger not authorized", side)
+		}
+		decision.reasons = append(decision.reasons, reason)
+		decision.checks = append(decision.checks, diagnosticCheck("entry_trigger", side, false, 0, reason, triggerValues))
 		return decision
 	}
 	decision.score = 0.30
@@ -191,12 +300,23 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	shockOK, shockValues := shockBreakoutAuthorized(snapshot, side, fakeRisk, energyConfirmations)
 	regimeOK, regimeValues := higherTimeframeAuthorized(snapshot, side)
 	pullbackOK, pullbackValues := pullbackResolved(snapshot, side)
+	intradayContextOK, intradayContextValues := intradayContextAuthorized(snapshot, side)
+	aligned, blocked := classifyTimeframes(snapshot, side)
+	intradayContextValues["required_aligned"] = strconv.Itoa(s.config.IntradayMinAlignedTimeframes)
+	intradayContextValues["max_blocking"] = strconv.Itoa(s.config.MaxBlockingTimeframes)
+	intradayContextValues["aligned"] = strconv.Itoa(aligned)
+	intradayContextValues["blocked"] = strconv.Itoa(blocked)
+	intradayAuthorized := intradayContextOK && intradayEnvironmentOK &&
+		aligned >= s.config.IntradayMinAlignedTimeframes && blocked <= s.config.MaxBlockingTimeframes
 	entryMode := ""
 	switch {
 	case shockOK:
 		entryMode = "shock_breakout"
 		decision.score += 0.10
 		decision.reasons = append(decision.reasons, "shock breakout authorized")
+	case intradayProfile && standardTriggered && intradayAuthorized:
+		entryMode = "intraday_event"
+		decision.reasons = append(decision.reasons, "intraday event authorized")
 	case standardTriggered && regimeOK && pullbackOK:
 		entryMode = "trend_continuation"
 		decision.reasons = append(decision.reasons, "trend continuation authorized")
@@ -206,6 +326,15 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	}
 	modeValues := map[string]string{
 		"mode":                            entryMode,
+		"entry_profile":                   s.config.EntryProfile,
+		"trigger_sources":                 entryModeTriggerSources(entryMode, triggerSources),
+		"trigger_source_count":            strconv.Itoa(entryModeTriggerSourceCount(entryMode, triggerSources)),
+		"ma_tangled":                      strconv.FormatBool(truthySignal(window, "ma_window_tangled")),
+		"volatility_state":                latestSignal(window, "volatility_window_state"),
+		"local_supertrend_direction":      latestSignal(window, "supertrend_direction"),
+		"local_trend_bias":                latestSignal(window, "trend_window_bias"),
+		"local_ma_bias":                   latestSignal(window, "ma_window_bias"),
+		"local_macd_bias":                 latestSignal(window, "macd_window_bias"),
 		"shock_authorized":                strconv.FormatBool(shockOK),
 		"regime_authorized":               strconv.FormatBool(regimeOK),
 		"pullback_resolved":               strconv.FormatBool(pullbackOK),
@@ -241,6 +370,11 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	}))
 
 	regimeAccepted := regimeOK || shockOK
+	regimeCheckValues := regimeValues
+	if intradayProfile && !shockOK {
+		regimeAccepted = intradayAuthorized
+		regimeCheckValues = intradayContextValues
+	}
 	if !regimeAccepted {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "higher timeframe regime blocked")
@@ -249,13 +383,18 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	if !regimeOK && shockOK {
 		regimeReason = "higher timeframe wait overridden by shock breakout"
 	}
-	decision.checks = append(decision.checks, diagnosticCheck("higher_timeframe_regime", side, regimeAccepted, 0, checkReason(!regimeAccepted, "higher timeframe regime blocked", regimeReason), regimeValues))
+	decision.checks = append(decision.checks, diagnosticCheck("higher_timeframe_regime", side, regimeAccepted, 0, checkReason(!regimeAccepted, "higher timeframe regime blocked", regimeReason), regimeCheckValues))
 
-	if !pullbackOK {
-		decision.blocked = true
-		decision.reasons = append(decision.reasons, "5m pullback not resolved")
+	pullbackAccepted := pullbackOK
+	if intradayProfile && !shockOK {
+		pullbackAccepted = intradayAuthorized
+		pullbackValues = intradayContextValues
 	}
-	decision.checks = append(decision.checks, diagnosticCheck("pullback_resolution", side, pullbackOK, 0, checkReason(!pullbackOK, "5m pullback not resolved", "5m pullback resolved"), pullbackValues))
+	if !pullbackAccepted {
+		decision.blocked = true
+		decision.reasons = append(decision.reasons, "5m direction blocked")
+	}
+	decision.checks = append(decision.checks, diagnosticCheck("pullback_resolution", side, pullbackAccepted, 0, checkReason(!pullbackAccepted, "5m direction blocked", "5m direction accepted"), pullbackValues))
 
 	trendOK, trendScore, trendReasons := trendConfirmationForEntry(window, side, shockOK)
 	if !trendOK {
@@ -289,16 +428,20 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 	decision.reasons = append(decision.reasons, volumeReasons...)
 	decision.checks = append(decision.checks, entryConfirmationCheck("volume", side, volumeOK, !shockOK, volumeScore, strings.Join(volumeReasons, "; "), nil))
 
-	if !energyOK && !shockOK {
+	energyBlocking := !intradayProfile && !shockOK
+	if !energyOK && energyBlocking {
 		decision.blocked = true
 	}
 	decision.score += energyScore
 	decision.reasons = append(decision.reasons, energyReasons...)
-	decision.checks = append(decision.checks, entryConfirmationCheck("momentum_energy", side, energyOK, !shockOK, energyScore, strings.Join(energyReasons, "; "), energyValues))
+	decision.checks = append(decision.checks, entryConfirmationCheck("momentum_energy", side, energyOK, energyBlocking, energyScore, strings.Join(energyReasons, "; "), energyValues))
 
-	aligned, blocked := classifyTimeframes(snapshot, side)
 	shortBlocked := shortTimeframesBlocked(snapshot, side)
-	if blocked > s.config.MaxBlockingTimeframes || shortBlocked {
+	timeframesOK := blocked <= s.config.MaxBlockingTimeframes && !shortBlocked
+	if intradayProfile {
+		timeframesOK = intradayAuthorized
+	}
+	if !timeframesOK {
 		decision.blocked = true
 		decision.reasons = append(decision.reasons, "timeframe blocked")
 	}
@@ -306,7 +449,6 @@ func (s *Strategy) entry(snapshot strategy.Snapshot, side strategy.SignalSide) e
 		decision.score += 0.04 * float64(aligned)
 		decision.reasons = append(decision.reasons, "timeframes aligned")
 	}
-	timeframesOK := blocked <= s.config.MaxBlockingTimeframes && !shortBlocked
 	decision.checks = append(decision.checks, diagnosticCheck("timeframes", side, timeframesOK, 0.04*float64(aligned), checkReason(!timeframesOK, "timeframe blocked", "timeframes evaluated"), map[string]string{
 		"aligned": strconv.Itoa(aligned), "blocked": strconv.Itoa(blocked),
 	}))
@@ -428,30 +570,187 @@ func entryTriggered(window strategy.IndicatorWindowView, side strategy.SignalSid
 }
 
 func standardEntryTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
-	if previousWickReclaimed(window, side) {
-		return true
-	}
-	if freshSignalValue(window, "supertrend_direction", directionForSide(side)) {
-		return true
-	}
-	if freshNumericEvent(window, "trend_signal_age") && signalIs(latestSignal(window, "trend_signal_event"), eventForSide(side)) {
-		return true
-	}
-	if freshNumericEvent(window, "ma_window_cross_age") && signalIs(latestSignal(window, "ma_window_cross_event"), maCrossForSide(side)) {
-		return true
-	}
-	return freshNumericEvent(window, "smc_window_bos_age") &&
-		truthySignal(window, "smc_window_bos_recent") &&
-		latestSignal(window, "smc_window_bias") == biasForSide(side)
+	return len(standardEntryTriggerSources(window, side)) > 0
 }
 
-func entryTriggerValues(window strategy.IndicatorWindowView, side strategy.SignalSide) map[string]string {
+func standardTrendContinuationTriggered(sources []string) bool {
+	for _, source := range sources {
+		if source != "smc_bos" {
+			return true
+		}
+	}
+	return false
+}
+
+func standardEntryTriggerSources(window strategy.IndicatorWindowView, side strategy.SignalSide) []string {
+	sources := make([]string, 0, 5)
+	if previousWickReclaimed(window, side) {
+		sources = append(sources, "wick_reclaim")
+	}
+	if freshSignalValue(window, "supertrend_direction", directionForSide(side)) {
+		sources = append(sources, "supertrend_flip")
+	}
+	if freshNumericEvent(window, "trend_signal_age") && signalIs(latestSignal(window, "trend_signal_event"), eventForSide(side)) {
+		sources = append(sources, "trend_event")
+	}
+	if freshNumericEvent(window, "ma_window_cross_age") && signalIs(latestSignal(window, "ma_window_cross_event"), maCrossForSide(side)) {
+		sources = append(sources, "ma_cross")
+	}
+	if freshNumericEvent(window, "smc_window_bos_age") &&
+		truthySignal(window, "smc_window_bos_recent") &&
+		latestSignal(window, "smc_window_bias") == biasForSide(side) {
+		sources = append(sources, "smc_bos")
+	}
+	return sources
+}
+
+func entryTriggerValues(window strategy.IndicatorWindowView, side strategy.SignalSide, standardSources []string) map[string]string {
 	continuationKey := continuationSignalKey(side)
 	return map[string]string{
+		"standard_trigger_sources":   strings.Join(standardSources, ","),
+		"standard_trigger_count":     strconv.Itoa(len(standardSources)),
+		"wick_reclaim":               strconv.FormatBool(containsString(standardSources, "wick_reclaim")),
+		"supertrend_flip":            strconv.FormatBool(containsString(standardSources, "supertrend_flip")),
+		"trend_event":                strconv.FormatBool(containsString(standardSources, "trend_event")),
+		"ma_cross":                   strconv.FormatBool(containsString(standardSources, "ma_cross")),
+		"smc_bos":                    strconv.FormatBool(containsString(standardSources, "smc_bos")),
 		"shock_impulse_signal":       latestSignal(window, continuationKey),
 		"shock_impulse_stable_count": strconv.Itoa(latestSignalStableCount(window, continuationKey)),
 		"shock_second_bar_confirmed": strconv.FormatBool(confirmedTruthySignal(window, continuationKey)),
 	}
+}
+
+func entryModeTriggerSources(entryMode string, standardSources []string) string {
+	if entryMode == "shock_breakout" {
+		return "shock_second_bar"
+	}
+	if entryMode == "trend_continuation" || entryMode == "intraday_event" {
+		return strings.Join(standardSources, ",")
+	}
+	return ""
+}
+
+func entryModeTriggerSourceCount(entryMode string, standardSources []string) int {
+	if entryMode == "shock_breakout" {
+		return 1
+	}
+	if entryMode == "trend_continuation" || entryMode == "intraday_event" {
+		return len(standardSources)
+	}
+	return 0
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func intradayContinuationTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) bool {
+	if truthySignal(window, "trend_window_continuation") {
+		return true
+	}
+	return localTrendAligned(window, side) &&
+		latestSignal(window, "trend_price_progress") == "advancing" &&
+		!truthySignal(window, "trend_window_reversal_risk") &&
+		!truthySignal(window, "ma_window_tangled") &&
+		fakeRiskLevel(window, side) != "high"
+}
+
+func (s *Strategy) intradayMarketContextChecks(window strategy.IndicatorWindowView) []strategy.DiagnosticCheck {
+	if s.config.EntryProfile != EntryProfileIntradayAdaptive {
+		return nil
+	}
+	return []strategy.DiagnosticCheck{infoDiagnostic(
+		"intraday_market_context",
+		strategy.SignalSideHold,
+		"intraday market context captured",
+		intradayMarketContextValues(window),
+	)}
+}
+
+func intradayMarketContextValues(window strategy.IndicatorWindowView) map[string]string {
+	_, values := intradayImpulseTriggered(window, strategy.SignalSideBuy)
+	delete(values, "intraday_impulse")
+	delete(values, "intraday_price_volume_aligned")
+	values["volatility_state"] = marketContextSignal(window, "volatility_window_state")
+	values["channel_volatility_state"] = marketContextSignal(window, "channel_volatility_state")
+	values["channel_position_state"] = marketContextSignal(window, "channel_position_state")
+	values["channel_breakout_quality"] = marketContextSignal(window, "channel_breakout_quality")
+	values["channel_bias"] = marketContextSignal(window, "channel_window_bias")
+	values["volume_state"] = marketContextSignal(window, "volume_window_state")
+	values["volume_ratio"] = marketContextNumeric(window, "volume_window_ratio")
+	values["price_volume_confirmation"] = marketContextSignal(window, "price_volume_confirmation")
+	values["vwap_distance_pct"] = marketContextNumeric(window, "vwap_distance_pct")
+	values["rolling_vwap_distance_pct"] = marketContextNumeric(window, "rolling_vwap_distance_pct")
+	values["support_distance_pct"] = marketContextNumeric(window, "support_distance_pct")
+	values["resistance_distance_pct"] = marketContextNumeric(window, "resistance_distance_pct")
+	values["sr_position"] = marketContextSignal(window, "sr_position")
+	values["volume_profile_position"] = marketContextSignal(window, "volume_profile_window_position")
+	values["volume_profile_acceptance"] = marketContextSignal(window, "volume_profile_window_acceptance")
+	values["volume_profile_near_poc"] = marketContextSignal(window, "volume_profile_window_near_poc")
+	values["volume_profile_near_value_edge"] = marketContextSignal(window, "volume_profile_window_near_value_edge")
+	values["volume_profile_rejection_risk"] = marketContextSignal(window, "volume_profile_window_rejection_risk")
+	values["smc_liquidity_sweep"] = marketContextSignal(window, "smc_window_liquidity_sweep")
+	values["smc_sweep_age"] = marketContextNumeric(window, "smc_window_sweep_age")
+	values["liquidity_sweep_type"] = marketContextSignal(window, "liquidity_sweep_type")
+	values["momentum_sd_retest"] = marketContextSignal(window, "momentum_sd_retest")
+	values["premium_discount_zone"] = marketContextSignal(window, "smc_window_premium_discount_zone")
+	values["exhaustion_risk"] = marketContextSignal(window, "exhaustion_risk")
+	values["range_filter_state"] = marketContextSignal(window, "range_filter_window_state")
+	return values
+}
+
+func marketContextSignal(window strategy.IndicatorWindowView, key string) string {
+	value := normalize(latestSignal(window, key))
+	if value == "" {
+		return "missing"
+	}
+	return value
+}
+
+func marketContextNumeric(window strategy.IndicatorWindowView, key string) string {
+	series, ok := window.Numeric(key)
+	if !ok {
+		return "missing"
+	}
+	return formatFloat(series.Latest)
+}
+
+func intradayImpulseTriggered(window strategy.IndicatorWindowView, side strategy.SignalSide) (bool, map[string]string) {
+	closeSeries, ok := window.Numeric("close")
+	atrBps := latestNumeric(window, "atr_pct14") * 100
+	minimumMoveBps := math.Max(intradayMinImpulseBps, atrBps*intradayMinImpulseATRMultiplier)
+	maximumMoveBps := math.Min(intradayMaxImpulseBps, atrBps*intradayMaxImpulseATRMultiplier)
+	validRange := maximumMoveBps >= minimumMoveBps
+	moveBps := 0.0
+	if ok && closeSeries.Latest > 0 && closeSeries.Previous > 0 {
+		moveBps = (closeSeries.Latest - closeSeries.Previous) / closeSeries.Previous * 10000
+		if side == strategy.SignalSideSell {
+			moveBps = -moveBps
+		}
+	}
+	expectedPriceVolume := "confirm_up"
+	if side == strategy.SignalSideSell {
+		expectedPriceVolume = "confirm_down"
+	}
+	priceVolume := latestSignal(window, "price_volume_confirmation")
+	priceVolumeOK := priceVolume == expectedPriceVolume
+	impulseOK := ok && validRange && moveBps >= minimumMoveBps && moveBps <= maximumMoveBps && priceVolumeOK
+	values := map[string]string{
+		"intraday_impulse":              strconv.FormatBool(impulseOK),
+		"intraday_close_move_bps":       formatFloat(moveBps),
+		"intraday_minimum_move_bps":     formatFloat(minimumMoveBps),
+		"intraday_maximum_move_bps":     formatFloat(maximumMoveBps),
+		"intraday_impulse_range_valid":  strconv.FormatBool(validRange),
+		"intraday_atr_bps":              formatFloat(atrBps),
+		"intraday_price_volume":         priceVolume,
+		"intraday_price_volume_aligned": strconv.FormatBool(priceVolumeOK),
+	}
+	return impulseOK, values
 }
 
 func continuationSignalKey(side strategy.SignalSide) string {
@@ -855,6 +1154,48 @@ func pullbackResolved(snapshot strategy.Snapshot, side strategy.SignalSide) (boo
 	return state == "aligned", values
 }
 
+func intradayContextAuthorized(snapshot strategy.Snapshot, side strategy.SignalSide) (bool, map[string]string) {
+	values := map[string]string{
+		"5m":      "missing",
+		"10m":     "missing",
+		"15m":     "missing",
+		"30m":     "missing",
+		"state":   "missing",
+		"aligned": "0",
+		"blocked": "0",
+	}
+	five, ok := snapshot.Timeframes["5m"]
+	if !ok {
+		return false, values
+	}
+	fiveState := classifyTimeframe(five.Window, side)
+	values["5m"] = fiveState
+	aligned := 0
+	blocked := 0
+	for _, interval := range []string{"10m", "15m", "30m"} {
+		timeframe, exists := snapshot.Timeframes[interval]
+		if !exists {
+			continue
+		}
+		state := classifyTimeframe(timeframe.Window, side)
+		values[interval] = state
+		switch state {
+		case "aligned":
+			aligned++
+		case "blocking":
+			blocked++
+		}
+	}
+	values["aligned"] = strconv.Itoa(aligned)
+	values["blocked"] = strconv.Itoa(blocked)
+	if fiveState == "blocking" || fiveState == "missing" {
+		values["state"] = "short_term_blocked"
+		return false, values
+	}
+	values["state"] = "intraday"
+	return true, values
+}
+
 func shortTimeframesBlocked(snapshot strategy.Snapshot, side strategy.SignalSide) bool {
 	five, fiveOK := snapshot.Timeframes["5m"]
 	ten, tenOK := snapshot.Timeframes["10m"]
@@ -926,23 +1267,126 @@ func higherTimeframeReversed(snapshot strategy.Snapshot, side strategy.SignalSid
 	return tenState == "aligned" && fifteenState == "aligned", values
 }
 
+func adaptiveDirectionInvalidated(
+	snapshot strategy.Snapshot,
+	currentPosition *strategy.Position,
+	holdingSide strategy.SignalSide,
+) (strategy.DiagnosticCheck, bool) {
+	window := snapshot.Window
+	oppositeBiasValue := oppositeBias(holdingSide)
+	oppositeDirection := oppositeDirectionForSide(holdingSide)
+	trendOpposed := latestSignal(window, "supertrend_direction") == oppositeDirection ||
+		latestSignal(window, "trend_window_bias") == oppositeBiasValue ||
+		latestSignal(window, "alphatrend_direction") == oppositeDirection ||
+		truthySignal(window, "trend_window_reversal_risk")
+	maOpposed := supportsBias(latestSignal(window, "ma_ribbon_state"), oppositeBiasValue) ||
+		latestSignal(window, "ma_window_bias") == oppositeBiasValue ||
+		latestSignal(window, "ema_alignment") == oppositeBiasValue
+	macdDivergence := "bearish"
+	oppositeVolume := "confirm_down"
+	volumeDivergence := "divergence_bear"
+	if holdingSide == strategy.SignalSideSell {
+		macdDivergence = "bullish"
+		oppositeVolume = "confirm_up"
+		volumeDivergence = "divergence_bull"
+	}
+	macdOpposed := latestSignal(window, "macd_window_bias") == oppositeBiasValue ||
+		supportsBias(latestSignal(window, "macd_momentum"), oppositeBiasValue) ||
+		latestSignal(window, "macd_divergence") == macdDivergence
+	priceVolume := latestSignal(window, "price_volume_confirmation")
+	volumeOpposed := priceVolume == oppositeVolume || priceVolume == volumeDivergence
+
+	confirmations := 0
+	for _, opposed := range []bool{trendOpposed, maOpposed, macdOpposed, volumeOpposed} {
+		if opposed {
+			confirmations++
+		}
+	}
+	fiveState := "missing"
+	if five, ok := snapshot.Timeframes["5m"]; ok {
+		fiveState = classifyTimeframe(five.Window, holdingSide)
+	}
+	moveBps, moveOK := currentPositionMoveBps(snapshot, currentPosition)
+	invalidated := fiveState == "blocking" && confirmations >= 1
+	if moveOK && moveBps <= 0 && confirmations >= 2 {
+		invalidated = true
+	}
+	if moveOK && moveBps > 0 && confirmations >= 3 {
+		invalidated = true
+	}
+	state := "healthy"
+	if invalidated {
+		state = "invalidated"
+	} else if confirmations > 0 || fiveState == "blocking" {
+		state = "watch"
+	}
+	values := map[string]string{
+		"state":                  state,
+		"current_move_bps":       formatFloat(moveBps),
+		"current_move_available": strconv.FormatBool(moveOK),
+		"confirmations":          strconv.Itoa(confirmations),
+		"trend_opposed":          strconv.FormatBool(trendOpposed),
+		"ma_opposed":             strconv.FormatBool(maOpposed),
+		"macd_opposed":           strconv.FormatBool(macdOpposed),
+		"volume_opposed":         strconv.FormatBool(volumeOpposed),
+		"5m":                     fiveState,
+	}
+	reason := "intraday direction remains valid"
+	if invalidated {
+		reason = "intraday direction invalidated"
+	} else if state == "watch" {
+		reason = "intraday direction deterioration detected"
+	}
+	return infoDiagnostic("direction_invalidation", holdingSide, reason, values), invalidated
+}
+
+func currentPositionMoveBps(snapshot strategy.Snapshot, currentPosition *strategy.Position) (float64, bool) {
+	if currentPosition == nil {
+		return 0, false
+	}
+	entryPrice, err := strconv.ParseFloat(currentPosition.EntryPrice, 64)
+	if err != nil || entryPrice <= 0 {
+		return 0, false
+	}
+	currentPrice, ok := numericValue(snapshot, "close")
+	if !ok {
+		return 0, false
+	}
+	switch currentPosition.Side {
+	case strategy.PositionSideLong:
+		return (currentPrice - entryPrice) / entryPrice * 10000, true
+	case strategy.PositionSideShort:
+		return (entryPrice - currentPrice) / entryPrice * 10000, true
+	default:
+		return 0, false
+	}
+}
+
 func (s *Strategy) profitProtectionCheck(
 	snapshot strategy.Snapshot,
 	currentPosition *strategy.Position,
 	holdingSide strategy.SignalSide,
 ) (strategy.DiagnosticCheck, string) {
 	mfeBps, ok := favorableExcursionBps(currentPosition)
+	activationBps := s.config.ProfitDecayActivationBps
+	if s.config.ExitMode == ExitModeAdaptive {
+		if entryPrice, err := strconv.ParseFloat(currentPosition.EntryPrice, 64); err == nil && entryPrice > 0 {
+			activationBps = s.adaptiveExitParameters(snapshot, entryPrice).decayActivationBps
+		}
+	}
 	values := map[string]string{
 		"state":                  "inactive",
 		"mfe_bps":                formatFloat(mfeBps),
-		"activation_bps":         formatFloat(s.config.ProfitDecayActivationBps),
+		"activation_bps":         formatFloat(activationBps),
+		"exit_mode":              s.config.ExitMode,
 		"decay_confirmations":    "0",
 		"momentum_confirmations": "0",
 		"5m":                     "missing",
 		"10m":                    "missing",
 		"15m":                    "missing",
 	}
-	if s.config.ExitMode != ExitModeTrailing || !ok || mfeBps < s.config.ProfitDecayActivationBps {
+	profitProtectionEnabled := s.config.ExitMode == ExitModeTrailing || s.config.ExitMode == ExitModeAdaptive
+	if !profitProtectionEnabled || !ok || activationBps <= 0 || mfeBps < activationBps {
 		return infoDiagnostic("profit_protection", holdingSide, "profit protection not activated", values), "inactive"
 	}
 
@@ -1109,6 +1553,18 @@ func (s *Strategy) exitRules(snapshot strategy.Snapshot, side strategy.SignalSid
 			s.config.ProfitGuardFloorBps,
 		)
 	}
+	if s.config.ExitMode == ExitModeAdaptive {
+		referencePrice, ok := numericValue(snapshot, "close")
+		if !ok {
+			return nil
+		}
+		params := s.adaptiveExitParameters(snapshot, referencePrice)
+		return buildAdaptiveExitRules(
+			formatFloat(referencePrice),
+			s.hardRiskStopLoss(snapshot, side),
+			params,
+		)
+	}
 	if side == strategy.SignalSideBuy {
 		return buildExitRules(takeProfit(snapshot, "resistance_1"), s.boundedStopLoss(snapshot, side, "supertrend", "support_1"))
 	}
@@ -1180,6 +1636,94 @@ func buildTrailingExitRules(referencePrice string, stopLoss string, trailPct flo
 		})
 	}
 	return rules
+}
+
+func buildAdaptiveExitRules(referencePrice string, stopLoss string, params adaptiveExitParameters) []strategy.ExitRule {
+	rules := []strategy.ExitRule{}
+	if stopLoss != "" {
+		rules = append(rules, strategy.ExitRule{
+			Type:         strategy.ExitReasonStopLoss,
+			Reason:       "adaptive hard risk stop",
+			TriggerPrice: stopLoss,
+			SizePct:      1,
+		})
+	}
+	if referencePrice == "" || params.trailPct <= 0 {
+		return rules
+	}
+	rules = append(rules, strategy.ExitRule{
+		Type:    strategy.ExitReasonTrailingStop,
+		Reason:  "adaptive protected trailing stop",
+		SizePct: 1,
+		Metadata: map[string]string{
+			"trail_pct":                   formatFloat(params.trailPct),
+			"reference_price":             referencePrice,
+			"profit_guard_activation_bps": formatFloat(params.activationBps),
+			"profit_guard_floor_bps":      formatFloat(params.floorBps),
+			"adaptive_trailing":           "true",
+			"runner_activation_bps":       formatFloat(params.runnerActivationBps),
+			"runner_trail_pct":            formatFloat(params.runnerTrailPct),
+			"volatility_state":            params.volatilityState,
+			"atr_pct14":                   formatFloat(params.atrPct),
+		},
+	})
+	return rules
+}
+
+func (s *Strategy) adaptiveExitParameters(snapshot strategy.Snapshot, referencePrice float64) adaptiveExitParameters {
+	state := normalize(latestSignal(snapshot.Window, "volatility_window_state"))
+	atrPct := latestNumeric(snapshot.Window, "atr_pct14")
+	if atrPct <= 0 {
+		atrPct = latestNumeric(snapshot.Window, "natr14")
+	}
+	microBps := quoteDistanceBps(s.config.MicroProfitQuote, referencePrice)
+	targetBps := quoteDistanceBps(s.config.TargetProfitQuote, referencePrice)
+	runnerQuoteBps := quoteDistanceBps(s.config.RunnerProfitQuote, referencePrice)
+	floorBps := math.Max(s.config.RoundTripCostBps+s.config.ProfitBufferBps, microBps*0.80)
+
+	activationBps := microBps
+	trailPct := clamp(atrPct*adaptiveNormalTrailATRMultiplier, adaptiveMinNormalTrailPct, adaptiveMaxNormalTrailPct)
+	switch {
+	case signalIs(state, "contracting", "squeeze", "low", "quiet"):
+		trailPct = clamp(atrPct*adaptiveLowTrailATRMultiplier, adaptiveMinLowTrailPct, adaptiveMaxLowTrailPct)
+	case signalIs(state, "expanding", "expansion", "spike", "high", "breakout", "climax"):
+		trailPct = clamp(atrPct*adaptiveExpandingTrailATRMultiplier, adaptiveMinExpandingTrailPct, adaptiveMaxExpandingTrailPct)
+	default:
+		if state == "" {
+			state = "neutral"
+		}
+	}
+	activationBps = math.Max(activationBps, floorBps+2)
+	decayActivationBps := math.Max(targetBps, activationBps)
+	runnerActivationBps := math.Max(runnerQuoteBps, decayActivationBps)
+	runnerTrailPct := clamp(trailPct*adaptiveRunnerTrailMultiplier, trailPct, adaptiveMaxRunnerTrailPct)
+	return adaptiveExitParameters{
+		volatilityState:     state,
+		atrPct:              atrPct,
+		activationBps:       activationBps,
+		floorBps:            floorBps,
+		decayActivationBps:  decayActivationBps,
+		runnerActivationBps: runnerActivationBps,
+		trailPct:            trailPct,
+		runnerTrailPct:      runnerTrailPct,
+	}
+}
+
+func quoteDistanceBps(quoteDistance float64, referencePrice float64) float64 {
+	if quoteDistance <= 0 || referencePrice <= 0 {
+		return 0
+	}
+	return quoteDistance / referencePrice * 10000
+}
+
+func clamp(value float64, minimum float64, maximum float64) float64 {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 func takeProfit(snapshot strategy.Snapshot, key string) string {

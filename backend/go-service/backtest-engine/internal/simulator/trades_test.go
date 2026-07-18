@@ -1,19 +1,43 @@
 package simulator
 
 import (
+	"encoding/json"
 	"testing"
 
 	"alphaflow/go-service/pkg/strategy"
 )
 
 func TestBuildBacktestTradesPairsEntryAndExit(t *testing.T) {
+	analysis, err := json.Marshal(strategy.Analysis{Checks: []strategy.DiagnosticCheck{
+		{Name: "entry_mode", Side: strategy.SignalSideBuy, Values: map[string]string{
+			"mode":                       "trend_continuation",
+			"trigger_sources":            "wick_reclaim,ma_cross",
+			"trigger_source_count":       "2",
+			"ma_tangled":                 "false",
+			"volatility_state":           "expanding",
+			"local_supertrend_direction": "up",
+		}},
+		{Name: "higher_timeframe_regime", Side: strategy.SignalSideBuy, Values: map[string]string{"state": "trend", "10m": "aligned", "15m": "aligned", "30m": "neutral"}},
+		{Name: "pullback_resolution", Side: strategy.SignalSideBuy, Values: map[string]string{"5m": "aligned"}},
+		{Name: "entry_mode", Side: strategy.SignalSideSell, Values: map[string]string{"mode": "", "trigger_sources": ""}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal analysis: %v", err)
+	}
+	entry := tradeEvent("entry-1", strategy.EventTypeOrderFilled, "100", 1, map[string]string{"analysis": string(analysis)})
+	entry.Side = strategy.SignalSideBuy
+	entry.Score = 0.85
+	entry.Confidence = 0.85
 	trades, err := BuildBacktestTrades([]strategy.StrategyEvent{
-		tradeEvent("entry-1", strategy.EventTypeOrderFilled, "100", 1, nil),
+		entry,
 		tradeEvent("exit-1", strategy.EventTypeOrderFilled, "110", 1, map[string]string{
 			"exit_reason":          string(strategy.ExitReasonStrategy),
 			"return_pct":           "9.4",
 			"return_on_margin_pct": "9.4",
 			"gross_pnl":            "10",
+			"mfe_bps":              "150",
+			"mae_bps":              "30",
+			"profit_giveback_bps":  "50",
 		}),
 	})
 	if err != nil {
@@ -34,6 +58,23 @@ func TestBuildBacktestTradesPairsEntryAndExit(t *testing.T) {
 	}
 	if trade.ReturnPct != "9.4" || trade.Metadata["gross_pnl"] != "10" {
 		t.Fatalf("trade metrics = %#v metadata=%#v", trade, trade.Metadata)
+	}
+	for key, want := range map[string]string{
+		"entry_mode":                 "trend_continuation",
+		"trigger_source":             "wick_reclaim,ma_cross",
+		"trigger_source_count":       "2",
+		"entry_regime_state":         "trend",
+		"entry_5m_state":             "aligned",
+		"entry_10m_state":            "aligned",
+		"entry_volatility_state":     "expanding",
+		"entry_supertrend_direction": "up",
+		"mfe_bps":                    "150",
+		"mae_bps":                    "30",
+		"profit_giveback_bps":        "50",
+	} {
+		if trade.Metadata[key] != want {
+			t.Fatalf("%s = %q, want %q metadata=%#v", key, trade.Metadata[key], want, trade.Metadata)
+		}
 	}
 }
 

@@ -369,26 +369,28 @@ type ExitRule struct {
 }
 
 type Position struct {
-	Scope        PositionScope
-	RunID        string
-	Exchange     string
-	Market       string
-	Symbol       string
-	Account      string
-	StrategyName string
-	PositionID   string
-	Mode         ExchangePositionMode
-	PositionSide ExchangePositionSide
-	Side         PositionSide
-	Size         float64
-	InitialSize  float64
-	EntryPrice   string
-	HighestPrice string
-	LowestPrice  string
-	ExitRules    []ExitRule
-	EntryTime    int64
-	EntryReason  string
-	UpdatedAt    int64
+	Scope                   PositionScope
+	RunID                   string
+	Exchange                string
+	Market                  string
+	Symbol                  string
+	Account                 string
+	StrategyName            string
+	PositionID              string
+	Mode                    ExchangePositionMode
+	PositionSide            ExchangePositionSide
+	Side                    PositionSide
+	Size                    float64
+	InitialSize             float64
+	EntryPrice              string
+	HighestPrice            string
+	LowestPrice             string
+	HighestPriceBarOpenTime int64
+	LowestPriceBarOpenTime  int64
+	ExitRules               []ExitRule
+	EntryTime               int64
+	EntryReason             string
+	UpdatedAt               int64
 }
 
 func (p Position) IsFlat() bool {
