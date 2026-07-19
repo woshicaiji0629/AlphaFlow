@@ -88,6 +88,10 @@ func main() {
 	singlePositionScan := flag.Bool("single-position-scan", false, "compare staged single-position protection parameters in one replay")
 	supertrendVersionCompare := flag.Bool("supertrend-version-compare", false, "compare standard, adaptive, and AI Supertrend flips with identical single-position rules")
 	supertrendTradeDiagnostics := flag.Bool("supertrend-trade-diagnostics", false, "log standard Supertrend v4 flip decisions and completed trades")
+	swingReviewPath := flag.String("swing-review-json", "", "write ETH swing opportunity and AI Supertrend coverage review JSON")
+	swingMinimumPoints := flag.Float64("swing-minimum-points", 30, "minimum absolute ETH price move included in the swing review")
+	swingReversalPoints := flag.Float64("swing-reversal-points", 10, "absolute ETH price reversal used to confirm a swing pivot")
+	stopReviewPath := flag.String("stop-review-json", "", "write initial-stop entry diagnostics and post-stop path review JSON")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -134,12 +138,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := run(ctx, *configPath, *fixedStops, *atrStops, *takeProfits, *horizon, platformConfig, impulseConfig, pullbackConfig, *eventCooldownBars, counterTrendConfig, *counterTrendEnabled, *validationObservationBars, chopConfig, regimeAnalyzer, *regimeAppendVersionRunID, *regimeRunIDTag, *researchSkipPersist, *singlePositionScan, *supertrendVersionCompare, *supertrendTradeDiagnostics); err != nil {
+	if err := run(ctx, *configPath, *fixedStops, *atrStops, *takeProfits, *horizon, platformConfig, impulseConfig, pullbackConfig, *eventCooldownBars, counterTrendConfig, *counterTrendEnabled, *validationObservationBars, chopConfig, regimeAnalyzer, *regimeAppendVersionRunID, *regimeRunIDTag, *researchSkipPersist, *singlePositionScan, *supertrendVersionCompare, *supertrendTradeDiagnostics, *swingReviewPath, *swingMinimumPoints, *swingReversalPoints, *stopReviewPath); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(ctx context.Context, configPath string, fixedText string, atrText string, takeProfitText string, horizon time.Duration, platformConfig signalresearch.PlatformConfig, impulseConfig signalresearch.ImpulseConfig, pullbackConfig signalresearch.PullbackConfig, eventCooldownBars int, counterTrendConfig signalresearch.CounterTrendConfig, counterTrendEnabled bool, validationBarsText string, chopConfig signalresearch.ChopConfig, regimeAnalyzer marketregime.Analyzer, appendVersionRunID bool, runIDTag string, skipPersist bool, scanSinglePosition bool, compareSupertrendVersions bool, logTradeDiagnostics bool) error {
+func run(ctx context.Context, configPath string, fixedText string, atrText string, takeProfitText string, horizon time.Duration, platformConfig signalresearch.PlatformConfig, impulseConfig signalresearch.ImpulseConfig, pullbackConfig signalresearch.PullbackConfig, eventCooldownBars int, counterTrendConfig signalresearch.CounterTrendConfig, counterTrendEnabled bool, validationBarsText string, chopConfig signalresearch.ChopConfig, regimeAnalyzer marketregime.Analyzer, appendVersionRunID bool, runIDTag string, skipPersist bool, scanSinglePosition bool, compareSupertrendVersions bool, logTradeDiagnostics bool, swingReviewPath string, swingMinimumPoints float64, swingReversalPoints float64, stopReviewPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load research config: %w", err)
@@ -264,6 +268,8 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 	chopObservations := make([]signalresearch.ChopObservation, 0, 1024)
 	regimeObservations := make([]marketregime.Result, 0, 1024)
 	flipDiagnostics := make(map[string][]supertrendFlipDiagnostic, 3)
+	swingBars := make([]marketmodel.Kline, 0, 15000)
+	swingEvidence := make([]signalresearch.SwingEvidence, 0, 20000)
 	var counterTrendGate *signalresearch.CounterTrendGate
 	if counterTrendEnabled {
 		counterTrendGate, err = signalresearch.NewCounterTrendGate(counterTrendConfig)
@@ -299,6 +305,9 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 		snapshot, ok := item.Snapshots[cfg.Data.Interval]
 		if !ok {
 			return fmt.Errorf("entry snapshot %s missing", cfg.Data.Interval)
+		}
+		if (swingReviewPath != "" || stopReviewPath != "") && snapshot.Current.OpenTime >= startTime.UnixMilli() && snapshot.Current.OpenTime < endTime.UnixMilli() {
+			swingBars = append(swingBars, snapshot.Current)
 		}
 		if err := replay.Advance(snapshot.Current); err != nil {
 			return err
@@ -356,6 +365,17 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 		}
 		researchEvents := append(platformEvents, impulseEvents...)
 		researchEvents = append(researchEvents, pullbackEvents...)
+		if swingReviewPath != "" && snapshot.Current.OpenTime < endTime.UnixMilli() {
+			if side, ok := supertrendFlipSide(snapshot.Window, "ai_supertrend_direction"); ok {
+				swingEvidence = append(swingEvidence, signalresearch.SwingEvidence{TimeMS: snapshot.Current.CloseTime, Side: side, Source: "ai_trend"})
+			}
+			for _, event := range researchEvents {
+				swingEvidence = append(swingEvidence, signalresearch.SwingEvidence{TimeMS: snapshot.Current.CloseTime, Side: event.Side, Source: event.Source})
+			}
+			for _, event := range compressionBreakoutEvents {
+				swingEvidence = append(swingEvidence, signalresearch.SwingEvidence{TimeMS: snapshot.Current.CloseTime, Side: event.Side, Source: event.Source})
+			}
+		}
 		for _, comparison := range supertrendComparisonReplays {
 			if err := comparison.followthroughReplay.Advance(snapshot); err != nil {
 				return err
@@ -458,7 +478,7 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 			if hasFlip {
 				item.exhaustPending = nil
 				item.flipSignals++
-				if logTradeDiagnostics {
+				if logTradeDiagnostics || swingReviewPath != "" {
 					flipDiagnostics[item.name] = append(flipDiagnostics[item.name], buildFlipDiagnostic(snapshot, flipSide, currentRegime))
 				}
 				entered, err := item.flipReplay.TryEnter(snapshot, flipSide, currentRegime)
@@ -466,6 +486,7 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 					return err
 				}
 				if entered {
+					item.entryDiagnostics = append(item.entryDiagnostics, buildScenarioEntryDiagnostic("flip", snapshot, flipSide, currentRegime))
 					entryKey := fmt.Sprintf("%s:%d", item.name, snapshot.Current.CloseTime)
 					if err := item.followthroughReplay.AddSignal(entryKey, snapshot, flipSide, []string{item.flipKey}); err != nil {
 						return err
@@ -602,8 +623,12 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 			pullbackSide := item.currentPullbackSide
 			if pullbackSide != strategy.SignalSideHold {
 				item.pullbackSignals++
-				if _, err := item.pullbackReplay.TryEnter(snapshot, pullbackSide, currentRegime); err != nil {
+				entered, err := item.pullbackReplay.TryEnter(snapshot, pullbackSide, currentRegime)
+				if err != nil {
 					return err
+				}
+				if entered {
+					item.entryDiagnostics = append(item.entryDiagnostics, buildScenarioEntryDiagnostic("pullback", snapshot, pullbackSide, currentRegime))
 				}
 			}
 			combinedSide, conflict := combinedEntrySide(flipSide, hasFlip, pullbackSide)
@@ -624,6 +649,37 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 	for _, item := range supertrendComparisonReplays {
 		item.finish()
 	}
+	if swingReviewPath != "" {
+		if !compareSupertrendVersions {
+			return fmt.Errorf("swing review requires -supertrend-version-compare")
+		}
+		var ai *supertrendComparisonReplay
+		for _, item := range supertrendComparisonReplays {
+			if item.name == "ai" {
+				ai = item
+				break
+			}
+		}
+		if ai == nil {
+			return fmt.Errorf("AI Supertrend comparison replay missing")
+		}
+		swingSignals := make([]signalresearch.SwingSignal, 0, len(flipDiagnostics["ai"]))
+		for _, item := range flipDiagnostics["ai"] {
+			swingSignals = append(swingSignals, signalresearch.SwingSignal{TimeMS: item.SignalTimeMS, Side: item.Side, Allowed: item.Allowed, Reason: item.Reason})
+		}
+		report, err := signalresearch.ReviewSwings(swingBars, swingSignals, swingEvidence, ai.flipReplay.Trades(), signalresearch.SwingReviewConfig{MinimumMovePoints: swingMinimumPoints, ReversalPoints: swingReversalPoints, LeadWindowMS: (45 * time.Minute).Milliseconds()})
+		if err != nil {
+			return err
+		}
+		encoded, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(swingReviewPath, encoded, 0o644); err != nil {
+			return fmt.Errorf("write swing review: %w", err)
+		}
+		log.Printf("swing review written path=%s opportunities=%d early=%d middle=%d late=%d missed=%d traded=%d net_pnl=%.2f", swingReviewPath, len(report.Opportunities), report.EarlyHits, report.MiddleHits, report.LateHits, report.Missed, report.Traded, report.NetPnL)
+	}
 	if breakoutComparison != nil {
 		breakoutComparison.finish()
 	}
@@ -638,9 +694,11 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 	}
 	for _, item := range supertrendComparisonReplays {
 		for _, mode := range item.summaries() {
-			summaryJSON, err := json.Marshal(mode.replay.Summary())
+			summary := mode.replay.Summary()
+			summaryJSON, err := json.Marshal(summary)
 			if err != nil {
-				return err
+				log.Printf("supertrend continuation comparison run_id=%s regime_version=%s supertrend_version=%s entry_mode=%s raw_signals=%d trades=%d net_pnl=%.2f profit_factor=%v", cfg.Runtime.RunID, regimeAnalyzer.Version(), item.name, mode.name, mode.rawSignals, summary.Trades, summary.NetPnL, summary.ProfitFactor)
+				continue
 			}
 			log.Printf("supertrend continuation comparison run_id=%s regime_version=%s supertrend_version=%s entry_mode=%s raw_signals=%d summary=%s", cfg.Runtime.RunID, regimeAnalyzer.Version(), item.name, mode.name, mode.rawSignals, summaryJSON)
 		}
@@ -689,6 +747,28 @@ func run(ctx context.Context, configPath string, fixedText string, atrText strin
 				log.Printf("supertrend followthrough diagnostic version=%s detail=%s", item.name, encoded)
 			}
 		}
+	}
+	if stopReviewPath != "" {
+		var sources []stopReviewSource
+		for _, item := range supertrendComparisonReplays {
+			if item.name == "ai" {
+				sources = append(sources,
+					stopReviewSource{mode: "flip", trades: item.flipReplay.Trades(), entries: item.entryDiagnostics},
+					stopReviewSource{mode: "pullback", trades: item.pullbackReplay.Trades(), entries: item.entryDiagnostics})
+			}
+		}
+		report, err := buildStopReview(swingBars, sources)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(stopReviewPath, encoded, 0o644); err != nil {
+			return fmt.Errorf("write stop review: %w", err)
+		}
+		log.Printf("stop review written path=%s initial_stops=%d reasons=%v", stopReviewPath, len(report.Trades), report.ReasonCounts)
 	}
 	if breakoutComparison != nil {
 		for _, mode := range breakoutComparison.summaries() {
@@ -822,6 +902,7 @@ type supertrendComparisonReplay struct {
 	retestSignals          int
 	exhaustDeferredSignals int
 	currentPullbackSide    strategy.SignalSide
+	entryDiagnostics       []scenarioEntryDiagnostic
 	pendingFlip            *pendingFlip
 	pullbackDetector       *signalresearch.PullbackDetector
 	flipReplay             *signalresearch.SinglePositionReplay
@@ -1204,6 +1285,141 @@ type supertrendFlipDiagnostic struct {
 	Direction10M          string                               `json:"direction_10m,omitempty"`
 	Direction15M          string                               `json:"direction_15m,omitempty"`
 	HigherTimeframes      map[string]higherTimeframeDiagnostic `json:"higher_timeframes,omitempty"`
+}
+
+type scenarioEntryDiagnostic struct {
+	Mode                  string              `json:"mode"`
+	TimeMS                int64               `json:"time_ms"`
+	Side                  strategy.SignalSide `json:"side"`
+	Price                 float64             `json:"price"`
+	RegimeState           marketregime.State  `json:"regime_state,omitempty"`
+	RegimeReason          string              `json:"regime_reason,omitempty"`
+	ATR14                 float64             `json:"atr14"`
+	EMA25DistancePct      float64             `json:"ema25_distance_pct"`
+	SupertrendDistancePct float64             `json:"supertrend_distance_pct"`
+	VolumeRatio20         float64             `json:"volume_ratio20"`
+	MACDHistogram         float64             `json:"macd_hist"`
+	MACDHistogramDelta    float64             `json:"macd_hist_delta"`
+	MACDMomentum          string              `json:"macd_momentum,omitempty"`
+	StructureEvent        string              `json:"structure_event,omitempty"`
+	StructureBias         string              `json:"structure_bias,omitempty"`
+	Direction5M           string              `json:"direction_5m,omitempty"`
+	Direction10M          string              `json:"direction_10m,omitempty"`
+	Direction15M          string              `json:"direction_15m,omitempty"`
+	Direction30M          string              `json:"direction_30m,omitempty"`
+}
+
+type stopReviewSource struct {
+	mode    string
+	trades  []signalresearch.SinglePositionTrade
+	entries []scenarioEntryDiagnostic
+}
+
+type stopReviewTrade struct {
+	Mode                 string                             `json:"mode"`
+	Trade                signalresearch.SinglePositionTrade `json:"trade"`
+	Entry                *scenarioEntryDiagnostic           `json:"entry,omitempty"`
+	PostStopFavorablePts float64                            `json:"post_stop_favorable_points"`
+	PostStopAdversePts   float64                            `json:"post_stop_adverse_points"`
+	PostStopBars         int                                `json:"post_stop_bars"`
+	Reason               string                             `json:"reason"`
+}
+
+type stopReviewReport struct {
+	ForwardBars   int               `json:"forward_bars"`
+	Trades        []stopReviewTrade `json:"trades"`
+	WinningTrades []stopReviewTrade `json:"winning_trades"`
+	ModeCounts    map[string]int    `json:"mode_counts"`
+	ReasonCounts  map[string]int    `json:"reason_counts"`
+}
+
+func buildScenarioEntryDiagnostic(mode string, snapshot strategy.Snapshot, side strategy.SignalSide, regime *marketregime.Result) scenarioEntryDiagnostic {
+	price, _ := strconv.ParseFloat(snapshot.Current.Close, 64)
+	result := scenarioEntryDiagnostic{Mode: mode, TimeMS: snapshot.Current.CloseTime, Side: side, Price: price}
+	result.ATR14, _ = snapshot.Indicator.Float("atr14")
+	result.EMA25DistancePct, _ = snapshot.Indicator.Float("price_ema25_distance_pct")
+	result.SupertrendDistancePct, _ = snapshot.Indicator.Float("supertrend_distance_pct")
+	result.VolumeRatio20, _ = snapshot.Indicator.Float("volume_ratio20")
+	result.MACDHistogram, _ = snapshot.Indicator.Float("macd_hist")
+	result.MACDHistogramDelta, _ = snapshot.Indicator.Float("macd_hist_delta")
+	result.MACDMomentum = snapshot.Indicator.Signals["macd_momentum"]
+	result.StructureEvent = snapshot.Indicator.Signals["structure_event"]
+	result.StructureBias = snapshot.Indicator.Signals["structure_bias"]
+	result.Direction5M = timeframeSignal(snapshot, "5m", "ai_supertrend_direction")
+	result.Direction10M = timeframeSignal(snapshot, "10m", "ai_supertrend_direction")
+	result.Direction15M = timeframeSignal(snapshot, "15m", "ai_supertrend_direction")
+	result.Direction30M = timeframeSignal(snapshot, "30m", "ai_supertrend_direction")
+	if regime != nil {
+		result.RegimeState = regime.State
+		result.RegimeReason = regimeDecisionReason(side, *regime)
+	}
+	return result
+}
+
+func buildStopReview(bars []marketmodel.Kline, sources []stopReviewSource) (stopReviewReport, error) {
+	const forwardBars = 20
+	report := stopReviewReport{ForwardBars: forwardBars, ModeCounts: map[string]int{}, ReasonCounts: map[string]int{}}
+	for _, source := range sources {
+		for _, trade := range source.trades {
+			var entry *scenarioEntryDiagnostic
+			for index := range source.entries {
+				candidate := source.entries[index]
+				if candidate.Mode == source.mode && candidate.TimeMS == trade.EntryTimeMS {
+					copy := candidate
+					entry = &copy
+					break
+				}
+			}
+			if trade.NetPnL > 0 {
+				report.WinningTrades = append(report.WinningTrades, stopReviewTrade{Mode: source.mode, Trade: trade, Entry: entry, Reason: "profitable"})
+			}
+			if trade.ExitReason != "initial_stop" {
+				continue
+			}
+			item := stopReviewTrade{Mode: source.mode, Trade: trade, Entry: entry, PostStopBars: forwardBars}
+			seen := 0
+			for _, bar := range bars {
+				if bar.CloseTime <= trade.ExitTimeMS || seen >= forwardBars {
+					continue
+				}
+				high, err := strconv.ParseFloat(bar.High, 64)
+				if err != nil {
+					return stopReviewReport{}, err
+				}
+				low, err := strconv.ParseFloat(bar.Low, 64)
+				if err != nil {
+					return stopReviewReport{}, err
+				}
+				if trade.Side == strategy.SignalSideBuy {
+					item.PostStopFavorablePts = math.Max(item.PostStopFavorablePts, high-trade.EntryPrice)
+					item.PostStopAdversePts = math.Max(item.PostStopAdversePts, trade.EntryPrice-low)
+				} else {
+					item.PostStopFavorablePts = math.Max(item.PostStopFavorablePts, trade.EntryPrice-low)
+					item.PostStopAdversePts = math.Max(item.PostStopAdversePts, high-trade.EntryPrice)
+				}
+				seen++
+			}
+			item.PostStopBars = seen
+			switch {
+			case item.PostStopFavorablePts >= 30:
+				item.Reason = "stop_too_tight_or_entry_timing"
+			case item.PostStopAdversePts >= 30:
+				item.Reason = "wrong_direction"
+			case source.mode == "pullback":
+				item.Reason = "failed_pullback_resume"
+			case source.mode == "breakout":
+				item.Reason = "false_breakout"
+			case source.mode == "impulse":
+				item.Reason = "failed_impulse_followthrough"
+			default:
+				item.Reason = "unclassified_no_followthrough"
+			}
+			report.Trades = append(report.Trades, item)
+			report.ModeCounts[item.Mode]++
+			report.ReasonCounts[item.Reason]++
+		}
+	}
+	return report, nil
 }
 
 type higherTimeframeDiagnostic struct {
