@@ -213,6 +213,34 @@ func (s *IndicatorWindowSchema) SignalIndex(name string) (int, bool) {
 	return index, ok
 }
 
+func (s *IndicatorWindowSchema) NumericNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return orderedSchemaNames(s.numericIndexes)
+}
+
+func (s *IndicatorWindowSchema) SignalNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return orderedSchemaNames(s.signalIndexes)
+}
+
+func orderedSchemaNames(indexes map[string]int) []string {
+	names := make([]string, len(indexes))
+	for name, index := range indexes {
+		if index >= 0 && index < len(names) {
+			names[index] = name
+		}
+	}
+	return names
+}
+
 func (v IndicatorWindowView) Numeric(name string) (NumericSeries, bool) {
 	if index, ok := v.Schema.NumericIndex(name); ok && index < len(v.DenseValues) && densePresent(v.NumericPresent, index) {
 		value := v.DenseValues[index]
@@ -242,6 +270,34 @@ func (v IndicatorWindowView) Signal(name string) (SignalSeries, bool) {
 
 func (v IndicatorWindowView) Empty() bool {
 	return len(v.Values) == 0 && len(v.Signals) == 0 && !denseAny(v.NumericPresent) && !denseAny(v.SignalPresent)
+}
+
+func (v IndicatorWindowView) AllNumeric() map[string]NumericSeries {
+	names := v.Schema.NumericNames()
+	result := make(map[string]NumericSeries, len(names)+len(v.Values))
+	for _, name := range names {
+		if value, ok := v.Numeric(name); ok {
+			result[name] = value
+		}
+	}
+	for name, value := range v.Values {
+		result[name] = value
+	}
+	return result
+}
+
+func (v IndicatorWindowView) AllSignals() map[string]SignalSeries {
+	names := v.Schema.SignalNames()
+	result := make(map[string]SignalSeries, len(names)+len(v.Signals))
+	for _, name := range names {
+		if value, ok := v.Signal(name); ok {
+			result[name] = value
+		}
+	}
+	for name, value := range v.Signals {
+		result[name] = value
+	}
+	return result
 }
 
 func densePresent(words []uint64, index int) bool {

@@ -62,6 +62,7 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 - 已生成并持久化策略事件、回测交易明细和 run 级摘要。
 - 已支持基础回测报告计算和可选 JSON 文件输出，包括 trade 级权益曲线、逐 K 浮动权益曲线、组合权益曲线、模拟账户资金曲线、最大回撤、胜率、profit factor 和连续亏损统计。
 - 回测报告已包含决策诊断：信号分布、按多空拆分的检查通过/阻断/缺失统计、主要阻断原因和入场分数区间，可区分引擎异常、语义阻断和阈值过滤。
+- 已新增独立 Supertrend 信号研究命令和 ClickHouse 明细表。研究链路不执行策略仓位，每个原始信号独立观察 12 小时，按固定保证金止损和 ATR 止损分别记录止损前最高止盈阶梯、精确 MFE/MAE、固定止盈首触结果，以及入场时完整底层指标、窗口语义和多周期上下文。
 - 回测交易明细可持久化入口模式、所有同时成立的触发来源、入口分数、周期/波动/均线状态，以及 MFE、MAE、极值时间、利润回吐和持仓时长。旧策略实验 Run 已清理，后续基线使用新 Run ID 重新生成。
 - 回测策略事件、成交和交易明细使用对应历史 snapshot 的 `AsOf` / `CloseTime`，不再使用零值运行时钟。
 - 回测模拟账户已纳入初始资金、保证金占用、手续费、返佣、可用余额检查和账户权益归零爆仓处理。
@@ -119,7 +120,9 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 - 回测还没有图表报告和结果查询 API。
 - 回测还没有参数化批量运行和策略参数配置入口。
-- Supertrend 入口语义已经重置为“必须由 3m `supertrend_flip` 或 `wick_reclaim` 触发”；旧年度实验结果及 Run 已清理，目前没有可用于判断新版本收益能力的有效基线。新版本完成年度和样本外回测前不能进入实盘。
+- 2025-08 至 2025-11 的 ETHUSDT 3m 训练研究获得 1,550 个 `supertrend_flip`。原始信号的全部止盈止损组合均为负；训练区间扫描得到的 `sr_position == mid AND wavetrend_momentum == weakening` 候选在多个 300% 止盈组合中转正，但这是训练结果。
+- 冻结上述候选后，2026-03 至 2026-06 的独立区间获得 1,518 个 `supertrend_flip` 和 101 个候选信号。固定 70% / 300% 的平均净收益为 `-21.58%`、Profit Factor `0.658`，2.5 ATR / 300% 为 `-9.87%`、Profit Factor `0.798`；候选未通过样本外验证，应判定为训练区间拟合，不得进入正式策略。
+- `wick_reclaim` 当前无法产生研究信号：策略语义读取窗口 `high` / `low`，但底层指标快照目前只写入 `close`。在补齐字段并重新生成研究数据前，现有 3,068 个信号只能代表 `supertrend_flip`，不能称为全部 Supertrend 触发。
 - 回测爆仓当前按账户权益归零处理，还没有接入交易所维持保证金、标记价格和阶梯强平公式。
 - 回测滑点当前是固定 bps 模型，还没有按盘口深度、成交量、波动率或订单大小动态估算。
 - position-engine 还没有独立 `backtest` / `notify` handler；testnet/live 已通过账户无关计划接入 execution-engine。
@@ -137,16 +140,17 @@ ClickHouse 历史 K 线 / Redis 恢复缓存 / NATS market snapshot
 
 ## 建议下一步
 
-1. 重新构建并运行纯 Supertrend 年度基线，分别统计 3m `supertrend_flip` 和 `wick_reclaim` 的交易数、胜率、净收益、回撤及成本。
-2. 在入口定义不变的前提下，逐项验证大周期背景、MACD、成交量和动能过滤器；一次只改变一个变量，并补样本外区间。
-3. 固定入口与过滤器后，再独立比较现有自适应退出和更简单的止损/止盈方案，避免入口与退出同时变化。
-4. 只有 3m 新基线成立后，才接入 1m 精确执行；1m 只在 3m 已产生进出场意图时读取，不参与策略方向判断。
-5. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
-6. 补回测图表报告、结果查询入口和参数化批量运行。
-7. 实现 position-engine 的 notify handler。
-8. 增加交易所 symbol capability 自动同步和缓存。
-9. 明确过期策略反向退出但无 exit rule 时的 action 协议。
-10. 使用真实 demo/testnet 凭证完成 execution-engine 端到端验收，再使用最小订单完成 live 安全验收。
+1. 先补齐指标快照中的 `high` / `low` 并验证 `wick_reclaim` 语义，再将 flip 与 reclaim 分开生成研究数据，不能混成单一信号总体。
+2. 统一研究查询口径：指标发现使用“每个信号 × 每种止损一行”的最高止盈潜力标签；固定 TP/SL 表只用于验证可执行退出，不再混用累计命中和互斥最高档分组。
+3. 停止沿用未通过 OOS 的 `sr_position == mid AND wavetrend_momentum == weakening` 候选。下一轮重新划分训练与冻结验证区间，并限制预先声明的指标集合和组合数量。
+4. 固定入口与过滤器后，再独立比较现有自适应退出和更简单的止损/止盈方案，避免入口与退出同时变化。
+5. 只有 3m 新基线成立后，才接入 1m 精确执行；1m 只在 3m 已产生进出场意图时读取，不参与策略方向判断。
+6. 做一次 top500 长时间全链路压测，观察 Redis、NATS market snapshot、NATS strategy decision、ClickHouse、market-data 和策略链路积压；期间用 `make queue-status` 和 `make market-health` 辅助判断队列和可决策状态。
+7. 补回测图表报告、结果查询入口和参数化批量运行。
+8. 实现 position-engine 的 notify handler。
+9. 增加交易所 symbol capability 自动同步和缓存。
+10. 明确过期策略反向退出但无 exit rule 时的 action 协议。
+11. 使用真实 demo/testnet 凭证完成 execution-engine 端到端验收，再使用最小订单完成 live 安全验收。
 
 ## 验证状态
 
@@ -158,4 +162,4 @@ GOCACHE=/private/tmp/alphaflow-go-cache GO111MODULE=on go test ./...
 
 最近一轮还通过了 `go vet ./...` 和执行链关键包的 race 测试。本地 Redis/NATS 集成验证覆盖了旧仓位 key 迁移、部分成交回报去重、意图/回报 dead-letter、异常 JSON，以及实际 position-engine 消费最终成交回报并写入策略归因仓位。该验证未连接交易所或发送真实订单，不能替代 demo/testnet 和 live 验收。
 
-最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查、多周期流式回放和交易级诊断。Supertrend 已收敛为 3m 核心信号唯一授权入口，其他信号只参与过滤或诊断；旧实验结果已清理，下一步需要重新生成年度基线和样本外结果。
+最近几轮更新包含 NATS JetStream 队列替换、指标流式计算优化、market snapshot bus、strategy-engine 内存市场态、在线/回测统一策略上下文、多策略错误隔离、回测数据完整性检查、多周期流式回放、交易级诊断和独立信号研究。Supertrend flip 已完成一轮训练与冻结样本外验证，首个指标组合未通过 OOS；下一步先修复 wick reclaim 数据基础和研究口径，再开展新的有限假设实验。

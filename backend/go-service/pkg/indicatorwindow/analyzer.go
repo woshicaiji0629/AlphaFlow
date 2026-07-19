@@ -459,6 +459,7 @@ func analyzePointsModeWithSchema(
 	addCandleWindowAnalysis(ctx)
 	addPumpWindowAnalysis(ctx)
 	addGenericWindowAnalysis(ctx)
+	addMarketCapabilityScore(ctx)
 	if typed {
 		for key, value := range ctx.values {
 			if _, exists := ctx.numericValues[key]; exists {

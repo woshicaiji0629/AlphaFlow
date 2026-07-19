@@ -218,6 +218,30 @@ func entryMetadata(entryEvent strategy.StrategyEvent) map[string]string {
 			copyDiagnosticValue(metadata, check.Values, "zone", "entry_stc_zone")
 			copyDiagnosticValue(metadata, check.Values, "cross", "entry_stc_cross")
 			copyDiagnosticValue(metadata, check.Values, "entry_veto", "entry_stc_veto")
+		case "entry_feature_snapshot":
+			for _, key := range []string{
+				"market_direction_score",
+				"market_direction_agreement",
+				"market_direction_conflict",
+				"market_trend_strength",
+				"market_momentum_strength",
+				"market_volatility_health",
+				"market_structure_quality",
+				"market_volume_confirmation",
+				"market_location_score",
+				"market_risk_score",
+				"market_data_confidence",
+				"market_score_available_features",
+				"market_score_expected_features",
+				"market_strength_score",
+				"market_risk_adjusted_strength_score",
+				"market_directional_capability_score",
+				"market_score_version",
+				"market_direction_bias",
+				"market_strength_state",
+			} {
+				copyDiagnosticValue(metadata, check.Values, key, "entry_"+key)
+			}
 		}
 	}
 	return metadata

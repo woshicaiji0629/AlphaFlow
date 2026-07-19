@@ -371,6 +371,22 @@ func entryFeatureSnapshotCheck(window strategy.IndicatorWindowView, side strateg
 		"price_ema25_distance_pct",
 		"price_ema99_distance_pct",
 		"ema25_slope5_pct",
+		"market_direction_score",
+		"market_direction_agreement",
+		"market_direction_conflict",
+		"market_trend_strength",
+		"market_momentum_strength",
+		"market_volatility_health",
+		"market_structure_quality",
+		"market_volume_confirmation",
+		"market_location_score",
+		"market_risk_score",
+		"market_data_confidence",
+		"market_score_available_features",
+		"market_score_expected_features",
+		"market_strength_score",
+		"market_risk_adjusted_strength_score",
+		"market_directional_capability_score",
 	} {
 		series, ok := window.Numeric(key)
 		if !ok {
@@ -388,6 +404,9 @@ func entryFeatureSnapshotCheck(window strategy.IndicatorWindowView, side strateg
 		"ema_alignment",
 		"trend_direction",
 		"volatility_window_state",
+		"market_score_version",
+		"market_direction_bias",
+		"market_strength_state",
 	} {
 		value := latestSignal(window, key)
 		if value != "" {
@@ -595,6 +614,12 @@ func standardEntryTriggerSources(window strategy.IndicatorWindowView, side strat
 		sources = append(sources, "supertrend_flip")
 	}
 	return sources
+}
+
+// ResearchTriggerSources returns the raw Supertrend-authorized entry events
+// without applying strategy filters, position state, or entry thresholds.
+func ResearchTriggerSources(window strategy.IndicatorWindowView, side strategy.SignalSide) []string {
+	return supertrendEntryTriggerSources(standardEntryTriggerSources(window, side))
 }
 
 func entryTriggerValues(_ strategy.IndicatorWindowView, _ strategy.SignalSide, standardSources []string) map[string]string {

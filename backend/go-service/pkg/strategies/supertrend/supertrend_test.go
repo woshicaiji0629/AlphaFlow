@@ -62,7 +62,13 @@ func TestEntryFeatureSnapshotCapturesAvailableValuesWithoutAffectingDecision(t *
 	input := snapshot(strategy.SignalSideBuy, nil)
 	input.Window.Values["adx14"] = strategy.NumericSeries{Latest: 27.5, Previous: 24.25}
 	input.Window.Values["dynamic_swing_vwap_distance_pct"] = strategy.NumericSeries{Latest: -0.35, Previous: -0.2}
+	input.Window.Values["market_strength_score"] = strategy.NumericSeries{Latest: 72.5, Previous: 68.25}
+	input.Window.Values["market_risk_adjusted_strength_score"] = strategy.NumericSeries{Latest: 62.5, Previous: 58.25}
+	input.Window.Values["market_directional_capability_score"] = strategy.NumericSeries{Latest: 42.5, Previous: 38.25}
+	input.Window.Values["market_data_confidence"] = strategy.NumericSeries{Latest: 90.9, Previous: 86.4}
 	input.Window.Signals["stc_zone"] = strategy.SignalSeries{Latest: "oversold"}
+	input.Window.Signals["market_score_version"] = strategy.SignalSeries{Latest: "market-capability.v2.7"}
+	input.Window.Signals["market_direction_bias"] = strategy.SignalSeries{Latest: "bull"}
 
 	result, err := item.Evaluate(context.Background(), input, nil)
 	if err != nil {
@@ -77,6 +83,13 @@ func TestEntryFeatureSnapshotCapturesAvailableValuesWithoutAffectingDecision(t *
 	}
 	if check.Values["dynamic_swing_vwap_distance_pct"] != "-0.35" || check.Values["stc_zone"] != "oversold" {
 		t.Fatalf("feature snapshot = %#v", check.Values)
+	}
+	if check.Values["market_strength_score"] != "72.5" || check.Values["market_directional_capability_score"] != "42.5" ||
+		check.Values["market_risk_adjusted_strength_score"] != "62.5" ||
+		check.Values["market_directional_capability_score_previous"] != "38.25" ||
+		check.Values["market_data_confidence"] != "90.9" || check.Values["market_score_version"] != "market-capability.v2.7" ||
+		check.Values["market_direction_bias"] != "bull" {
+		t.Fatalf("market capability snapshot = %#v", check.Values)
 	}
 	if _, exists := check.Values["missing_feature"]; exists {
 		t.Fatalf("missing feature unexpectedly captured: %#v", check.Values)
