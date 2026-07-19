@@ -3,11 +3,14 @@ package signalresearch
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+
+	"alphaflow/go-service/pkg/marketregime"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -100,10 +103,138 @@ func (s *Store) initSchema(ctx context.Context) error {
 			created_at_ms Int64
 		) ENGINE = ReplacingMergeTree(created_at_ms)
 		ORDER BY (run_id, signal_id, stop_kind, stop_value, take_profit_margin_pct)`,
+		`ALTER TABLE supertrend_signal_research ADD COLUMN IF NOT EXISTS trigger_metadata_json String AFTER trigger_sources`,
+		`CREATE TABLE IF NOT EXISTS supertrend_signal_validation_observations (
+			run_id String,
+			signal_id String,
+			observation_bars UInt8,
+			observation_time_ms Int64,
+			max_favorable_bps Float64,
+			max_adverse_bps Float64,
+			close_return_bps Float64,
+			signal_structure_held Bool,
+			confirmation_5m LowCardinality(String),
+			created_at_ms Int64
+		) ENGINE = ReplacingMergeTree(created_at_ms)
+		ORDER BY (run_id, signal_id, observation_bars)`,
+		`CREATE TABLE IF NOT EXISTS supertrend_chop_observations (
+			run_id String,
+			bar_close_time_ms Int64,
+			state LowCardinality(String),
+			efficiency_ratio Float64,
+			supertrend_flips_10m UInt8,
+			adx_10m Float64,
+			normalized_slope_10m Float64,
+			range_atr_10m Float64,
+			evidence_votes UInt8,
+			platform_high Float64,
+			platform_low Float64,
+			failed_breakouts UInt16
+		) ENGINE = ReplacingMergeTree
+		ORDER BY (run_id, bar_close_time_ms)`,
+		`CREATE TABLE IF NOT EXISTS market_regime_observations (
+			run_id String,
+			bar_close_time_ms Int64,
+			state LowCardinality(String),
+			direction LowCardinality(String),
+			allow_new_position Bool,
+			dormant_intervals UInt8,
+			lock_reason LowCardinality(String),
+			efficiency_ratio Float64,
+			platform_range_atr Float64,
+			platform_high Float64,
+			platform_low Float64,
+			failed_breakouts UInt16,
+			state_bars UInt16,
+			evidence_json String
+		) ENGINE = ReplacingMergeTree
+		ORDER BY (run_id, bar_close_time_ms)`,
+		`ALTER TABLE market_regime_observations ADD COLUMN IF NOT EXISTS lock_reason LowCardinality(String) AFTER dormant_intervals`,
 	}
 	for _, query := range queries {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("initialize signal research schema: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveMarketRegimeObservations(ctx context.Context, runID string, items []marketregime.Result, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	for start := 0; start < len(items); start += batchSize {
+		end := min(start+batchSize, len(items))
+		rows := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*14)
+		for _, item := range items[start:end] {
+			evidenceJSON, err := json.Marshal(item.Evidence)
+			if err != nil {
+				return fmt.Errorf("marshal market regime evidence: %w", err)
+			}
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, runID, item.BarCloseTimeMS, string(item.State), string(item.Direction),
+				item.AllowNewPosition, item.DormantIntervals, item.LockReason, item.EfficiencyRatio, item.PlatformRangeATR,
+				item.PlatformHigh, item.PlatformLow, item.FailedBreakouts, item.StateBars, string(evidenceJSON))
+		}
+		query := `INSERT INTO market_regime_observations (
+			run_id, bar_close_time_ms, state, direction, allow_new_position, dormant_intervals, lock_reason,
+			efficiency_ratio, platform_range_atr, platform_high, platform_low,
+			failed_breakouts, state_bars, evidence_json
+		) VALUES ` + strings.Join(rows, ", ")
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert market regime observations: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveChopObservations(ctx context.Context, items []ChopObservation, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	for start := 0; start < len(items); start += batchSize {
+		end := min(start+batchSize, len(items))
+		rows := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*12)
+		for _, item := range items[start:end] {
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, item.RunID, item.BarCloseTimeMS, item.State, item.EfficiencyRatio,
+				item.SupertrendFlips10M, item.ADX10M, item.NormalizedSlope10M, item.RangeATR10M,
+				item.EvidenceVotes, item.PlatformHigh, item.PlatformLow, item.FailedBreakouts)
+		}
+		query := `INSERT INTO supertrend_chop_observations (
+			run_id, bar_close_time_ms, state, efficiency_ratio, supertrend_flips_10m,
+			adx_10m, normalized_slope_10m, range_atr_10m, evidence_votes,
+			platform_high, platform_low, failed_breakouts
+		) VALUES ` + strings.Join(rows, ", ")
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert chop observations: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveValidationObservations(ctx context.Context, items []ValidationObservation, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	for start := 0; start < len(items); start += batchSize {
+		end := min(start+batchSize, len(items))
+		rows := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*10)
+		for _, item := range items[start:end] {
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, item.RunID, item.SignalID, item.ObservationBars, item.ObservationTimeMS,
+				item.MaxFavorableBps, item.MaxAdverseBps, item.CloseReturnBps, item.SignalStructureHeld,
+				item.Confirmation5M, item.CreatedAtMS)
+		}
+		query := `INSERT INTO supertrend_signal_validation_observations (
+			run_id, signal_id, observation_bars, observation_time_ms, max_favorable_bps,
+			max_adverse_bps, close_return_bps, signal_structure_held, confirmation_5m, created_at_ms
+		) VALUES ` + strings.Join(rows, ", ")
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert signal validation observations: %w", err)
 		}
 	}
 	return nil
@@ -116,15 +247,15 @@ func (s *Store) SaveSignals(ctx context.Context, items []Signal, batchSize int) 
 	for start := 0; start < len(items); start += batchSize {
 		end := min(start+batchSize, len(items))
 		rows := make([]string, 0, end-start)
-		args := make([]any, 0, (end-start)*16)
+		args := make([]any, 0, (end-start)*17)
 		for _, item := range items[start:end] {
-			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args, item.RunID, item.SignalID, item.Exchange, item.Market, item.Symbol, item.Interval,
-				string(item.Side), item.TriggerSources, item.SignalTimeMS, item.SignalBarOpenMS, item.EntryPrice,
+				string(item.Side), item.TriggerSources, item.TriggerMetadataJSON, item.SignalTimeMS, item.SignalBarOpenMS, item.EntryPrice,
 				item.ATR, item.HorizonMinutes, item.FeatureVersion, item.FeatureSnapshotJSON, item.CreatedAtMS)
 		}
 		query := `INSERT INTO supertrend_signal_research (
-			run_id, signal_id, exchange, market, symbol, interval, side, trigger_sources,
+			run_id, signal_id, exchange, market, symbol, interval, side, trigger_sources, trigger_metadata_json,
 			signal_time_ms, signal_bar_open_time_ms, entry_price, atr, horizon_minutes,
 			feature_version, feature_snapshot_json, created_at_ms
 		) VALUES ` + strings.Join(rows, ", ")

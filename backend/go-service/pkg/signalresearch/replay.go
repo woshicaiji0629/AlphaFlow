@@ -42,6 +42,7 @@ type Signal struct {
 	Interval            string
 	Side                strategy.SignalSide
 	TriggerSources      string
+	TriggerMetadataJSON string
 	SignalTimeMS        int64
 	SignalBarOpenMS     int64
 	EntryPrice          float64
@@ -118,6 +119,10 @@ func New(config Config) (*Replay, error) {
 }
 
 func (r *Replay) AddSignal(snapshot strategy.Snapshot, side strategy.SignalSide, sources []string) error {
+	return r.AddSignalWithMetadata(snapshot, side, sources, "")
+}
+
+func (r *Replay) AddSignalWithMetadata(snapshot strategy.Snapshot, side strategy.SignalSide, sources []string, triggerMetadataJSON string) error {
 	entryPrice, err := strconv.ParseFloat(snapshot.Current.Close, 64)
 	if err != nil || entryPrice <= 0 {
 		return fmt.Errorf("parse signal entry price %q", snapshot.Current.Close)
@@ -137,7 +142,7 @@ func (r *Replay) AddSignal(snapshot strategy.Snapshot, side strategy.SignalSide,
 	signal := Signal{
 		RunID: r.config.RunID, SignalID: signalID(r.config.RunID, snapshot, side, sourceText),
 		Exchange: snapshot.Target.Exchange, Market: snapshot.Target.Market, Symbol: snapshot.Target.Symbol,
-		Interval: snapshot.Target.Interval, Side: side, TriggerSources: sourceText,
+		Interval: snapshot.Target.Interval, Side: side, TriggerSources: sourceText, TriggerMetadataJSON: triggerMetadataJSON,
 		SignalTimeMS: signalTime, SignalBarOpenMS: snapshot.Current.OpenTime, EntryPrice: entryPrice, ATR: atr,
 		HorizonMinutes: int(r.config.Horizon / time.Minute), FeatureVersion: FeatureSnapshotVersion,
 		FeatureSnapshotJSON: featureJSON, CreatedAtMS: time.Now().UnixMilli(),
