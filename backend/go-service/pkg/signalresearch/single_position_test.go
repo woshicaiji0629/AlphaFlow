@@ -100,3 +100,31 @@ func TestSinglePositionReplayUsesRegimeAndCooldown(t *testing.T) {
 		t.Fatalf("summary=%#v", replay.summary)
 	}
 }
+
+func TestSinglePositionReplayCountsV4SkipReasons(t *testing.T) {
+	replay, err := NewSinglePositionReplay(singlePositionTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	regime := &marketregime.Result{Reasons: []string{"ribbon_bullish", "v4_weak_direction"}}
+	if entered, err := replay.TryEnter(researchSnapshot("100", strategy.SignalSideBuy), strategy.SignalSideBuy, regime); err != nil || entered {
+		t.Fatalf("entered=%t err=%v", entered, err)
+	}
+	if replay.summary.RegimeSkipReasons["v4_weak_direction"] != 1 {
+		t.Fatalf("reasons=%v", replay.summary.RegimeSkipReasons)
+	}
+}
+
+func TestSinglePositionReplayClassifiesCountertrendV4Signal(t *testing.T) {
+	replay, err := NewSinglePositionReplay(singlePositionTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	regime := &marketregime.Result{AllowShort: true, Reasons: []string{"v4_trend_permitted", "v4_permitted"}}
+	if entered, err := replay.TryEnter(researchSnapshot("100", strategy.SignalSideBuy), strategy.SignalSideBuy, regime); err != nil || entered {
+		t.Fatalf("entered=%t err=%v", entered, err)
+	}
+	if replay.summary.RegimeSkipReasons["v4_countertrend_signal"] != 1 {
+		t.Fatalf("reasons=%v", replay.summary.RegimeSkipReasons)
+	}
+}

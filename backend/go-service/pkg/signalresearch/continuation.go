@@ -139,11 +139,13 @@ func (d *ImpulseDetector) append(bar platformBar, keep int) {
 }
 
 type PullbackConfig struct {
-	TouchDistancePct float64
-	ResumeBars       int
-	MaxArmedBars     int
-	MinVolumeRatio   float64
-	CooldownBars     int
+	TouchDistancePct  float64
+	ResumeBars        int
+	MaxArmedBars      int
+	MinVolumeRatio    float64
+	CooldownBars      int
+	TrendValueKey     string
+	TrendDirectionKey string
 }
 
 type pullbackState struct {
@@ -162,6 +164,12 @@ type PullbackDetector struct {
 func NewPullbackDetector(config PullbackConfig) (*PullbackDetector, error) {
 	if config.TouchDistancePct <= 0 || config.ResumeBars <= 0 || config.MaxArmedBars <= 0 || config.MinVolumeRatio <= 0 || config.CooldownBars < 0 {
 		return nil, fmt.Errorf("invalid pullback detector config")
+	}
+	if config.TrendValueKey == "" {
+		config.TrendValueKey = "supertrend"
+	}
+	if config.TrendDirectionKey == "" {
+		config.TrendDirectionKey = "supertrend_direction"
 	}
 	return &PullbackDetector{config: config, states: map[strategy.SignalSide]pullbackState{}}, nil
 }
@@ -199,7 +207,7 @@ func (d *PullbackDetector) evaluate(snapshot strategy.Snapshot, bar platformBar,
 		d.states[side] = state
 		return PlatformEvent{}, false, nil
 	}
-	aligned, levels := platformTrendAligned(snapshot, bar.close, side)
+	aligned, levels := pullbackTrendAligned(snapshot, bar.close, side, d.config.TrendValueKey, d.config.TrendDirectionKey)
 	if !aligned {
 		d.states[side] = pullbackState{}
 		return PlatformEvent{}, false, nil
@@ -248,6 +256,7 @@ func (d *PullbackDetector) evaluate(snapshot strategy.Snapshot, bar platformBar,
 	}
 	metadata := map[string]any{
 		"version": "trend-pullback-resume.v1", "phase": "resume", "side": side,
+		"trend_value_key": d.config.TrendValueKey, "trend_direction_key": d.config.TrendDirectionKey,
 		"armed_age_bars": state.age, "resume_bars": d.config.ResumeBars,
 		"ema25": ema25, "ema25_distance_pct": distancePct, "volume_ratio5": volumeRatio,
 		"entry_close": bar.close, "entry_supertrend": levels.entry,
@@ -262,4 +271,26 @@ func (d *PullbackDetector) evaluate(snapshot strategy.Snapshot, bar platformBar,
 	state.cooldown = d.config.CooldownBars
 	d.states[side] = state
 	return PlatformEvent{Side: side, Source: PullbackResumeSource, MetadataJSON: string(encoded)}, true, nil
+}
+
+func pullbackTrendAligned(snapshot strategy.Snapshot, closePrice float64, side strategy.SignalSide, valueKey string, directionKey string) (bool, platformLevels) {
+	entryDirection := indicatorSignal(snapshot.Indicator, snapshot.Window, directionKey)
+	entryLevel, entryOK := snapshot.Indicator.Float(valueKey)
+	confirmation, ok := snapshot.Timeframes["5m"]
+	if !ok {
+		return false, platformLevels{}
+	}
+	confirmationDirection := indicatorSignal(confirmation.Indicator, confirmation.Window, directionKey)
+	confirmationLevel, confirmationOK := confirmation.Indicator.Float(valueKey)
+	levels := platformLevels{
+		entry: entryLevel, confirmation: confirmationLevel,
+		entryDirection: entryDirection, confirmationDirection: confirmationDirection,
+	}
+	if !entryOK || !confirmationOK || entryLevel <= 0 || confirmationLevel <= 0 {
+		return false, levels
+	}
+	if side == strategy.SignalSideBuy {
+		return entryDirection == "up" && confirmationDirection == "up" && closePrice > entryLevel && closePrice > confirmationLevel, levels
+	}
+	return entryDirection == "down" && confirmationDirection == "down" && closePrice < entryLevel && closePrice < confirmationLevel, levels
 }

@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"alphaflow/go-service/pkg/marketmodel"
@@ -28,45 +29,46 @@ type SinglePositionConfig struct {
 }
 
 type SinglePositionSummary struct {
-	Trades               int     `json:"trades"`
-	WinningTrades        int     `json:"winning_trades"`
-	LosingTrades         int     `json:"losing_trades"`
-	WinRate              float64 `json:"win_rate"`
-	NetPnL               float64 `json:"net_pnl"`
-	ReturnPct            float64 `json:"return_pct"`
-	GrossProfit          float64 `json:"gross_profit"`
-	GrossLoss            float64 `json:"gross_loss"`
-	ProfitFactor         float64 `json:"profit_factor"`
-	MaxDrawdown          float64 `json:"max_drawdown"`
-	MaxDrawdownPct       float64 `json:"max_drawdown_pct"`
-	MaxConsecutiveLosses int     `json:"max_consecutive_losses"`
-	AverageHoldingMin    float64 `json:"average_holding_minutes"`
-	TradingCost          float64 `json:"trading_cost"`
-	SkippedNoRegime      int     `json:"skipped_no_regime"`
-	SkippedByRegime      int     `json:"skipped_by_regime"`
-	SkippedWhileOpen     int     `json:"skipped_while_open"`
-	SkippedCooldown      int     `json:"skipped_cooldown"`
-	SkippedConflict      int     `json:"skipped_conflict"`
-	InitialStopExits     int     `json:"initial_stop_exits"`
-	BreakEvenExits       int     `json:"break_even_exits"`
-	TrailingStopExits    int     `json:"trailing_stop_exits"`
-	MaxHoldingExits      int     `json:"max_holding_exits"`
-	DatasetEndExits      int     `json:"dataset_end_exits"`
-	AmbiguousStopExits   int     `json:"same_bar_ambiguous_exits"`
-	LossNoProfit         int     `json:"loss_no_profit"`
-	LossSmallProfit      int     `json:"loss_small_profit"`
-	LossGiveback         int     `json:"loss_giveback"`
-	LossTimeout          int     `json:"loss_timeout"`
-	AverageMFEBps        float64 `json:"average_mfe_bps"`
-	AverageMAEBps        float64 `json:"average_mae_bps"`
-	AverageGivebackBps   float64 `json:"average_giveback_bps"`
-	LosingAverageMFEBps  float64 `json:"losing_average_mfe_bps"`
-	WinningMAEP50Bps     float64 `json:"winning_mae_p50_bps"`
-	WinningMAEP75Bps     float64 `json:"winning_mae_p75_bps"`
-	WinningMAEP90Bps     float64 `json:"winning_mae_p90_bps"`
-	LosingMFEP50Bps      float64 `json:"losing_mfe_p50_bps"`
-	LosingMFEP75Bps      float64 `json:"losing_mfe_p75_bps"`
-	LosingMFEP90Bps      float64 `json:"losing_mfe_p90_bps"`
+	Trades               int            `json:"trades"`
+	WinningTrades        int            `json:"winning_trades"`
+	LosingTrades         int            `json:"losing_trades"`
+	WinRate              float64        `json:"win_rate"`
+	NetPnL               float64        `json:"net_pnl"`
+	ReturnPct            float64        `json:"return_pct"`
+	GrossProfit          float64        `json:"gross_profit"`
+	GrossLoss            float64        `json:"gross_loss"`
+	ProfitFactor         float64        `json:"profit_factor"`
+	MaxDrawdown          float64        `json:"max_drawdown"`
+	MaxDrawdownPct       float64        `json:"max_drawdown_pct"`
+	MaxConsecutiveLosses int            `json:"max_consecutive_losses"`
+	AverageHoldingMin    float64        `json:"average_holding_minutes"`
+	TradingCost          float64        `json:"trading_cost"`
+	SkippedNoRegime      int            `json:"skipped_no_regime"`
+	SkippedByRegime      int            `json:"skipped_by_regime"`
+	RegimeSkipReasons    map[string]int `json:"regime_skip_reasons,omitempty"`
+	SkippedWhileOpen     int            `json:"skipped_while_open"`
+	SkippedCooldown      int            `json:"skipped_cooldown"`
+	SkippedConflict      int            `json:"skipped_conflict"`
+	InitialStopExits     int            `json:"initial_stop_exits"`
+	BreakEvenExits       int            `json:"break_even_exits"`
+	TrailingStopExits    int            `json:"trailing_stop_exits"`
+	MaxHoldingExits      int            `json:"max_holding_exits"`
+	DatasetEndExits      int            `json:"dataset_end_exits"`
+	AmbiguousStopExits   int            `json:"same_bar_ambiguous_exits"`
+	LossNoProfit         int            `json:"loss_no_profit"`
+	LossSmallProfit      int            `json:"loss_small_profit"`
+	LossGiveback         int            `json:"loss_giveback"`
+	LossTimeout          int            `json:"loss_timeout"`
+	AverageMFEBps        float64        `json:"average_mfe_bps"`
+	AverageMAEBps        float64        `json:"average_mae_bps"`
+	AverageGivebackBps   float64        `json:"average_giveback_bps"`
+	LosingAverageMFEBps  float64        `json:"losing_average_mfe_bps"`
+	WinningMAEP50Bps     float64        `json:"winning_mae_p50_bps"`
+	WinningMAEP75Bps     float64        `json:"winning_mae_p75_bps"`
+	WinningMAEP90Bps     float64        `json:"winning_mae_p90_bps"`
+	LosingMFEP50Bps      float64        `json:"losing_mfe_p50_bps"`
+	LosingMFEP75Bps      float64        `json:"losing_mfe_p75_bps"`
+	LosingMFEP90Bps      float64        `json:"losing_mfe_p90_bps"`
 }
 
 type SinglePositionTrade struct {
@@ -189,6 +191,12 @@ func (r *SinglePositionReplay) TryEnter(snapshot strategy.Snapshot, side strateg
 	}
 	if side == strategy.SignalSideBuy && !regime.AllowLong || side == strategy.SignalSideSell && !regime.AllowShort {
 		r.summary.SkippedByRegime++
+		if reason := regimeSkipReason(side, *regime); reason != "" {
+			if r.summary.RegimeSkipReasons == nil {
+				r.summary.RegimeSkipReasons = make(map[string]int)
+			}
+			r.summary.RegimeSkipReasons[reason]++
+		}
 		return false, nil
 	}
 	if r.position != nil {
@@ -208,6 +216,22 @@ func (r *SinglePositionReplay) TryEnter(snapshot strategy.Snapshot, side strateg
 		stopBps: -r.config.InitialStopBps, entryRegime: *regime,
 	}
 	return true, nil
+}
+
+func regimeSkipReason(side strategy.SignalSide, regime marketregime.Result) string {
+	if side == strategy.SignalSideBuy && !regime.AllowLong && regime.AllowShort ||
+		side == strategy.SignalSideSell && !regime.AllowShort && regime.AllowLong {
+		return "v4_countertrend_signal"
+	}
+	for index := len(regime.Reasons) - 1; index >= 0; index-- {
+		if (strings.HasPrefix(regime.Reasons[index], "v4_") || strings.HasPrefix(regime.Reasons[index], "v5_") || strings.HasPrefix(regime.Reasons[index], "v6_")) &&
+			regime.Reasons[index] != "v4_permitted" && regime.Reasons[index] != "v4_release_confirmed" &&
+			regime.Reasons[index] != "v5_permitted" && regime.Reasons[index] != "v5_fast_release_confirmed" &&
+			regime.Reasons[index] != "v6_permitted" && regime.Reasons[index] != "v6_fast_release_confirmed" {
+			return regime.Reasons[index]
+		}
+	}
+	return ""
 }
 
 func (r *SinglePositionReplay) SkipConflict() { r.summary.SkippedConflict++ }

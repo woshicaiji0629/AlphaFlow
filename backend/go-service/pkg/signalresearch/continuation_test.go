@@ -1,6 +1,7 @@
 package signalresearch
 
 import (
+	"encoding/json"
 	"testing"
 
 	"alphaflow/go-service/pkg/strategy"
@@ -78,6 +79,53 @@ func TestPullbackDetectorArmsAtEMAAndEmitsResume(t *testing.T) {
 	if len(events) != 1 || events[0].Side != strategy.SignalSideBuy || events[0].Source != PullbackResumeSource {
 		t.Fatalf("events=%#v", events)
 	}
+}
+
+func TestPullbackDetectorUsesConfiguredSupertrendVersion(t *testing.T) {
+	detector, err := NewPullbackDetector(PullbackConfig{
+		TouchDistancePct: 0.15, ResumeBars: 3, MaxArmedBars: 10, MinVolumeRatio: 1, CooldownBars: 20,
+		TrendValueKey: "ai_supertrend", TrendDirectionKey: "ai_supertrend_direction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prices := []float64{100.4, 100.2, 100.0, 100.15, 100.25}
+	for index, price := range prices {
+		snapshot := pullbackSnapshot(index+1, price, price+0.1, price-0.1, 0.9)
+		setTrendVersion(&snapshot, "ai_supertrend", "ai_supertrend_direction", "up", "up", 99, 99.5)
+		snapshot.Indicator.Signals["supertrend_direction"] = "down"
+		snapshot.Timeframes["5m"].Indicator.Signals["supertrend_direction"] = "down"
+		if _, err := detector.Update(snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := pullbackSnapshot(6, 100.8, 100.9, 100.2, 1.2)
+	setTrendVersion(&snapshot, "ai_supertrend", "ai_supertrend_direction", "up", "up", 99, 99.5)
+	snapshot.Indicator.Signals["supertrend_direction"] = "down"
+	snapshot.Timeframes["5m"].Indicator.Signals["supertrend_direction"] = "down"
+	events, err := detector.Update(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Side != strategy.SignalSideBuy {
+		t.Fatalf("events=%#v", events)
+	}
+	metadata := map[string]any{}
+	if err := json.Unmarshal([]byte(events[0].MetadataJSON), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["trend_value_key"] != "ai_supertrend" || metadata["trend_direction_key"] != "ai_supertrend_direction" {
+		t.Fatalf("metadata=%#v", metadata)
+	}
+}
+
+func setTrendVersion(snapshot *strategy.Snapshot, valueKey string, directionKey string, entryDirection string, confirmationDirection string, entryLevel float64, confirmationLevel float64) {
+	snapshot.Indicator.NumericValues[valueKey] = entryLevel
+	snapshot.Indicator.Signals[directionKey] = entryDirection
+	confirmation := snapshot.Timeframes["5m"]
+	confirmation.Indicator.NumericValues[valueKey] = confirmationLevel
+	confirmation.Indicator.Signals[directionKey] = confirmationDirection
+	snapshot.Timeframes["5m"] = confirmation
 }
 
 func pullbackSnapshot(index int, closePrice float64, high float64, low float64, volumeRatio float64) strategy.Snapshot {

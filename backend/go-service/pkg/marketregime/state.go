@@ -18,6 +18,9 @@ const (
 	VersionV1 Version = "v1"
 	VersionV2 Version = "v2"
 	VersionV3 Version = "v3"
+	VersionV4 Version = "v4"
+	VersionV5 Version = "v5"
+	VersionV6 Version = "v6"
 )
 
 // Analyzer is the version-neutral, stateful market-regime contract. Analyze
@@ -157,6 +160,12 @@ func NewAnalyzer(version Version, config Config) (Analyzer, error) {
 		return NewV2Analyzer(DefaultV2Config())
 	case VersionV3:
 		return NewV3Analyzer(DefaultV3Config())
+	case VersionV4:
+		return NewV4Analyzer(DefaultV4Config())
+	case VersionV5:
+		return NewV5Analyzer(DefaultV5Config())
+	case VersionV6:
+		return NewV6Analyzer(DefaultV6Config())
 	default:
 		return nil, fmt.Errorf("unsupported market regime version %q", version)
 	}
