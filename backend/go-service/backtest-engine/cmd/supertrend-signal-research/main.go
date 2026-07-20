@@ -86,7 +86,7 @@ func main() {
 	regimeRunIDTag := flag.String("regime-run-id-tag", "", "optional research-only suffix appended to run_id")
 	researchSkipPersist := flag.Bool("research-skip-persist", false, "run research in memory without persisting detailed rows")
 	singlePositionScan := flag.Bool("single-position-scan", false, "compare staged single-position protection parameters in one replay")
-	supertrendVersionCompare := flag.Bool("supertrend-version-compare", false, "compare standard, adaptive, and AI Supertrend flips with identical single-position rules")
+	supertrendVersionCompare := flag.Bool("supertrend-version-compare", false, "compare standard, SMA-ATR, adaptive, and AI Supertrend flips with identical single-position rules")
 	supertrendTradeDiagnostics := flag.Bool("supertrend-trade-diagnostics", false, "log standard Supertrend v4 flip decisions and completed trades")
 	swingReviewPath := flag.String("swing-review-json", "", "write ETH swing opportunity and AI Supertrend coverage review JSON")
 	swingMinimumPoints := flag.Float64("swing-minimum-points", 30, "minimum absolute ETH price move included in the swing review")
@@ -934,6 +934,7 @@ func buildSupertrendComparisonReplays(base signalresearch.SinglePositionConfig, 
 		directionKey string
 	}{
 		{name: "standard", flipKey: "supertrend_flip", valueKey: "supertrend", directionKey: "supertrend_direction"},
+		{name: "sma_atr", flipKey: "sma_atr_supertrend_flip", valueKey: "sma_atr_supertrend", directionKey: "sma_atr_supertrend_direction"},
 		{name: "adaptive", flipKey: "adaptive_supertrend_flip", valueKey: "adaptive_supertrend", directionKey: "adaptive_supertrend_direction"},
 		{name: "ai", flipKey: "ai_supertrend_flip", valueKey: "ai_supertrend", directionKey: "ai_supertrend_direction"},
 	}

@@ -22,6 +22,7 @@ func singlePositionConfigForTest() signalresearch.SinglePositionConfig {
 func TestSupertrendFlipSide(t *testing.T) {
 	window := strategy.IndicatorWindowView{Signals: map[string]strategy.SignalSeries{
 		"supertrend_flip":          {Latest: "up"},
+		"sma_atr_supertrend_flip":  {Latest: "up"},
 		"adaptive_supertrend_flip": {Latest: "down"},
 		"ai_supertrend_flip":       {Latest: "none"},
 	}}
@@ -31,6 +32,7 @@ func TestSupertrendFlipSide(t *testing.T) {
 		ok   bool
 	}{
 		{key: "supertrend_flip", want: strategy.SignalSideBuy, ok: true},
+		{key: "sma_atr_supertrend_flip", want: strategy.SignalSideBuy, ok: true},
 		{key: "adaptive_supertrend_flip", want: strategy.SignalSideSell, ok: true},
 		{key: "ai_supertrend_flip", want: strategy.SignalSideHold, ok: false},
 		{key: "missing", want: strategy.SignalSideHold, ok: false},
@@ -51,7 +53,7 @@ func TestBuildSupertrendComparisonReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[0].name != "standard" || items[1].name != "adaptive" || items[2].name != "ai" {
+	if len(items) != 4 || items[0].name != "standard" || items[1].name != "sma_atr" || items[2].name != "adaptive" || items[3].name != "ai" {
 		t.Fatalf("items=%#v", items)
 	}
 	for _, item := range items {
