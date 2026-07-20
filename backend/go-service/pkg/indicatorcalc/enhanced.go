@@ -1,9 +1,5 @@
 package indicatorcalc
 
-func addEnhanced(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState, features *featureContext, preview *aiSourceResult) {
-	addEnhancedToSet(nil, values, signals, opens, highs, lows, closes, volumes, basic, features, preview)
-}
-
 func addEnhancedToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState, features *featureContext, preview *aiSourceResult) {
 	addTrendFeaturesWithContextToSet(target, values, signals, closes, features)
 	addCandlePatterns(signals, opens, highs, lows, closes)

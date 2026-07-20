@@ -36,9 +36,22 @@ type featureContext struct {
 	window *CalculationWindow
 
 	atrByPeriod   map[int]cachedFloatSeries
+	trueRange     cachedFloatSeries
 	emaByPeriod   map[int]cachedFloat
 	bbByPeriod    map[int]cachedBollinger
 	rangeByPeriod map[int]cachedMinMax
+}
+
+func (c *featureContext) trueRangeSeries() ([]float64, bool) {
+	if c == nil || len(c.closes) == 0 || len(c.highs) != len(c.closes) || len(c.lows) != len(c.closes) {
+		return nil, false
+	}
+	if c.trueRange.values != nil {
+		return c.trueRange.values, c.trueRange.ok
+	}
+	values := trueRangeSeries(c.highs, c.lows, c.closes)
+	c.trueRange = cachedFloatSeries{values: values, ok: len(values) == len(c.closes)}
+	return c.trueRange.values, c.trueRange.ok
 }
 
 func newFeatureContext(highs []float64, lows []float64, closes []float64, basic *basicIndicatorState) *featureContext {

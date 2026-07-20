@@ -29,6 +29,25 @@ func TestFeatureContextCachesATRSeriesByPeriod(t *testing.T) {
 	}
 }
 
+func TestFeatureContextCachesTrueRangeSeries(t *testing.T) {
+	highs, lows, closes := testPriceSeries(120)
+	ctx := newFeatureContext(highs, lows, closes, nil)
+	first, ok := ctx.trueRangeSeries()
+	if !ok || len(first) != len(closes) {
+		t.Fatal("first True Range series unavailable")
+	}
+	second, ok := ctx.trueRangeSeries()
+	if !ok || &first[0] != &second[0] {
+		t.Fatal("True Range series was recalculated instead of reused")
+	}
+	want := trueRangeSeries(highs, lows, closes)
+	for index := range want {
+		if first[index] != want[index] {
+			t.Fatalf("True Range[%d] = %v, want %v", index, first[index], want[index])
+		}
+	}
+}
+
 func TestFeatureContextEMAValueMatchesExistingCalculation(t *testing.T) {
 	_, _, closes := testPriceSeries(120)
 	ctx := newFeatureContext(nil, nil, closes, nil)

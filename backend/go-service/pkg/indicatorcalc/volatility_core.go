@@ -12,10 +12,6 @@ func addVolatilityCoreFeaturesToSet(target *ValueSet, values map[string]string, 
 	addVolatilityCoreFeaturesWithATRToSet(target, values, signals, highs, lows, closes, period, series, nil)
 }
 
-func addVolatilityCoreFeaturesWithATR(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64, basic *basicIndicatorState) {
-	addVolatilityCoreFeaturesWithATRToSet(nil, values, signals, highs, lows, closes, period, series, basic)
-}
-
 func addVolatilityCoreFeaturesWithATRToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, series []float64, basic *basicIndicatorState) {
 	if len(series) == 0 {
 		return

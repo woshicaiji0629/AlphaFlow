@@ -523,3 +523,17 @@ ETHUSDT 2026-06-28 至 2026-07-15 回放共保存 8,580 条观察。按截图人
 ### 失败实验代码清理
 
 独立事件源联合回放、`event_quality_v1/v2`、`event_path_v3` 和 Composite Confirmation 的命令行参数、回放状态、报告逻辑及专用测试已经从研究命令清理。上述结论以本文档为唯一归档，不保留可直接重跑的实现，后续不得在相同定义下重新加入或仅调整阈值后改名重试。SMA-ATR 与 Standard、Adaptive、AI Supertrend 的同口径版本比较不属于本次失败清理范围，继续保留。
+
+### 研究命令插件化约束
+
+`supertrend-signal-research` 已从单文件实验集合改为可插拔实验目录。命令入口只负责参数解析、共享数据读取、事件检测和逐帧调度；每项实验通过 `experiments.Experiment` 接口独立注册：
+
+- `Descriptor` 提供稳定实验名和实现版本。
+- `Frame` 是只读逐 K 线输入，包含 snapshot、regime、事件集合和标准化 entry candidate。
+- `OnFrame` 维护实验自己的顺序状态；实验之间不能共享可变回放状态。
+- `Finish` 只返回 summary 和内存 artifact，由 runner 统一持久化和输出。
+- `Registry` 保证显式注册顺序、错误上下文、descriptor 一致性和只完成一次的生命周期。
+
+新实验应放入独立文件或子目录，通过 registry 接入；不得向 `main.go` 追加 flags、回放状态和报告分支。实验不得直接写文件、数据库或日志，也不得把未来路径标签放入实时 `Frame` 特征。失败实验在结论归档后删除专用实现，只保留仍有比较价值的基线和防回归测试。
+
+当前允许继续保留的研究是 Standard、SMA-ATR、Adaptive 与 AI Supertrend 的同口径版本比较，以及独立 single-position/breakout 基线。新的市场形态研究必须使用新的训练与未见窗口，不能再次使用 2025 年 8 至 11 月作为样本外证明。

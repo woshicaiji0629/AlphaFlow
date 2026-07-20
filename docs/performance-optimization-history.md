@@ -50,7 +50,19 @@ ClickHouse K 线
 - [`pkg/indicatorcalc`](../backend/go-service/pkg/indicatorcalc)
 - [`docs/indicators.md`](indicators.md)
 
-### 2. 指标窗口分析
+### 2. 指标模块职责拆分
+
+2026-07 的热路径优化完成后，`pkg/indicatorcalc` 同步完成按功能域拆分。该调整不是以文件行数为目标，而是把频繁变化的实验实现与稳定编排边界隔离：
+
+- AI Source 分为生命周期、特征缓存、学习评分和辅助状态。
+- 均线、动量、资金流、波动率、Smart Money 与 TradingView 指标按指标族拆分。
+- `CalculationWindow` 的 AI Source 预览生命周期独立于通用窗口维护。
+- AI Supertrend 的性能聚类独立于趋势推进和因子表现计算。
+- 公共交叉、极值、数值编码和基础指标计算不再依附于任意单一实验文件。
+
+模块迁移保持公式、阈值、调用顺序和输出字段不变。每一批迁移均通过指标、market-data、回测模拟器定向测试和全项目测试。后续性能实验不得把临时实现重新堆回编排入口；只有能够证明等价且具备稳定收益的实现才能进入共享核心。
+
+### 3. 指标窗口分析
 
 `OrderedAnalyzer` 取代每个决策点重新枚举、排序和构造窗口 map 的路径：
 
@@ -65,7 +77,7 @@ ClickHouse K 线
 - [`pkg/indicatorwindow/analyzer.go`](../backend/go-service/pkg/indicatorwindow/analyzer.go)
 - [`pkg/indicatorwindow/model.go`](../backend/go-service/pkg/indicatorwindow/model.go)
 
-### 3. market-data 调度与缓存
+### 4. market-data 调度与缓存
 
 - 派生周期聚合从“每个目标窗口查询一次并单条写入”改为“一次范围查询、内存分组、批量写入”。
 - health 扫描构造 job 后使用有界 worker 执行；默认 worker 数跟随 `GOMAXPROCS`，错误仍显式汇总返回。
@@ -78,7 +90,7 @@ ClickHouse K 线
 - [`market-data/internal/health`](../backend/go-service/market-data/internal/health)
 - [`market-data/internal/indicator`](../backend/go-service/market-data/internal/indicator)
 
-### 4. 回测读取与回放流水线
+### 5. 回测读取与回放流水线
 
 - 数据集读取使用最多 4 个 worker 并发读取 symbol/interval series，结果仍按请求顺序写入固定位置。
 - 指标 producer 使用无缓冲 batch channel 提供背压；默认 `indicator_batch_size = 30`，所有 interval 共享并发上限。
@@ -91,7 +103,7 @@ ClickHouse K 线
 - [`backtest-engine/internal/reader/reader.go`](../backend/go-service/backtest-engine/internal/reader/reader.go)
 - [`backtest-engine/internal/simulator/snapshot.go`](../backend/go-service/backtest-engine/internal/simulator/snapshot.go)
 
-### 5. 稳定 schema 与紧凑数组
+### 6. 稳定 schema 与紧凑数组
 
 策略 view 使用 append-only schema 把字段名映射到稳定下标：
 

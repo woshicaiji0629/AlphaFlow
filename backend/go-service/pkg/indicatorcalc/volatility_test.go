@@ -254,6 +254,8 @@ func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	for _, key := range []string{
 		"supertrend_distance_pct",
 		"supertrend_stop_distance_pct",
+		"sma_atr_supertrend",
+		"sma_atr_supertrend_distance_pct",
 		"supertrend_7_2",
 		"supertrend_10_3",
 		"supertrend_10_3_3",
@@ -282,6 +284,9 @@ func TestSupertrendUsesSeriesDirection(t *testing.T) {
 	}
 	if signals["supertrend_flip"] == "" {
 		t.Fatalf("missing supertrend flip: %#v", signals)
+	}
+	if signals["sma_atr_supertrend_direction"] == "" || signals["sma_atr_supertrend_flip"] == "" {
+		t.Fatalf("missing SMA-ATR supertrend signals: %#v", signals)
 	}
 	if signals["supertrend_7_2_direction"] == "" || signals["supertrend_10_3_direction"] == "" || signals["supertrend_10_3_3_direction"] == "" || signals["supertrend_14_4_direction"] == "" {
 		t.Fatalf("missing supertrend preset directions: %#v", signals)
