@@ -3,21 +3,31 @@ package indicatorcalc
 import model "alphaflow/go-service/pkg/marketmodel"
 
 type CalculationWindow struct {
-	limit     int
-	klines    []model.Kline
-	opens     []float64
-	highs     []float64
-	lows      []float64
-	closes    []float64
-	volumes   []float64
-	parseErr  error
-	basic     *basicIndicatorState
-	aiPrefix  *aiSourceState
-	aiPreview *aiSourceResult
-	stream    bool
-	close20   *rollingWindow
-	high20    *rollingWindow
-	low20     *rollingWindow
+	limit            int
+	klines           []model.Kline
+	opens            []float64
+	highs            []float64
+	lows             []float64
+	closes           []float64
+	volumes          []float64
+	parseErr         error
+	basic            *basicIndicatorState
+	aiPrefix         *aiSourceState
+	aiPreview        *aiSourceResult
+	stream           bool
+	close20          *rollingWindow
+	high20           *rollingWindow
+	low20            *rollingWindow
+	quality          windowQualityState
+	previewBase      []model.Kline
+	previewBaseStart int
+	previewKline     *model.Kline
+}
+
+type windowQualityState struct {
+	invalidCount    int
+	gapCount        int
+	zeroVolumeCount int
 }
 
 func NewCalculationWindow(limit int) *CalculationWindow {
@@ -31,23 +41,24 @@ func NewCalculationWindowFromKlines(klines []model.Kline, limit int) *Calculatio
 }
 
 func (w *CalculationWindow) Clone() *CalculationWindow {
-	return w.cloneWithExtraCapacity(0, true)
+	w.materializePreviewKlines()
+	return w.cloneWithExtraCapacity(0, true, true)
 }
 
 // CloneForAppend returns an isolated clone with room for one additional kline.
 // It avoids a second allocation when realtime preview immediately appends a
 // temporary closed kline.
 func (w *CalculationWindow) CloneForAppend() *CalculationWindow {
-	return w.cloneWithExtraCapacity(1, false)
+	w.materializePreviewKlines()
+	return w.cloneWithExtraCapacity(1, false, true)
 }
 
-func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool) *CalculationWindow {
+func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool, cloneKlines bool) *CalculationWindow {
 	if w == nil {
 		return nil
 	}
 	cloned := &CalculationWindow{
 		limit:     w.limit,
-		klines:    cloneSliceWithExtra(w.klines, extra),
 		opens:     cloneSliceWithExtra(w.opens, extra),
 		highs:     cloneSliceWithExtra(w.highs, extra),
 		lows:      cloneSliceWithExtra(w.lows, extra),
@@ -60,6 +71,10 @@ func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool
 		close20:   w.close20.clone(),
 		high20:    w.high20.clone(),
 		low20:     w.low20.clone(),
+		quality:   w.quality,
+	}
+	if cloneKlines {
+		cloned.klines = cloneSliceWithExtra(w.klines, extra)
 	}
 	if cloneAIPrefix {
 		cloned.aiPrefix = w.aiPrefix
@@ -68,14 +83,44 @@ func (w *CalculationWindow) cloneWithExtraCapacity(extra int, cloneAIPrefix bool
 }
 
 func (w *CalculationWindow) RealtimePreview(kline model.Kline) *CalculationWindow {
+	w.materializePreviewKlines()
 	result, ok := w.previewAISource(kline)
-	preview := w.CloneForAppend()
+	preview := w.cloneWithoutKlines(1)
 	kline.IsClosed = true
-	preview.Append([]model.Kline{kline})
+	drop := 0
+	if preview.limit > 0 && len(w.klines)+1 > preview.limit {
+		drop = len(w.klines) + 1 - preview.limit
+	}
+	preview.previewBase = w.klines
+	preview.previewBaseStart = drop
+	preview.previewKline = &kline
+	preview.quality = w.quality
+	if drop > 0 {
+		removeQualityPrefix(&preview.quality, w.klines, w.opens, w.highs, w.lows, w.closes, w.volumes, drop)
+	}
+	preview.appendSeries(kline)
+	if preview.parseErr == nil {
+		last := len(preview.closes) - 1
+		preview.basic.append(preview.highs, preview.lows, preview.closes, preview.volumes)
+		preview.basic.appendHeikinAshi(preview.opens[last], preview.highs[last], preview.lows[last], preview.closes[last])
+		preview.addQualityForKline(kline, preview.opens[last], preview.highs[last], preview.lows[last], preview.closes[last], preview.volumes[last], w.lastStoredKline())
+		if drop > 0 {
+			preview.opens = trimFloatSeries(preview.opens, drop)
+			preview.highs = trimFloatSeries(preview.highs, drop)
+			preview.lows = trimFloatSeries(preview.lows, drop)
+			preview.closes = trimFloatSeries(preview.closes, drop)
+			preview.volumes = trimFloatSeries(preview.volumes, drop)
+			preview.basic.trimSeries(preview.limit)
+		}
+	}
 	if ok {
 		preview.aiPreview = &result
 	}
 	return preview
+}
+
+func (w *CalculationWindow) cloneWithoutKlines(extra int) *CalculationWindow {
+	return w.cloneWithExtraCapacity(extra, false, false)
 }
 
 func cloneSliceWithExtra[T any](values []T, extra int) []T {
@@ -114,6 +159,7 @@ func (w *CalculationWindow) Reset(klines []model.Kline) {
 }
 
 func (w *CalculationWindow) Append(klines []model.Kline) {
+	w.materializePreviewKlines()
 	w.append(klines, w.stream)
 }
 
@@ -127,6 +173,8 @@ func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool
 			w.appendSeries(kline)
 			if maintainBasicState && w.parseErr == nil && w.basic != nil {
 				w.basic.append(w.highs, w.lows, w.closes, w.volumes)
+				last := len(w.closes) - 1
+				w.basic.appendHeikinAshi(w.opens[last], w.highs[last], w.lows[last], w.closes[last])
 			}
 			if maintainBasicState && w.aiPrefix != nil {
 				w.appendAISourceState()
@@ -155,7 +203,52 @@ func (w *CalculationWindow) append(klines []model.Kline, maintainBasicState bool
 }
 
 func (w *CalculationWindow) Klines() []model.Kline {
+	w.materializePreviewKlines()
 	return w.klines
+}
+
+func (w *CalculationWindow) materializePreviewKlines() {
+	if w == nil || w.previewKline == nil {
+		return
+	}
+	count := len(w.previewBase) - w.previewBaseStart + 1
+	materialized := make([]model.Kline, 0, count)
+	materialized = append(materialized, w.previewBase[w.previewBaseStart:]...)
+	materialized = append(materialized, *w.previewKline)
+	w.klines = materialized
+	w.previewBase = nil
+	w.previewBaseStart = 0
+	w.previewKline = nil
+}
+
+func (w *CalculationWindow) klineCount() int {
+	if w != nil && w.previewKline != nil {
+		return len(w.previewBase) - w.previewBaseStart + 1
+	}
+	if w == nil {
+		return 0
+	}
+	return len(w.klines)
+}
+
+func (w *CalculationWindow) lastStoredKline() model.Kline {
+	if w != nil && len(w.klines) > 0 {
+		return w.klines[len(w.klines)-1]
+	}
+	return model.Kline{}
+}
+
+func (w *CalculationWindow) lastKline() (model.Kline, bool) {
+	if w == nil {
+		return model.Kline{}, false
+	}
+	if w.previewKline != nil {
+		return *w.previewKline, true
+	}
+	if len(w.klines) == 0 {
+		return model.Kline{}, false
+	}
+	return w.klines[len(w.klines)-1], true
 }
 
 func (w *CalculationWindow) LastOpenTime() (int64, bool) {
@@ -177,6 +270,9 @@ func (w *CalculationWindow) trim() bool {
 		return false
 	}
 	drop := len(w.klines) - w.limit
+	if w.parseErr == nil {
+		w.trimQuality(drop)
+	}
 	w.klines = w.klines[len(w.klines)-w.limit:]
 	w.opens = trimFloatSeries(w.opens, drop)
 	w.highs = trimFloatSeries(w.highs, drop)
@@ -206,6 +302,7 @@ func (w *CalculationWindow) rebuildSeries() {
 	w.close20 = newRollingWindow(20)
 	w.high20 = newRollingWindow(20)
 	w.low20 = newRollingWindow(20)
+	w.quality = windowQualityState{}
 
 	for _, kline := range w.klines {
 		open, err := parse(kline.Open)
@@ -241,6 +338,7 @@ func (w *CalculationWindow) rebuildSeries() {
 		w.close20.append(closeValue)
 		w.high20.append(high)
 		w.low20.append(low)
+		w.appendQuality(len(w.closes) - 1)
 	}
 }
 
@@ -249,7 +347,7 @@ func (w *CalculationWindow) rebuildBasicState() {
 		w.basic = nil
 		return
 	}
-	w.basic = buildBasicIndicatorState(w.highs, w.lows, w.closes, w.volumes)
+	w.basic = buildBasicIndicatorStateWithOpens(w.opens, w.highs, w.lows, w.closes, w.volumes)
 }
 
 func (w *CalculationWindow) appendSeries(kline model.Kline) {
@@ -283,6 +381,7 @@ func (w *CalculationWindow) appendSeries(kline model.Kline) {
 	w.lows = append(w.lows, low)
 	w.closes = append(w.closes, closeValue)
 	w.volumes = append(w.volumes, volume)
+	w.appendQuality(len(w.closes) - 1)
 	if w.close20 == nil {
 		w.rebuildRollingWindows()
 		return
@@ -290,6 +389,65 @@ func (w *CalculationWindow) appendSeries(kline model.Kline) {
 	w.close20.append(closeValue)
 	w.high20.append(high)
 	w.low20.append(low)
+}
+
+func (w *CalculationWindow) appendQuality(index int) {
+	if w == nil || index < 0 || index >= len(w.klines) || index >= len(w.opens) || index >= len(w.highs) || index >= len(w.lows) || index >= len(w.closes) || index >= len(w.volumes) {
+		return
+	}
+	if seriesKlineInvalid(w.klines[index], w.opens[index], w.highs[index], w.lows[index], w.closes[index]) {
+		w.quality.invalidCount++
+	}
+	if w.volumes[index] == 0 {
+		w.quality.zeroVolumeCount++
+	}
+	if index > 0 && klinesHaveGap(w.klines[index-1], w.klines[index]) {
+		w.quality.gapCount++
+	}
+}
+
+func (w *CalculationWindow) trimQuality(drop int) {
+	if w == nil || drop <= 0 || len(w.klines) != len(w.closes) {
+		return
+	}
+	if drop > len(w.klines) {
+		drop = len(w.klines)
+	}
+	removeQualityPrefix(&w.quality, w.klines, w.opens, w.highs, w.lows, w.closes, w.volumes, drop)
+}
+
+func removeQualityPrefix(quality *windowQualityState, klines []model.Kline, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, drop int) {
+	if quality == nil || drop <= 0 || len(klines) != len(closes) {
+		return
+	}
+	if drop > len(klines) {
+		drop = len(klines)
+	}
+	for index := 0; index < drop; index++ {
+		if seriesKlineInvalid(klines[index], opens[index], highs[index], lows[index], closes[index]) {
+			quality.invalidCount--
+		}
+		if volumes[index] == 0 {
+			quality.zeroVolumeCount--
+		}
+	}
+	for right := 1; right <= drop && right < len(klines); right++ {
+		if klinesHaveGap(klines[right-1], klines[right]) {
+			quality.gapCount--
+		}
+	}
+}
+
+func (w *CalculationWindow) addQualityForKline(kline model.Kline, open float64, high float64, low float64, closeValue float64, volume float64, previous model.Kline) {
+	if seriesKlineInvalid(kline, open, high, low, closeValue) {
+		w.quality.invalidCount++
+	}
+	if volume == 0 {
+		w.quality.zeroVolumeCount++
+	}
+	if klinesHaveGap(previous, kline) {
+		w.quality.gapCount++
+	}
 }
 
 func (w *CalculationWindow) rebuildRollingWindows() {

@@ -68,6 +68,222 @@ func TestTradingViewFeaturesOutput(t *testing.T) {
 	}
 }
 
+func TestStreamSSL10MatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	highs := make([]float64, len(closes))
+	lows := make([]float64, len(closes))
+	for index, closeValue := range closes {
+		highs[index] = closeValue + 1 + float64(index%3)*0.1
+		lows[index] = closeValue - 1 - float64(index%4)*0.1
+	}
+	state := newStreamSSL10State()
+	for index := range closes {
+		state.append(highs[index], lows[index], closes[index])
+		gotUpper, gotLower, gotDirection, gotPreviousDirection, gotOK := state.value()
+		wantUpper, wantLower, wantDirection, wantPreviousDirection, wantOK := sslChannel(highs[:index+1], lows[:index+1], closes[:index+1], 10)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream ssl upper", gotUpper, wantUpper)
+			assertFloatClose(t, "stream ssl lower", gotLower, wantLower)
+			if gotDirection != wantDirection || gotPreviousDirection != wantPreviousDirection {
+				t.Fatalf("index=%d direction = %q/%q, want %q/%q", index, gotDirection, gotPreviousDirection, wantDirection, wantPreviousDirection)
+			}
+		}
+	}
+}
+
+func TestSSL10WithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addSSLChannelFeatures(nil, wantValues, wantSignals, highs, lows, closes, 10, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addSSLChannelFeatures(nil, gotValues, gotSignals, highs, lows, closes, 10, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state SSL values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state SSL signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+func TestStreamRangeFilter100MatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	state := newStreamRangeFilterState(100, 3)
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		gotFilter, gotUpper, gotLower, gotDirection, gotOK := state.value()
+		wantFilter, wantUpper, wantLower, wantDirection, wantOK := rangeFilterCompact(closes[:index+1], 100, 3)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream range filter", gotFilter, wantFilter)
+			assertFloatClose(t, "stream range filter upper", gotUpper, wantUpper)
+			assertFloatClose(t, "stream range filter lower", gotLower, wantLower)
+			if gotDirection != wantDirection {
+				t.Fatalf("index=%d direction = %q, want %q", index, gotDirection, wantDirection)
+			}
+		}
+	}
+}
+
+func TestRangeFilter100WithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addRangeFilterFeatures(nil, wantValues, wantSignals, closes, 100, 3, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addRangeFilterFeatures(nil, gotValues, gotSignals, closes, 100, 3, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state range filter values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state range filter signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+func TestStreamWilliamsVixFixMatchesBatchAtEveryPoint(t *testing.T) {
+	_, lows, closes, _ := trendingSeries(180, 100, 0.35)
+	var state streamWilliamsVixFixState
+	for index := range closes {
+		state.append(lows[index], closes[index])
+		got, gotOK := state.value()
+		want, wantOK := williamsVixFixCompact(lows[:index+1], closes[:index+1], 22, 20, 2, 50, 0.85)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream wvf", got.value, want.value)
+			assertFloatClose(t, "stream wvf mid", got.mid, want.mid)
+			assertFloatClose(t, "stream wvf upper", got.upperBand, want.upperBand)
+			assertFloatClose(t, "stream wvf lower", got.lowerBand, want.lowerBand)
+			assertFloatClose(t, "stream wvf range high", got.rangeHigh, want.rangeHigh)
+			assertFloatClose(t, "stream wvf range low", got.rangeLow, want.rangeLow)
+		}
+	}
+}
+
+func TestWilliamsVixFixWithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(180, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addWilliamsVixFixFeatures(nil, wantValues, wantSignals, lows, closes, 22, 20, 2, 50, 0.85, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addWilliamsVixFixFeatures(nil, gotValues, gotSignals, lows, closes, 22, 20, 2, 50, 0.85, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state WVF values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state WVF signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+func TestStreamTDSequentialMatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	var state streamTDSequentialState
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		gotBuy, gotSell, gotExhaustion := state.value()
+		wantBuy, wantSell, wantExhaustion := tdSequential(closes[:index+1])
+		if gotBuy != wantBuy || gotSell != wantSell || gotExhaustion != wantExhaustion {
+			t.Fatalf("index=%d stream = %d/%d/%q, want %d/%d/%q", index, gotBuy, gotSell, gotExhaustion, wantBuy, wantSell, wantExhaustion)
+		}
+	}
+}
+
+func TestTDSequentialWithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addTDSequentialFeatures(nil, wantValues, wantSignals, closes, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addTDSequentialFeatures(nil, gotValues, gotSignals, closes, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state TD values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state TD signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+func TestStreamNadarayaWatsonMatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(180)
+	state := newStreamNadarayaWatsonState(8)
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		gotMiddle, gotMAE, gotPrevious, gotOK := state.value()
+		wantMiddle, wantMAE, wantPrevious, wantOK := nadarayaWatsonEnvelope(closes[:index+1], 50, 8)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream nw middle", gotMiddle, wantMiddle)
+			assertFloatClose(t, "stream nw mae", gotMAE, wantMAE)
+			assertFloatClose(t, "stream nw previous", gotPrevious, wantPrevious)
+		}
+	}
+}
+
+func TestNadarayaWatsonWithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(180, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addNadarayaWatsonEnvelopeFeatures(nil, wantValues, wantSignals, closes, 50, 8, 3, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addNadarayaWatsonEnvelopeFeatures(nil, gotValues, gotSignals, closes, 50, 8, 3, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state NW values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state NW signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
+func TestStreamUTBot10MatchesBatchAtEveryPoint(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(180, 100, 0.35)
+	atr := newStreamATRState(10)
+	state := newStreamUTBotState(1)
+	for index := range closes {
+		if index > 0 {
+			atr.append(highs[index], lows[index], closes[index-1])
+		}
+		state.append(closes[index], atr.value, atr.ready)
+		gotStop, gotDirection, gotPreviousDirection, gotOK := state.value()
+		wantStop, wantDirection, wantPreviousDirection, wantOK := utBot(highs[:index+1], lows[:index+1], closes[:index+1], 10, 1)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream ut stop", gotStop, wantStop)
+			if gotDirection != wantDirection || gotPreviousDirection != wantPreviousDirection {
+				t.Fatalf("index=%d direction = %q/%q, want %q/%q", index, gotDirection, gotPreviousDirection, wantDirection, wantPreviousDirection)
+			}
+		}
+	}
+}
+
+func TestUTBot10WithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(180, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	atrValues, ok := atrSeries(highs, lows, closes, 10)
+	if !ok {
+		t.Fatal("missing ATR10")
+	}
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addUTBotFeaturesWithATR(nil, wantValues, wantSignals, closes, 10, 1, atrValues, nil)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	addUTBotFeaturesWithATR(nil, gotValues, gotSignals, closes, 10, 1, atrValues, basic)
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state UT Bot values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state UT Bot signals differ: got=%#v want=%#v", gotSignals, wantSignals)
+	}
+}
+
 func TestQQEModEnhancedOutputsSignalFields(t *testing.T) {
 	closes := oscillatingCloses(180)
 
@@ -84,6 +300,53 @@ func TestQQEModEnhancedOutputsSignalFields(t *testing.T) {
 	}
 	if result.signal == "" || result.zeroCross == "" {
 		t.Fatalf("missing qqe signals: %#v", result)
+	}
+}
+
+func TestStreamQQEMatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(320)
+	state := newStreamQQEState()
+	for index := 1; index < len(closes); index++ {
+		state.append(closes[index-1], closes[index])
+		gotLine, gotSignal, gotPreviousLine, gotPreviousSignal, gotClassicOK := state.classicValue()
+		wantLine, wantSignal, wantPreviousLine, wantPreviousSignal, wantClassicOK := qqeMod(closes[:index+1], 6, 5, 3)
+		if gotClassicOK != wantClassicOK {
+			t.Fatalf("index=%d classic stream ok = %v, want %v", index, gotClassicOK, wantClassicOK)
+		}
+		if gotClassicOK {
+			assertFloatClose(t, "stream qqe line", gotLine, wantLine)
+			assertFloatClose(t, "stream qqe signal", gotSignal, wantSignal)
+			assertFloatClose(t, "stream qqe previous line", gotPreviousLine, wantPreviousLine)
+			assertFloatClose(t, "stream qqe previous signal", gotPreviousSignal, wantPreviousSignal)
+		}
+		gotEnhanced, gotEnhancedOK := state.enhancedValue()
+		wantEnhanced, wantEnhancedOK := qqeModEnhanced(closes[:index+1], 6, 5, 3, 1.61, 50, 0.35, 3)
+		if gotEnhancedOK != wantEnhancedOK {
+			t.Fatalf("index=%d enhanced stream ok = %v, want %v", index, gotEnhancedOK, wantEnhancedOK)
+		}
+		if gotEnhancedOK && gotEnhanced != wantEnhanced {
+			t.Fatalf("index=%d enhanced stream = %#v, want %#v", index, gotEnhanced, wantEnhanced)
+		}
+	}
+}
+
+func TestQQEWithStateMatchesStandaloneFeatures(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(180, 100, 0.35)
+	basic := buildBasicIndicatorState(highs, lows, closes, volumes)
+	rsiValues, rsiOK := rsiSeries(closes, 6)
+	smoothed, smoothedDeltas, offset, foundationOK := qqeModTrendFoundation(rsiValues, rsiOK, 6, 5)
+	wantValues, wantSignals := map[string]string{}, map[string]string{}
+	addQQEModFeaturesWithFoundation(nil, wantValues, wantSignals, smoothed, smoothedDeltas, 6, 5, 3, foundationOK)
+	addQQEModEnhancedFeaturesWithFoundation(nil, wantValues, wantSignals, smoothed, smoothedDeltas, offset, foundationOK)
+	gotValues, gotSignals := map[string]string{}, map[string]string{}
+	if !addStreamQQEFeatures(nil, gotValues, gotSignals, basic.qqe6State()) {
+		t.Fatal("missing stream QQE state")
+	}
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("state QQE values differ: got=%#v want=%#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("state QQE signals differ: got=%#v want=%#v", gotSignals, wantSignals)
 	}
 }
 

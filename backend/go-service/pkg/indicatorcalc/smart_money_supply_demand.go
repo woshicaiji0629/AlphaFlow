@@ -1,5 +1,32 @@
 package indicatorcalc
 
+const momentumBodyAveragePeriod = 20
+
+type momentumBodyAverageWindow struct {
+	values [momentumBodyAveragePeriod]float64
+	count  int
+	next   int
+	sum    float64
+}
+
+func (w *momentumBodyAverageWindow) append(value float64) {
+	if w.count == len(w.values) {
+		w.sum -= w.values[w.next]
+	} else {
+		w.count++
+	}
+	w.values[w.next] = value
+	w.next = (w.next + 1) % len(w.values)
+	w.sum += value
+}
+
+func (w *momentumBodyAverageWindow) average() float64 {
+	if w == nil || w.count == 0 {
+		return 0
+	}
+	return w.sum / float64(w.count)
+}
+
 func addMomentumSupplyDemandValues(target *ValueSet, values map[string]string, signals map[string]string, state momentumSupplyDemandState, last int) {
 	if state.supply.ok {
 		setValueTarget(target, values, "momentum_supply_top", state.supply.top, true)
@@ -48,8 +75,18 @@ func detectMomentumSupplyDemandZones(
 		retestEvent: "none",
 		breakEvent:  "none",
 	}
-	for index := start + momentumSpan + 1; index <= last; index++ {
-		bullish, bearish := momentumCandleCounts(opens, closes, index, momentumSpan, bodyMultiplier)
+	firstIndex := start + momentumSpan + 1
+	if firstIndex > last {
+		return state, false
+	}
+	bodyAverage := momentumBodyAverageWindow{}
+	warmupStart := maxInt(0, firstIndex-momentumBodyAveragePeriod+1)
+	for index := warmupStart; index < firstIndex; index++ {
+		bodyAverage.append(absFloat(closes[index] - opens[index]))
+	}
+	for index := firstIndex; index <= last; index++ {
+		bodyAverage.append(absFloat(closes[index] - opens[index]))
+		bullish, bearish := momentumCandleCountsWithAverage(opens, closes, index, momentumSpan, bodyMultiplier, bodyAverage.average())
 		if bullish >= momentumCount && index-lastDemandZone > minDistanceBetweenZones {
 			anchor := index - momentumSpan - 1
 			state.demand = momentumSupplyDemandZoneFromRange(highs[anchor], lows[anchor], anchor, atrValue, maxZoneATR)
@@ -74,7 +111,11 @@ func detectMomentumSupplyDemandZones(
 }
 
 func momentumCandleCounts(opens []float64, closes []float64, index int, momentumSpan int, bodyMultiplier float64) (int, int) {
-	averageBody := averageBodySizeAt(opens, closes, index, 20)
+	averageBody := averageBodySizeAt(opens, closes, index, momentumBodyAveragePeriod)
+	return momentumCandleCountsWithAverage(opens, closes, index, momentumSpan, bodyMultiplier, averageBody)
+}
+
+func momentumCandleCountsWithAverage(opens []float64, closes []float64, index int, momentumSpan int, bodyMultiplier float64, averageBody float64) (int, int) {
 	if averageBody <= 0 {
 		return 0, 0
 	}

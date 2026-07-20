@@ -112,6 +112,8 @@ go run ./backtest-engine/cmd/backtest-engine \
   -config configs/backtest-engine.ethusdt-1y.toml
 ```
 
+配置文件名中的 `1y` 不是区间保证；运行前必须检查 `[data].start_time` 和 `[data].end_time`。仓库当前 `backtest-engine.ethusdt-1y.toml` 实际覆盖 `2025-09-01` 至 `2025-12-01`，若要做完整年度比较，需要显式改为连续 365 天并先执行数据集检查。
+
 回测按已闭合 K 线流式推进，确认周期只有真正收盘后才进入策略上下文。回测仓位保存在进程内并使用独立 `bt` scope，不写在线 Redis 仓位；策略事件、成交明细和 run summary 持久化到 ClickHouse。长回测日志最长每 10 秒输出处理速率和 ETA。
 
 运行 Polymarket 研究采集器：
@@ -184,4 +186,4 @@ Polymarket Gamma + CLOB WebSocket + RTDS
 - testnet/live 仍需使用真实交易所凭证完成端到端联调、小额订单验收和账户级风控。
 - 前端账户、订单和完整运营管理能力仍在建设中。
 
-在线与回测共用 `CalculationWindow`、连续指标状态、窗口语义和 Go 策略实现。基础指标、AI Source 和 Adaptive Supertrend 已支持连续递推；回测指标窗口按策略读取惰性分析，避免整年预计算和重复窗口扫描。
+在线与回测共用 `CalculationWindow`、连续指标状态、窗口语义和 Go 策略实现。基础指标、AI Source 和 Adaptive Supertrend 已支持连续递推；realtime preview 使用与 closed state 隔离的临时窗口，回测指标窗口按策略读取惰性分析，避免整年预计算和重复窗口扫描。性能结果、复现命令和 top500 冷启动边界统一记录在[性能优化记录](docs/performance-optimization-history.md)中。

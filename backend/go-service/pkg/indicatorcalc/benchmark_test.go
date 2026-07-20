@@ -7,6 +7,7 @@ import (
 )
 
 var benchmarkCalculateResult Result
+var benchmarkCalculationWindow *CalculationWindow
 
 func BenchmarkCalculate120Bars(b *testing.B) {
 	benchmarkCalculate(b, 120)
@@ -26,6 +27,22 @@ func BenchmarkCalculateWindowStreaming(b *testing.B) {
 
 func BenchmarkCalculateWindowNumericStreaming(b *testing.B) {
 	benchmarkCalculateWindowStreaming(b, CalculateWindowNumeric)
+}
+
+func BenchmarkCalculationWindowRealtimePreview(b *testing.B) {
+	klines := benchmarkKlines(301)
+	window := NewCalculationWindowFromKlines(klines[:300], 268)
+	window.EnableBasicState()
+	if _, err := CalculateWindowNumeric(window, DefaultOptions()); err != nil {
+		b.Fatalf("seed CalculateWindowNumeric: %v", err)
+	}
+	preview := klines[300]
+	preview.IsClosed = false
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkCalculationWindow = window.RealtimePreview(preview)
+	}
 }
 
 func benchmarkCalculateWindowStreaming(b *testing.B, calculate func(*CalculationWindow, Options) (Result, error)) {

@@ -127,6 +127,13 @@ func (c *featureContext) emaValue(period int) (float64, bool) {
 	return value, ok
 }
 
+func (c *featureContext) emaHistoricalValue(period int, offset int) (float64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	return previousEMAFromStateOrSeries(c.basic, c.closes, period, offset)
+}
+
 func (c *featureContext) atrSeries(period int) ([]float64, bool) {
 	if c == nil {
 		return nil, false
@@ -140,7 +147,10 @@ func (c *featureContext) atrSeries(period int) ([]float64, bool) {
 		values, ok = c.basic.atrSeries14()
 	}
 	if !ok {
-		values, ok = atrSeries(c.highs, c.lows, c.closes, period)
+		trueRanges, rangesOK := c.trueRangeSeries()
+		if rangesOK && len(trueRanges) > 1 {
+			values, ok = atrSeriesFromTrueRanges(trueRanges[1:], period)
+		}
 	}
 	c.atrByPeriod[period] = cachedFloatSeries{values: values, ok: ok}
 	return values, ok

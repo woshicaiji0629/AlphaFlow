@@ -1,6 +1,7 @@
 package indicatorcalc
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -16,6 +17,57 @@ func TestSupertrendCompactMatchesReference(t *testing.T) {
 		if gotOK != wantOK || !reflect.DeepEqual(got, want) {
 			t.Fatalf("period=%d multiplier=%v compact result differs", item.period, item.multiplier)
 		}
+	}
+}
+
+func TestSupertrendSummaryMatchesFullSeries(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(300, 100, 0.8)
+	trueRanges := trueRangeSeries(highs, lows, closes)
+	for _, simpleATR := range []bool{false, true} {
+		points, pointsOK := supertrendSeriesFromTrueRanges(highs, lows, closes, trueRanges, 10, 3, simpleATR)
+		previous, last, summaryOK := supertrendSummaryFromTrueRanges(highs, lows, closes, trueRanges, 10, 3, simpleATR)
+		if summaryOK != pointsOK {
+			t.Fatalf("simpleATR=%v summary ok = %v, want %v", simpleATR, summaryOK, pointsOK)
+		}
+		if !summaryOK {
+			continue
+		}
+		if previous != points[len(points)-2] || last != points[len(points)-1] {
+			t.Fatalf("simpleATR=%v summary = %#v/%#v, want %#v/%#v", simpleATR, previous, last, points[len(points)-2], points[len(points)-1])
+		}
+	}
+}
+
+func TestSupertrendSummaryRejectsInsufficientInput(t *testing.T) {
+	highs, lows, closes, _ := trendingSeries(11, 100, 0.8)
+	if _, _, ok := supertrendSummaryFromTrueRanges(highs, lows, closes, trueRangeSeries(highs, lows, closes), 10, 3, true); ok {
+		t.Fatal("summary unexpectedly accepted fewer than two points")
+	}
+}
+
+func TestSupertrendZoneWithATRMatchesFallback(t *testing.T) {
+	highs := []float64{105, 103, 101, 99, 104, 110, 118, 116}
+	lows := []float64{100, 98, 94, 92, 96, 103, 109, 108}
+	closes := []float64{102, 100, 96, 94, 102, 108, 114, 110}
+	points := []trendPoint{
+		{value: 103, direction: trendDirectionDown},
+		{value: 101, direction: trendDirectionDown},
+		{value: 97, direction: trendDirectionUp},
+		{value: 100, direction: trendDirectionUp},
+		{value: 105, direction: trendDirectionUp},
+		{value: 112, direction: trendDirectionDown},
+	}
+	atrValue, ok := atr(highs, lows, closes, 3)
+	if !ok {
+		t.Fatal("ATR unavailable")
+	}
+	want, wantOK := supertrendZone(highs, lows, closes, points, 2, 3, 1.5)
+	got, gotOK := supertrendZoneWithATR(highs, lows, closes, points, 2, 3, 1.5, atrValue, true)
+	if !wantOK {
+		t.Fatal("fallback zone unavailable")
+	}
+	if gotOK != wantOK || got != want {
+		t.Fatalf("cached zone = %#v/%v, want %#v/%v", got, gotOK, want, wantOK)
 	}
 }
 
@@ -458,6 +510,72 @@ func TestAlphaTrendSeriesCompactMatchesBatch(t *testing.T) {
 	assertFloatClose(t, "alpha trend mfi", gotMFI, wantMFI)
 }
 
+func TestChandelierExitStreamATRMatchesBatchForEveryAppend(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(120, 100, 0.35)
+	state := newBasicIndicatorState()
+	for index := range closes {
+		state.append(highs[:index+1], lows[:index+1], closes[:index+1], volumes[:index+1])
+		if index <= 22 {
+			continue
+		}
+		gotLong, gotShort, gotOK := chandelierExitWithState(highs[:index+1], lows[:index+1], closes[:index+1], 22, 3, state)
+		wantLong, wantShort, wantOK := chandelierExit(highs[:index+1], lows[:index+1], closes[:index+1], 22, 3)
+		if gotOK != wantOK {
+			t.Fatalf("chandelier stream ok at index %d = %t, want %t", index, gotOK, wantOK)
+		}
+		assertFloatClose(t, "chandelier stream long", gotLong, wantLong)
+		assertFloatClose(t, "chandelier stream short", gotShort, wantShort)
+	}
+}
+
+func TestChandelierExitStreamATRCloneContinuesIndependently(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(40, 100, 0.35)
+	state := buildBasicIndicatorState(highs[:30], lows[:30], closes[:30], volumes[:30])
+	cloned := state.clone()
+	state.append(highs[:31], lows[:31], closes[:31], volumes[:31])
+	cloned.append(highs[:31], lows[:31], closes[:31], volumes[:31])
+	got, gotOK := state.atrValue(22)
+	want, wantOK := cloned.atrValue(22)
+	if gotOK != wantOK {
+		t.Fatalf("cloned atr22 ok = %t, want %t", wantOK, gotOK)
+	}
+	assertFloatClose(t, "cloned atr22", got, want)
+}
+
+func TestAlphaTrendStreamMatchesCompactForEveryAppend(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(160, 100, 0.35)
+	state := newBasicIndicatorState()
+	for index := range closes {
+		state.append(highs[:index+1], lows[:index+1], closes[:index+1], volumes[:index+1])
+		if index < 15 {
+			continue
+		}
+		gotPoints, gotMFI, ok := state.alphaTrendValues(14, 1)
+		if !ok {
+			t.Fatalf("missing stream alpha trend at index %d", index)
+		}
+		wantPoints, wantMFI, ok := alphaTrendSeriesCompact(highs[:index+1], lows[:index+1], closes[:index+1], volumes[:index+1], 14, 1)
+		if !ok {
+			t.Fatalf("missing compact alpha trend at index %d", index)
+		}
+		if len(gotPoints) != len(wantPoints) {
+			t.Fatalf("stream alpha trend points at index %d = %d, want %d", index, len(gotPoints), len(wantPoints))
+		}
+		for pointIndex := range wantPoints {
+			assertFloatClose(t, "stream alpha trend point", gotPoints[pointIndex].value, wantPoints[pointIndex].value)
+			if gotPoints[pointIndex].direction != wantPoints[pointIndex].direction {
+				t.Fatalf("stream alpha trend direction[%d] at index %d = %q, want %q", pointIndex, index, gotPoints[pointIndex].direction.String(), wantPoints[pointIndex].direction.String())
+			}
+		}
+		assertFloatClose(t, "stream alpha trend mfi", gotMFI, wantMFI)
+		gotCross, gotSignal := alphaTrendSignals(gotPoints)
+		wantCross, wantSignal := alphaTrendSignals(wantPoints)
+		if gotCross != wantCross || gotSignal != wantSignal {
+			t.Fatalf("stream alpha trend signals at index %d = (%q, %q), want (%q, %q)", index, gotCross, gotSignal, wantCross, wantSignal)
+		}
+	}
+}
+
 func TestLivermoreFeaturesOutputForLongSeries(t *testing.T) {
 	highs, lows, closes, _ := trendingSeries(430, 100, 0.3)
 	opens := make([]float64, 0, len(closes))
@@ -577,6 +695,51 @@ func BenchmarkDynamicSwingAnchoredVWAP(b *testing.B) {
 		if !state.ok {
 			b.Fatal("dynamicSwingAnchoredVWAP returned invalid state")
 		}
+	}
+}
+
+func TestDynamicSwingAnchoredVWAPStreamMatchesBatchForEveryAppend(t *testing.T) {
+	highs := make([]float64, 180)
+	lows := make([]float64, len(highs))
+	closes := make([]float64, len(highs))
+	volumes := make([]float64, len(highs))
+	for index := range closes {
+		closes[index] = 100 + 12*math.Sin(float64(index)*0.18)
+		highs[index] = closes[index] + 1
+		lows[index] = closes[index] - 1
+		volumes[index] = 100 + float64(index%9)*10
+	}
+	stream := newStreamDynamicSwingVWAPState(dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT)
+	for index := range closes {
+		start := maxInt(0, index-79)
+		stream.append(highs[start:index+1], lows[start:index+1], closes[start:index+1], volumes[start:index+1])
+		if index+1 < dynamicSwingVWAPPeriod {
+			continue
+		}
+		got, ok := stream.value(dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, false, dynamicSwingVWAPVolBias)
+		if !ok {
+			t.Fatalf("missing stream dynamic swing vwap at index %d", index)
+		}
+		want := dynamicSwingAnchoredVWAP(highs[:index+1], lows[:index+1], closes[:index+1], volumes[:index+1], dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, false, dynamicSwingVWAPVolBias)
+		assertFloatClose(t, "dynamic swing stream value", got.value, want.value)
+		assertFloatClose(t, "dynamic swing stream anchor", got.anchor, want.anchor)
+		if got.anchorAge != want.anchorAge || got.dir != want.dir || got.anchorType != want.anchorType || got.swingLabel != want.swingLabel || got.ok != want.ok {
+			t.Fatalf("dynamic swing stream state at index %d = %#v, want %#v", index, got, want)
+		}
+	}
+}
+
+func TestDynamicSwingAnchoredVWAPStateCloneContinuesIndependently(t *testing.T) {
+	highs, lows, closes, volumes := trendingSeries(90, 100, 0.3)
+	state := buildBasicIndicatorState(highs[:80], lows[:80], closes[:80], volumes[:80])
+	cloned := state.clone()
+
+	state.append(highs[:81], lows[:81], closes[:81], volumes[:81])
+	cloned.append(highs[:81], lows[:81], closes[:81], volumes[:81])
+	got, gotOK := state.dynamicSwingVWAPValue(dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, false, dynamicSwingVWAPVolBias)
+	want, wantOK := cloned.dynamicSwingVWAPValue(dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, false, dynamicSwingVWAPVolBias)
+	if !gotOK || !wantOK || !reflect.DeepEqual(got, want) {
+		t.Fatalf("cloned dynamic swing state = %#v, want %#v", want, got)
 	}
 }
 

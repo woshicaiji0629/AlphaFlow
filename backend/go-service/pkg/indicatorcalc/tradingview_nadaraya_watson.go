@@ -2,8 +2,80 @@ package indicatorcalc
 
 import "math"
 
-func addNadarayaWatsonEnvelopeFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, length int, bandwidth float64, multiplier float64) {
-	middle, mae, previousMiddle, ok := nadarayaWatsonEnvelope(closes, length, bandwidth)
+type streamNadarayaWatsonState struct {
+	closes         [50]float64
+	closeCount     int
+	errors         [50]float64
+	errorCount     int
+	weights        [50]float64
+	sampleCount    int
+	middle         float64
+	previousMiddle float64
+	hasMiddle      bool
+}
+
+func newStreamNadarayaWatsonState(bandwidth float64) streamNadarayaWatsonState {
+	state := streamNadarayaWatsonState{}
+	fillNadarayaWatsonWeights(state.weights[:], bandwidth)
+	return state
+}
+
+func (s *streamNadarayaWatsonState) append(closeValue float64) {
+	if s == nil {
+		return
+	}
+	s.sampleCount++
+	if s.closeCount < len(s.closes) {
+		s.closes[s.closeCount] = closeValue
+		s.closeCount++
+	} else {
+		copy(s.closes[:len(s.closes)-1], s.closes[1:])
+		s.closes[len(s.closes)-1] = closeValue
+	}
+	weightStart := len(s.weights) - s.closeCount
+	var weighted, weightSum float64
+	for index := 0; index < s.closeCount; index++ {
+		weight := s.weights[weightStart+index]
+		weighted += s.closes[index] * weight
+		weightSum += weight
+	}
+	if weightSum == 0 {
+		return
+	}
+	fit := weighted / weightSum
+	errorValue := math.Abs(closeValue - fit)
+	if s.errorCount < len(s.errors) {
+		s.errors[s.errorCount] = errorValue
+		s.errorCount++
+	} else {
+		copy(s.errors[:len(s.errors)-1], s.errors[1:])
+		s.errors[len(s.errors)-1] = errorValue
+	}
+	if s.sampleCount >= len(s.closes) {
+		if s.hasMiddle {
+			s.previousMiddle = s.middle
+		}
+		s.middle = fit
+		s.hasMiddle = true
+	}
+}
+
+func (s *streamNadarayaWatsonState) value() (float64, float64, float64, bool) {
+	if s == nil || s.sampleCount < len(s.closes)+1 || s.errorCount < len(s.errors) || !s.hasMiddle {
+		return 0, 0, 0, false
+	}
+	var errorSum float64
+	for _, errorValue := range s.errors {
+		errorSum += errorValue
+	}
+	return s.middle, errorSum / float64(len(s.errors)), s.previousMiddle, true
+}
+
+func addNadarayaWatsonEnvelopeFeatures(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, length int, bandwidth float64, multiplier float64, basic *basicIndicatorState) {
+	middle, mae, previousMiddle, ok := basic.nadarayaWatsonValue(length, bandwidth)
+	if !ok {
+		middle, mae, previousMiddle, ok = nadarayaWatsonEnvelope(closes, length, bandwidth)
+	}
 	if !ok {
 		return
 	}

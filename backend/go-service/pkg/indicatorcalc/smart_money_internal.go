@@ -61,6 +61,10 @@ func swingStrengthLabels(trend swingTrend) (string, string) {
 
 func addEqualHighLow(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int) {
 	pivotHighs, pivotLows := pivots(highs[len(highs)-period:], lows[len(lows)-period:], 2)
+	addEqualHighLowWithPivots(target, values, signals, highs, lows, closes, period, pivotHighs, pivotLows)
+}
+
+func addEqualHighLowWithPivots(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, period int, pivotHighs []priceLevel, pivotLows []priceLevel) {
 	tolerance := equalHighLowTolerance(highs, lows, closes, period)
 	if level, ok := recentEqualLevel(pivotHighs, tolerance); ok {
 		setValueTarget(target, values, "equal_high", level, true)

@@ -32,7 +32,7 @@ func (r *Runner) windowForKline(
 	rule Rule,
 	kline model.Kline,
 	intervalMillis int64,
-) (*indicatorcalc.CalculationWindow, error) {
+) ([]model.Kline, error) {
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
 	shard := r.windowShard(key)
 	shard.mu.Lock()
@@ -45,9 +45,9 @@ func (r *Runner) windowForKline(
 	}
 	if cached != nil && hasCached {
 		if kline.OpenTime <= cachedLast.OpenTime {
-			window := cached.Clone()
+			klines := cloneKlines(cached.Klines())
 			shard.mu.Unlock()
-			return window, nil
+			return klines, nil
 		}
 		if isContiguous(cachedLast, kline, intervalMillis) {
 			if kline.IsClosed {
@@ -55,14 +55,22 @@ func (r *Runner) windowForKline(
 			} else {
 				cached.PrepareAISourcePrefix()
 			}
-			window := cached.Clone()
+			klines := cloneKlines(cached.Klines())
 			shard.mu.Unlock()
-			return window, nil
+			return klines, nil
 		}
 	}
 	shard.mu.Unlock()
 
-	return r.prepareKlineWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
+	window, err := r.prepareKlineWindow(ctx, rule, kline.Symbol, kline.Interval, intervalMillis, kline.OpenTime)
+	if err != nil {
+		return nil, err
+	}
+	return cloneKlines(window.Klines()), nil
+}
+
+func cloneKlines(klines []model.Kline) []model.Kline {
+	return append([]model.Kline(nil), klines...)
 }
 
 func (r *Runner) realtimeWindowForKline(

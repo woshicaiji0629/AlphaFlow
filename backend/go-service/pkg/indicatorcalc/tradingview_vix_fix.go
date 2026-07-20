@@ -2,8 +2,80 @@ package indicatorcalc
 
 import "math"
 
-func addWilliamsVixFixFeatures(target *ValueSet, values map[string]string, signals map[string]string, lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64) {
-	result, ok := williamsVixFixCompact(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
+type streamWilliamsVixFixState struct {
+	closes     [22]float64
+	closeCount int
+	values     [50]float64
+	valueCount int
+}
+
+func (s *streamWilliamsVixFixState) append(low float64, closeValue float64) {
+	if s.closeCount < len(s.closes) {
+		s.closes[s.closeCount] = closeValue
+		s.closeCount++
+		if s.closeCount < len(s.closes) {
+			return
+		}
+	} else {
+		copy(s.closes[:len(s.closes)-1], s.closes[1:])
+		s.closes[len(s.closes)-1] = closeValue
+	}
+	highestClose := s.closes[0]
+	for _, closeItem := range s.closes[1:] {
+		if closeItem > highestClose {
+			highestClose = closeItem
+		}
+	}
+	value := 0.0
+	if highestClose != 0 {
+		value = (highestClose - low) / highestClose * 100
+	}
+	if s.valueCount < len(s.values) {
+		s.values[s.valueCount] = value
+		s.valueCount++
+		return
+	}
+	copy(s.values[:len(s.values)-1], s.values[1:])
+	s.values[len(s.values)-1] = value
+}
+
+func (s *streamWilliamsVixFixState) value() (williamsVixFixResult, bool) {
+	if s == nil || s.valueCount < len(s.values) {
+		return williamsVixFixResult{}, false
+	}
+	const bbLength = 20
+	var sum float64
+	for _, value := range s.values[len(s.values)-bbLength:] {
+		sum += value
+	}
+	mid := sum / bbLength
+	var variance float64
+	for _, value := range s.values[len(s.values)-bbLength:] {
+		difference := value - mid
+		variance += difference * difference
+	}
+	deviation := math.Sqrt(variance / bbLength)
+	rangeHigh, rangeLow := s.values[0], s.values[0]
+	for _, value := range s.values[1:] {
+		if value > rangeHigh {
+			rangeHigh = value
+		}
+		if value < rangeLow {
+			rangeLow = value
+		}
+	}
+	return williamsVixFixResult{
+		value: s.values[len(s.values)-1], mid: mid,
+		upperBand: mid + 2*deviation, lowerBand: mid - 2*deviation,
+		rangeHigh: rangeHigh * 0.85, rangeLow: rangeLow * 1.01,
+	}, true
+}
+
+func addWilliamsVixFixFeatures(target *ValueSet, values map[string]string, signals map[string]string, lows []float64, closes []float64, period int, bbLength int, bbMultiplier float64, lookback int, percentileHigh float64, basic *basicIndicatorState) {
+	result, ok := basic.williamsVixFixValue(period, bbLength, bbMultiplier, lookback, percentileHigh)
+	if !ok {
+		result, ok = williamsVixFixCompact(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
+	}
 	if !ok {
 		result, ok = williamsVixFix(lows, closes, period, bbLength, bbMultiplier, lookback, percentileHigh)
 	}

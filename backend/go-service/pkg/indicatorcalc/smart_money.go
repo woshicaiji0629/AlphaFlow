@@ -129,7 +129,7 @@ func addSmartMoneyToSet(target *ValueSet, values map[string]string, signals map[
 		setValueTarget(target, values, "order_block_mid", (blockHigh+blockLow)/2, true)
 	}
 	addInternalSmartMoney(target, values, signals, highs, lows, closes)
-	addEqualHighLow(target, values, signals, highs, lows, closes, period)
+	addEqualHighLowWithPivots(target, values, signals, highs, lows, closes, period, pivotHighs, pivotLows)
 	addFairValueGap(target, values, signals, highs, lows, closes)
 	addPremiumDiscountZones(target, values, signals, closes[last], swingHigh.price, swingLow.price)
 }

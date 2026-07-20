@@ -160,6 +160,15 @@ func TestTrendFeaturesWithContextMatchStandaloneCalculation(t *testing.T) {
 	if !reflect.DeepEqual(gotSignals, wantSignals) {
 		t.Fatalf("context trend signals differ: got=%#v want=%#v", gotSignals, wantSignals)
 	}
+	gotPreviousEMA25, ok := features.emaHistoricalValue(25, 5)
+	if !ok {
+		t.Fatal("missing context historical ema25")
+	}
+	wantPreviousEMA25, ok := ema(closes[:len(closes)-5], 25)
+	if !ok {
+		t.Fatal("missing batch historical ema25")
+	}
+	assertFloatClose(t, "context historical ema25", gotPreviousEMA25, wantPreviousEMA25)
 }
 
 var benchmarkDEMAValue float64
@@ -306,6 +315,20 @@ func TestMovingAverageStructureHelpers(t *testing.T) {
 	}
 	if got := movingAverageBreakout(110, 100, 101, 102); got != "above_group" {
 		t.Fatalf("movingAverageBreakout = %q", got)
+	}
+}
+
+func TestEZEMAArrayHelpers(t *testing.T) {
+	bull := [8]float64{8, 7, 6, 5, 4, 3, 2, 1}
+	if got := ezEMAStack(bull); got != "bull" {
+		t.Fatalf("ezEMAStack = %q, want bull", got)
+	}
+	if got := ezEMASpread(bull); got != 7 {
+		t.Fatalf("ezEMASpread = %v, want 7", got)
+	}
+	bear := [8]float64{1, 2, 3, 4, 5, 6, 7, 8}
+	if got := ezEMAStack(bear); got != "bear" {
+		t.Fatalf("ezEMAStack = %q, want bear", got)
 	}
 }
 

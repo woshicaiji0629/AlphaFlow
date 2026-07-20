@@ -1,6 +1,9 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestSmartMoneyDetectsBreakOfStructureUp(t *testing.T) {
 	values := map[string]string{}
@@ -53,6 +56,27 @@ func TestSmartMoneyDetectsBreakOfStructureUp(t *testing.T) {
 		if signals[key] == "" {
 			t.Fatalf("missing %s in %#v", key, signals)
 		}
+	}
+}
+
+func TestEqualHighLowWithPivotsMatchesFallback(t *testing.T) {
+	highs, lows, closes := testPriceSeries(80)
+	period := minInt(60, len(closes))
+	pivotHighs, pivotLows := pivots(highs[len(highs)-period:], lows[len(lows)-period:], 2)
+
+	wantValues := map[string]string{}
+	wantSignals := map[string]string{}
+	addEqualHighLow(nil, wantValues, wantSignals, highs, lows, closes, period)
+
+	gotValues := map[string]string{}
+	gotSignals := map[string]string{}
+	addEqualHighLowWithPivots(nil, gotValues, gotSignals, highs, lows, closes, period, pivotHighs, pivotLows)
+
+	if !reflect.DeepEqual(gotValues, wantValues) {
+		t.Fatalf("shared-pivot values = %#v, want %#v", gotValues, wantValues)
+	}
+	if !reflect.DeepEqual(gotSignals, wantSignals) {
+		t.Fatalf("shared-pivot signals = %#v, want %#v", gotSignals, wantSignals)
 	}
 }
 
@@ -181,6 +205,29 @@ func TestMomentumSupplyDemandDetectsSupplyAndBreak(t *testing.T) {
 	}
 	if state.position != "above_supply" {
 		t.Fatalf("position = %q, want above_supply", state.position)
+	}
+}
+
+func TestMomentumBodyAverageWindowMatchesDirectCalculation(t *testing.T) {
+	opens, _, _, closes := momentumSupplyDemandSeries(80)
+	for index := range closes {
+		opens[index] += float64(index%7) / 10
+		closes[index] += float64(index%5) / 5
+	}
+	window := momentumBodyAverageWindow{}
+	for index := range closes {
+		window.append(absFloat(closes[index] - opens[index]))
+		want := averageBodySizeAt(opens, closes, index, momentumBodyAveragePeriod)
+		if got := window.average(); got != want {
+			t.Fatalf("index=%d rolling average = %v, want %v", index, got, want)
+		}
+	}
+}
+
+func TestMomentumSupplyDemandRejectsSpanBeyondLookback(t *testing.T) {
+	opens, highs, lows, closes := momentumSupplyDemandSeries(40)
+	if _, ok := detectMomentumSupplyDemandZones(opens, highs, lows, closes, 40, 40, 4, 0.5, 20, 10); ok {
+		t.Fatal("oversized momentum span unexpectedly produced a zone")
 	}
 }
 

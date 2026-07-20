@@ -35,7 +35,7 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 		}
 		assertFloatClose(t, "sma", got, want)
 	}
-	for _, period := range []int{5, 7, 8, 9, 10, 12, 13, 19, 25, 26, 34, 55, 89, 99, 144, 200} {
+	for _, period := range []int{5, 7, 8, 9, 10, 12, 13, 19, 21, 25, 26, 34, 55, 89, 99, 144, 200} {
 		got, ok := state.emaValue(period)
 		if !ok {
 			t.Fatalf("missing stream ema%d", period)
@@ -55,6 +55,16 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 				t.Fatalf("missing batch previous ema%d", period)
 			}
 			assertFloatClose(t, "previous ema", gotPrevious, wantPrevious)
+		}
+		for _, offset := range []int{2, 5} {
+			gotHistorical, ok := state.emaHistoricalValue(period, offset)
+			wantHistorical, wantOK := ema(fullCloses[:len(fullCloses)-offset], period)
+			if ok != wantOK {
+				t.Fatalf("ema%d offset %d stream ok = %v, want %v", period, offset, ok, wantOK)
+			}
+			if ok {
+				assertFloatClose(t, "historical ema", gotHistorical, wantHistorical)
+			}
 		}
 	}
 
@@ -170,6 +180,290 @@ func TestBasicIndicatorStateMatchesBatchCalculations(t *testing.T) {
 	assertFloatClose(t, "adaptive assigned atr", gotAdaptive.assignedATR, wantAdaptive.assignedATR)
 	if gotLast.direction != wantLast.direction || gotAdaptive.cluster != wantAdaptive.cluster {
 		t.Fatalf("adaptive state = %s/%s, want %s/%s", gotLast.direction, gotAdaptive.cluster, wantLast.direction, wantAdaptive.cluster)
+	}
+
+	gotPSAR, gotPSARDirection, ok := state.psarValue()
+	if !ok {
+		t.Fatal("missing stream PSAR")
+	}
+	wantPSAR, wantPSARDirection, ok := psar(fullHighs, fullLows, fullCloses, 0.02, 0.2)
+	if !ok {
+		t.Fatal("missing batch PSAR")
+	}
+	assertFloatClose(t, "psar", gotPSAR, wantPSAR)
+	if gotPSARDirection != wantPSARDirection {
+		t.Fatalf("PSAR direction = %q, want %q", gotPSARDirection, wantPSARDirection)
+	}
+
+	gotJaw, gotTeeth, gotLips, ok := state.alligatorValue()
+	if !ok {
+		t.Fatal("missing stream Alligator")
+	}
+	wantJaw, wantTeeth, wantLips, ok := alligator(fullCloses)
+	if !ok {
+		t.Fatal("missing batch Alligator")
+	}
+	assertFloatClose(t, "alligator jaw", gotJaw, wantJaw)
+	assertFloatClose(t, "alligator teeth", gotTeeth, wantTeeth)
+	assertFloatClose(t, "alligator lips", gotLips, wantLips)
+
+	gotHMA, ok := state.hma21Value()
+	if !ok {
+		t.Fatal("missing stream HMA21")
+	}
+	wantHMA, ok := hma(fullCloses, 21)
+	if !ok {
+		t.Fatal("missing batch HMA21")
+	}
+	assertFloatClose(t, "hma21", gotHMA, wantHMA)
+	gotPreviousHMA, ok := state.hma21Previous3Value()
+	if !ok {
+		t.Fatal("missing previous stream HMA21")
+	}
+	wantPreviousHMA, ok := hma(fullCloses[:len(fullCloses)-3], 21)
+	if !ok {
+		t.Fatal("missing previous batch HMA21")
+	}
+	assertFloatClose(t, "previous hma21", gotPreviousHMA, wantPreviousHMA)
+
+	gotAverage, gotPreviousAverage, gotEMD, gotPreviousEMD, ok := state.emd25Value(25)
+	if !ok {
+		t.Fatal("missing stream EMD25")
+	}
+	wantAverage, wantPreviousAverage, wantEMD, wantPreviousEMD, ok := emdLastTwo(fullCloses, 25)
+	if !ok {
+		t.Fatal("missing batch EMD25")
+	}
+	assertFloatClose(t, "emd average", gotAverage, wantAverage)
+	assertFloatClose(t, "emd previous average", gotPreviousAverage, wantPreviousAverage)
+	assertFloatClose(t, "emd", gotEMD, wantEMD)
+	assertFloatClose(t, "previous emd", gotPreviousEMD, wantPreviousEMD)
+}
+
+func TestBasicIndicatorStateEMAStorageAndCloneIndependence(t *testing.T) {
+	state := newBasicIndicatorState()
+	for index, period := range basicEMAPeriods {
+		emaState, ok := state.emaState(period)
+		if !ok {
+			t.Fatalf("missing ema state for period %d", period)
+		}
+		if emaState != &state.ema[index] || emaState.period != period {
+			t.Fatalf("ema%d mapped to the wrong state", period)
+		}
+	}
+	if _, ok := state.emaState(6); ok {
+		t.Fatal("unexpected ema state for unsupported period")
+	}
+
+	original, _ := state.emaState(21)
+	for value := 1.0; value <= 21; value++ {
+		original.append(value)
+	}
+	cloned := state.clone()
+	clonedEMA, ok := cloned.emaState(21)
+	if !ok {
+		t.Fatal("cloned ema21 state is missing")
+	}
+	clonedEMA.append(100)
+	if original.value == clonedEMA.value {
+		t.Fatal("cloned ema state mutated the original state")
+	}
+}
+
+func TestBasicIndicatorStateDynamicSMAAndMACDStorage(t *testing.T) {
+	state := newBasicIndicatorState()
+	for index, period := range basicSMAPeriods {
+		mapped := findBasicSMAState(state.smaStates, period)
+		if mapped != &state.smaStates[index] {
+			t.Fatalf("sma%d mapped to the wrong dynamic slot", period)
+		}
+	}
+	if mapped := findBasicSMAState(state.smaStates, 21); mapped != nil {
+		t.Fatal("unexpected slot for unsupported SMA period")
+	}
+	for index, config := range basicMACDConfigs {
+		if state.macd[index].config != config {
+			t.Fatalf("MACD slot %d config = %+v, want %+v", index, state.macd[index].config, config)
+		}
+	}
+
+	klines := benchmarkKlines(240)
+	window := NewCalculationWindowFromKlines(klines, 0)
+	_, highs, lows, closes, volumes, err := window.Series()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = buildBasicIndicatorState(highs, lows, closes, volumes)
+	cloned := state.clone()
+	cloned.macd[0].state.append(closes[len(closes)-1] + 10)
+	if len(cloned.macd[0].state.series) == 0 || len(state.macd[0].state.series) == 0 {
+		t.Fatal("missing MACD series")
+	}
+	cloned.macd[0].state.series[0].value++
+	if cloned.macd[0].state.series[0].value == state.macd[0].state.series[0].value {
+		t.Fatal("cloned MACD series mutated the original state")
+	}
+}
+
+func TestStreamPSARMatchesBatchAtEveryPoint(t *testing.T) {
+	klines := benchmarkKlines(300)
+	window := NewCalculationWindowFromKlines(klines, 0)
+	_, highs, lows, closes, _, err := window.Series()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newStreamPSARState(0.02, 0.2)
+	for index := range closes {
+		state.append(highs[index], lows[index], closes[index])
+		if index < 2 {
+			continue
+		}
+		got, gotDirection, gotOK := state.value()
+		want, wantDirection, wantOK := psar(highs[:index+1], lows[:index+1], closes[:index+1], 0.02, 0.2)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		assertFloatClose(t, "stream psar", got, want)
+		if gotDirection != wantDirection {
+			t.Fatalf("index=%d direction = %q, want %q", index, gotDirection, wantDirection)
+		}
+	}
+}
+
+func TestStreamKAMA10MatchesBatchAtEveryPoint(t *testing.T) {
+	klines := benchmarkKlines(300)
+	window := NewCalculationWindowFromKlines(klines, 0)
+	_, _, _, closes, _, err := window.Series()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state streamKAMAState
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		got, gotOK := state.value()
+		want, wantOK := kama(closes[:index+1], 10, 2, 30)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream kama10", got, want)
+		}
+	}
+}
+
+func TestStreamDEMATEMA21MatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	first := newStreamEMAState(21)
+	state := newStreamDEMATEMAState(21)
+	for index, closeValue := range closes {
+		first.append(closeValue)
+		state.append(first)
+		gotDEMA, gotTEMA, gotDEMAOK, gotTEMAOK := state.value(first)
+		wantDEMA, wantTEMA, wantDEMAOK, wantTEMAOK := demaTema(closes[:index+1], 21)
+		if gotDEMAOK != wantDEMAOK || gotTEMAOK != wantTEMAOK {
+			t.Fatalf("index=%d stream ok = %v/%v, want %v/%v", index, gotDEMAOK, gotTEMAOK, wantDEMAOK, wantTEMAOK)
+		}
+		if gotDEMAOK {
+			assertFloatClose(t, "stream dema21", gotDEMA, wantDEMA)
+		}
+		if gotTEMAOK {
+			assertFloatClose(t, "stream tema21", gotTEMA, wantTEMA)
+		}
+	}
+}
+
+func TestStreamEMAClonePreservesHistory(t *testing.T) {
+	closes := oscillatingCloses(80)
+	state := newStreamEMAState(13)
+	for _, closeValue := range closes[:70] {
+		state.append(closeValue)
+	}
+	cloned := state.clone()
+	for _, closeValue := range closes[70:] {
+		state.append(closeValue)
+		cloned.append(closeValue)
+	}
+	assertFloatClose(t, "cloned ema", cloned.value, state.value)
+	for _, offset := range []int{1, 2, 5} {
+		got, gotOK := cloned.historicalValue(offset)
+		want, wantOK := state.historicalValue(offset)
+		if gotOK != wantOK {
+			t.Fatalf("offset=%d cloned ok = %v, want %v", offset, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "cloned historical ema", got, want)
+		}
+	}
+}
+
+func TestStreamAlligatorMatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	jaw := newStreamSMMAState(13)
+	teeth := newStreamSMMAState(8)
+	lips := newStreamSMMAState(5)
+	for index, closeValue := range closes {
+		jaw.append(closeValue)
+		teeth.append(closeValue)
+		lips.append(closeValue)
+		gotJaw, jawOK := jaw.value()
+		gotTeeth, teethOK := teeth.value()
+		gotLips, lipsOK := lips.value()
+		gotOK := jawOK && teethOK && lipsOK
+		wantJaw, wantTeeth, wantLips, wantOK := alligator(closes[:index+1])
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream alligator jaw", gotJaw, wantJaw)
+			assertFloatClose(t, "stream alligator teeth", gotTeeth, wantTeeth)
+			assertFloatClose(t, "stream alligator lips", gotLips, wantLips)
+		}
+	}
+}
+
+func TestStreamHMA21MatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	var state streamHMA21State
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		got, gotOK := state.value()
+		want, wantOK := hma(closes[:index+1], 21)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream hma21", got, want)
+		}
+		gotPrevious, gotPreviousOK := state.previous3()
+		wantPrevious, wantPreviousOK := 0.0, false
+		if index >= 3 {
+			wantPrevious, wantPreviousOK = hma(closes[:index-2], 21)
+		}
+		if gotPreviousOK != wantPreviousOK {
+			t.Fatalf("index=%d previous stream ok = %v, want %v", index, gotPreviousOK, wantPreviousOK)
+		}
+		if gotPreviousOK {
+			assertFloatClose(t, "stream previous hma21", gotPrevious, wantPrevious)
+		}
+	}
+}
+
+func TestStreamEMD25MatchesBatchAtEveryPoint(t *testing.T) {
+	closes := oscillatingCloses(300)
+	state := newStreamEMDState(25)
+	for index, closeValue := range closes {
+		state.append(closeValue)
+		gotAvg, gotPreviousAvg, gotEMD, gotPreviousEMD, gotOK := state.value()
+		wantAvg, wantPreviousAvg, wantEMD, wantPreviousEMD, wantOK := emdLastTwo(closes[:index+1], 25)
+		if gotOK != wantOK {
+			t.Fatalf("index=%d stream ok = %v, want %v", index, gotOK, wantOK)
+		}
+		if gotOK {
+			assertFloatClose(t, "stream emd average", gotAvg, wantAvg)
+			assertFloatClose(t, "stream emd previous average", gotPreviousAvg, wantPreviousAvg)
+			assertFloatClose(t, "stream emd", gotEMD, wantEMD)
+			assertFloatClose(t, "stream previous emd", gotPreviousEMD, wantPreviousEMD)
+		}
 	}
 }
 

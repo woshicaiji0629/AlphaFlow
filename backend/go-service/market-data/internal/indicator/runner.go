@@ -350,8 +350,9 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 		return err
 	}
 	var calcWindow *indicatorcalc.CalculationWindow
+	var closedKlines []model.Kline
 	if kline.IsClosed {
-		calcWindow, err = r.windowForKline(ctx, rule, kline, intervalMillis)
+		closedKlines, err = r.windowForKline(ctx, rule, kline, intervalMillis)
 	} else {
 		var ready bool
 		calcWindow, ready, err = r.realtimeWindowForKline(ctx, rule, kline, intervalMillis)
@@ -373,7 +374,7 @@ func (r *Runner) calculateKline(ctx context.Context, rule Rule, kline model.Klin
 	key := windowKey(rule.Exchange, rule.Market, kline.Symbol, kline.Interval)
 	var calculated calculatedIndicators
 	if kline.IsClosed {
-		calculated, err = r.calculateClosedIndicators(ctx, key, rule, kline.Symbol, kline.Interval, calcWindow)
+		calculated, err = r.calculateClosedIndicators(ctx, key, rule, kline.Symbol, kline.Interval, closedKlines)
 		if err != nil {
 			return err
 		}
@@ -487,7 +488,7 @@ func (r *Runner) calculateSymbolInterval(ctx context.Context, rule Rule, symbol 
 	if err != nil {
 		return err
 	}
-	calculated, err := r.calculateClosedIndicators(ctx, key, rule, symbol, interval, window)
+	calculated, err := r.calculateClosedIndicators(ctx, key, rule, symbol, interval, cloneKlines(window.Klines()))
 	if err != nil {
 		return err
 	}

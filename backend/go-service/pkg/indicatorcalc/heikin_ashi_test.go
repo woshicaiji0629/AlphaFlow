@@ -49,3 +49,39 @@ func TestHeikinAshiLastMatchesSeries(t *testing.T) {
 		t.Fatalf("last = %#v, want %#v", last, series[len(series)-1])
 	}
 }
+
+func TestHeikinAshiStreamMatchesLastForEveryAppend(t *testing.T) {
+	opens := []float64{100, 102, 101, 105, 104, 108, 107}
+	highs := []float64{103, 104, 106, 108, 107, 110, 111}
+	lows := []float64{99, 100, 100, 103, 102, 105, 106}
+	closes := []float64{102, 101, 105, 107, 103, 109, 108}
+	state := streamHeikinAshiState{}
+	for index := range closes {
+		state.append(opens[index], highs[index], lows[index], closes[index])
+		got, ok := state.value()
+		if !ok {
+			t.Fatalf("missing stream heikin ashi at index %d", index)
+		}
+		want, ok := heikinAshiLast(opens[:index+1], highs[:index+1], lows[:index+1], closes[:index+1])
+		if !ok || got != want {
+			t.Fatalf("stream heikin ashi at index %d = %#v, want %#v", index, got, want)
+		}
+	}
+}
+
+func TestHeikinAshiBasicStateCloneContinuesIndependently(t *testing.T) {
+	opens := []float64{100, 102, 101, 105}
+	highs := []float64{103, 104, 106, 108}
+	lows := []float64{99, 100, 100, 103}
+	closes := []float64{102, 101, 105, 107}
+	volumes := []float64{10, 11, 12, 13}
+	state := buildBasicIndicatorStateWithOpens(opens[:3], highs[:3], lows[:3], closes[:3], volumes[:3])
+	cloned := state.clone()
+	state.appendHeikinAshi(opens[3], highs[3], lows[3], closes[3])
+	cloned.appendHeikinAshi(opens[3], highs[3], lows[3], closes[3])
+	got, gotOK := state.heikinAshiValue()
+	want, wantOK := cloned.heikinAshiValue()
+	if gotOK != wantOK || got != want {
+		t.Fatalf("cloned heikin ashi = %#v, want %#v", want, got)
+	}
+}

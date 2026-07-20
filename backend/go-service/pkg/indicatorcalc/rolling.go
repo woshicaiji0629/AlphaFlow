@@ -10,16 +10,12 @@ type rollingWindow struct {
 	sum    float64
 	sumSq  float64
 	values []float64
-	max    floatMonotonicWindow
-	min    floatMonotonicWindow
 }
 
 func newRollingWindow(period int) *rollingWindow {
 	return &rollingWindow{
 		period: period,
 		values: make([]float64, 0, period),
-		max:    newFloatMonotonicWindow(true),
-		min:    newFloatMonotonicWindow(false),
 	}
 }
 
@@ -57,11 +53,6 @@ func (r *rollingWindow) append(value float64) {
 		}
 	}
 
-	r.max.push(r.index, value)
-	r.min.push(r.index, value)
-	oldestIndex := r.index - r.period + 1
-	r.max.expireBefore(oldestIndex)
-	r.min.expireBefore(oldestIndex)
 }
 
 func (r *rollingWindow) ready() bool { return r != nil && r.count == r.period }
@@ -82,7 +73,14 @@ func (r *rollingWindow) rangeValues() (float64, float64, bool) {
 	if !r.ready() {
 		return 0, 0, false
 	}
-	maximum, maxOK := r.max.value()
-	minimum, minOK := r.min.value()
-	return maximum, minimum, maxOK && minOK
+	maximum, minimum := r.values[0], r.values[0]
+	for _, value := range r.values[1:] {
+		if value > maximum {
+			maximum = value
+		}
+		if value < minimum {
+			minimum = value
+		}
+	}
+	return maximum, minimum, true
 }

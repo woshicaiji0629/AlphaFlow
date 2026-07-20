@@ -33,10 +33,19 @@ type supplyDemandRangeResult struct {
 }
 
 func supplyDemandRange(highs []float64, lows []float64, closes []float64, volumes []float64, lookback int, bins int, thresholdPct float64) (supplyDemandRangeResult, bool) {
-	if thresholdPct <= 0 {
+	if thresholdPct <= 0 || bins < 2 {
 		return supplyDemandRangeResult{}, false
 	}
-	bucketVolumes, rangeHigh, rangeLow, bucketSize, ok := priceVolumeBuckets(highs, lows, closes, volumes, lookback, bins, bins)
+	var fixedBuckets [50]float64
+	var bucketVolumes []float64
+	var rangeHigh, rangeLow, bucketSize float64
+	var ok bool
+	if bins <= len(fixedBuckets) {
+		bucketVolumes = fixedBuckets[:bins]
+		rangeHigh, rangeLow, bucketSize, ok = priceVolumeBucketsInto(bucketVolumes, highs, lows, closes, volumes, lookback, bins, bins)
+	} else {
+		bucketVolumes, rangeHigh, rangeLow, bucketSize, ok = priceVolumeBuckets(highs, lows, closes, volumes, lookback, bins, bins)
+	}
 	if !ok {
 		return supplyDemandRangeResult{}, false
 	}

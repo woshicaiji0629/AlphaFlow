@@ -33,14 +33,12 @@ func addSupertrendWithStateAndFeaturesToSet(target *ValueSet, values map[string]
 	signals["supertrend_direction"] = lastPoint.direction.String()
 	signals["supertrend_flip"] = trendFlip(points[lastIndex-1].direction.String(), lastPoint.direction.String())
 
-	smaPoints, smaOK := supertrendSeriesFromTrueRanges(highs, lows, closes, trueRanges, period, multiplier, true)
+	smaPrevious, smaLastPoint, smaOK := supertrendSummaryFromTrueRanges(highs, lows, closes, trueRanges, period, multiplier, true)
 	if smaOK {
-		smaLastIndex := len(smaPoints) - 1
-		smaLastPoint := smaPoints[smaLastIndex]
 		setValueTarget(target, values, "sma_atr_supertrend", smaLastPoint.value, true)
 		setValueTarget(target, values, "sma_atr_supertrend_distance_pct", percentDistance(lastClose, smaLastPoint.value), smaLastPoint.value != 0)
 		signals["sma_atr_supertrend_direction"] = smaLastPoint.direction.String()
-		signals["sma_atr_supertrend_flip"] = trendFlip(smaPoints[smaLastIndex-1].direction.String(), smaLastPoint.direction.String())
+		signals["sma_atr_supertrend_flip"] = trendFlip(smaPrevious.direction.String(), smaLastPoint.direction.String())
 	}
 
 	for _, preset := range []struct {
@@ -74,7 +72,11 @@ func addSupertrendWithStateAndFeaturesToSet(target *ValueSet, values map[string]
 	}
 	addAISupertrendWithATRToSet(target, values, signals, highs, lows, closes, 10, 1, 5, 0.5, 10, atr10, atr10OK)
 
-	zone, zoneOK := supertrendZone(highs, lows, closes, points, period, 14, 1.5)
+	zoneATR, zoneATROK := 0.0, false
+	if features != nil {
+		zoneATR, zoneATROK = features.atrValue(14)
+	}
+	zone, zoneOK := supertrendZoneWithATR(highs, lows, closes, points, period, 14, 1.5, zoneATR, zoneATROK)
 	if !zoneOK {
 		signals["supertrend_zone_ready"] = "false"
 		return
@@ -243,11 +245,27 @@ func supertrendSeriesSMAATR(highs []float64, lows []float64, closes []float64, p
 }
 
 func supertrendSeriesFromTrueRanges(highs []float64, lows []float64, closes []float64, trueRanges []float64, period int, multiplier float64, simpleATR bool) ([]trendPoint, bool) {
+	run, ok := runSupertrendFromTrueRanges(highs, lows, closes, trueRanges, period, multiplier, simpleATR, true)
+	return run.points, ok
+}
+
+func supertrendSummaryFromTrueRanges(highs []float64, lows []float64, closes []float64, trueRanges []float64, period int, multiplier float64, simpleATR bool) (trendPoint, trendPoint, bool) {
+	run, ok := runSupertrendFromTrueRanges(highs, lows, closes, trueRanges, period, multiplier, simpleATR, false)
+	return run.previous, run.last, ok
+}
+
+type supertrendRun struct {
+	points   []trendPoint
+	previous trendPoint
+	last     trendPoint
+}
+
+func runSupertrendFromTrueRanges(highs []float64, lows []float64, closes []float64, trueRanges []float64, period int, multiplier float64, simpleATR bool, collectPoints bool) (supertrendRun, bool) {
 	if period <= 0 || len(closes) <= period || len(highs) != len(closes) || len(lows) != len(closes) || len(trueRanges) != len(closes) {
-		return nil, false
+		return supertrendRun{}, false
 	}
 	if simpleATR && multiplier <= 0 {
-		return nil, false
+		return supertrendRun{}, false
 	}
 	atrSum := 0.0
 	for index := 1; index <= period; index++ {
@@ -261,8 +279,11 @@ func supertrendSeriesFromTrueRanges(highs []float64, lows []float64, closes []fl
 	if closes[period] >= mid {
 		direction = "up"
 	}
-	points := make([]trendPoint, 0, len(closes)-period)
-	points = append(points, supertrendPoint(finalUpper, finalLower, direction))
+	run := supertrendRun{last: supertrendPoint(finalUpper, finalLower, direction)}
+	if collectPoints {
+		run.points = make([]trendPoint, 0, len(closes)-period)
+		run.points = append(run.points, run.last)
+	}
 	for index := period + 1; index < len(closes); index++ {
 		if simpleATR {
 			atrSum += trueRanges[index] - trueRanges[index-period]
@@ -287,12 +308,16 @@ func supertrendSeriesFromTrueRanges(highs []float64, lows []float64, closes []fl
 			direction = "down"
 		}
 		finalUpper, finalLower = nextUpper, nextLower
-		points = append(points, supertrendPoint(finalUpper, finalLower, direction))
+		run.previous = run.last
+		run.last = supertrendPoint(finalUpper, finalLower, direction)
+		if collectPoints {
+			run.points = append(run.points, run.last)
+		}
 	}
-	if len(points) < 2 {
-		return nil, false
+	if run.previous.direction == trendDirectionUnknown {
+		return supertrendRun{}, false
 	}
-	return points, true
+	return run, true
 }
 
 func supertrendPoint(finalUpper float64, finalLower float64, direction string) trendPoint {

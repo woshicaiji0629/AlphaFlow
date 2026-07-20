@@ -117,3 +117,42 @@ func assessDataQualityFromSeries(
 		return dataQualityOK, ""
 	}
 }
+
+func (w *CalculationWindow) assessDataQuality(requiredSamples int) (string, string) {
+	if w == nil {
+		return dataQualityInvalidOHLC, "invalid_window"
+	}
+	if w.quality.invalidCount > 0 {
+		return firstSeriesQualityError(w.Klines(), w.opens, w.highs, w.lows, w.closes)
+	}
+	switch {
+	case w.quality.gapCount > 0:
+		return dataQualityGap, "non_contiguous_klines"
+	case w.quality.zeroVolumeCount > 0:
+		return dataQualityZeroVolume, "zero_volume"
+	case w.klineCount() < requiredSamples:
+		return dataQualityInsufficient, "insufficient_samples"
+	default:
+		return dataQualityOK, ""
+	}
+}
+
+func firstSeriesQualityError(klines []model.Kline, opens []float64, highs []float64, lows []float64, closes []float64) (string, string) {
+	for index, kline := range klines {
+		if highs[index] < lows[index] || opens[index] > highs[index] || opens[index] < lows[index] || closes[index] > highs[index] || closes[index] < lows[index] {
+			return dataQualityInvalidOHLC, "price_out_of_range"
+		}
+		if kline.CloseTime > 0 && kline.CloseTime < kline.OpenTime {
+			return dataQualityInvalidOHLC, "invalid_time_range"
+		}
+	}
+	return dataQualityInvalidOHLC, "invalid_ohlc"
+}
+
+func seriesKlineInvalid(kline model.Kline, open float64, high float64, low float64, closeValue float64) bool {
+	return high < low || open > high || open < low || closeValue > high || closeValue < low || (kline.CloseTime > 0 && kline.CloseTime < kline.OpenTime)
+}
+
+func klinesHaveGap(previous model.Kline, current model.Kline) bool {
+	return previous.CloseTime > 0 && current.OpenTime != previous.CloseTime+1
+}

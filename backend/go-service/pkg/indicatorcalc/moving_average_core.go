@@ -2,6 +2,143 @@ package indicatorcalc
 
 import "math"
 
+type streamKAMAState struct {
+	values  [11]float64
+	count   int
+	current float64
+	ready   bool
+}
+
+type streamSMMAState struct {
+	period  int
+	sum     float64
+	count   int
+	current float64
+	ready   bool
+}
+
+type streamHMA21State struct {
+	closes          [21]float64
+	closeCount      int
+	differences     [4]float64
+	differenceCount int
+	values          [4]float64
+	valueCount      int
+}
+
+func (s *streamHMA21State) append(value float64) {
+	if s.closeCount < len(s.closes) {
+		s.closes[s.closeCount] = value
+		s.closeCount++
+		if s.closeCount < len(s.closes) {
+			return
+		}
+	} else {
+		copy(s.closes[:len(s.closes)-1], s.closes[1:])
+		s.closes[len(s.closes)-1] = value
+	}
+	half, _ := wma(s.closes[len(s.closes)-10:], 10)
+	full, _ := wma(s.closes[:], 21)
+	s.appendDifference(2*half - full)
+}
+
+func (s *streamHMA21State) appendDifference(value float64) {
+	if s.differenceCount < len(s.differences) {
+		s.differences[s.differenceCount] = value
+		s.differenceCount++
+		if s.differenceCount < len(s.differences) {
+			return
+		}
+	} else {
+		copy(s.differences[:len(s.differences)-1], s.differences[1:])
+		s.differences[len(s.differences)-1] = value
+	}
+	hmaValue, _ := wma(s.differences[:], len(s.differences))
+	if s.valueCount < len(s.values) {
+		s.values[s.valueCount] = hmaValue
+		s.valueCount++
+		return
+	}
+	copy(s.values[:len(s.values)-1], s.values[1:])
+	s.values[len(s.values)-1] = hmaValue
+}
+
+func (s *streamHMA21State) value() (float64, bool) {
+	if s == nil || s.valueCount == 0 {
+		return 0, false
+	}
+	return s.values[s.valueCount-1], true
+}
+
+func (s *streamHMA21State) previous3() (float64, bool) {
+	if s == nil || s.valueCount < len(s.values) {
+		return 0, false
+	}
+	return s.values[0], true
+}
+
+func newStreamSMMAState(period int) streamSMMAState {
+	return streamSMMAState{period: period}
+}
+
+func (s *streamSMMAState) append(value float64) {
+	if s == nil || s.period <= 0 {
+		return
+	}
+	if !s.ready {
+		s.sum += value
+		s.count++
+		if s.count == s.period {
+			s.current = s.sum / float64(s.period)
+			s.ready = true
+		}
+		return
+	}
+	s.current = (s.current*float64(s.period-1) + value) / float64(s.period)
+}
+
+func (s *streamSMMAState) value() (float64, bool) {
+	if s == nil || !s.ready {
+		return 0, false
+	}
+	return s.current, true
+}
+
+func (s *streamKAMAState) append(value float64) {
+	const period = 10
+	if s.count < len(s.values) {
+		s.values[s.count] = value
+		s.count++
+		if s.count == len(s.values) {
+			s.current = value
+			s.ready = true
+		}
+		return
+	}
+	copy(s.values[:period], s.values[1:])
+	s.values[period] = value
+	change := math.Abs(value - s.values[0])
+	var volatility float64
+	for index := 1; index <= period; index++ {
+		volatility += math.Abs(s.values[index] - s.values[index-1])
+	}
+	efficiency := 0.0
+	if volatility != 0 {
+		efficiency = change / volatility
+	}
+	fastSC := 2.0 / 3.0
+	slowSC := 2.0 / 31.0
+	smoothing := math.Pow(efficiency*(fastSC-slowSC)+slowSC, 2)
+	s.current += smoothing * (value - s.current)
+}
+
+func (s *streamKAMAState) value() (float64, bool) {
+	if s == nil || !s.ready {
+		return 0, false
+	}
+	return s.current, true
+}
+
 func hma(values []float64, period int) (float64, bool) {
 	if period <= 1 || len(values) < period {
 		return 0, false
@@ -224,10 +361,8 @@ func emaFromStateOrSeries(basic *basicIndicatorState, closes []float64, period i
 }
 
 func previousEMAFromStateOrSeries(basic *basicIndicatorState, closes []float64, period int, offset int) (float64, bool) {
-	if offset == 1 {
-		if value, ok := basic.previousEMAValue(period); ok {
-			return value, true
-		}
+	if value, ok := basic.emaHistoricalValue(period, offset); ok {
+		return value, true
 	}
 	if len(closes) <= offset {
 		return 0, false

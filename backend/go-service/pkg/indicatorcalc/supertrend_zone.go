@@ -18,6 +18,10 @@ type supertrendZoneState struct {
 }
 
 func supertrendZone(highs []float64, lows []float64, closes []float64, points []trendPoint, supertrendPeriod int, atrPeriod int, atrMultiplier float64) (supertrendZoneState, bool) {
+	return supertrendZoneWithATR(highs, lows, closes, points, supertrendPeriod, atrPeriod, atrMultiplier, 0, false)
+}
+
+func supertrendZoneWithATR(highs []float64, lows []float64, closes []float64, points []trendPoint, supertrendPeriod int, atrPeriod int, atrMultiplier float64, atrValue float64, atrOK bool) (supertrendZoneState, bool) {
 	if len(points) < 2 || len(highs) != len(closes) || len(lows) != len(closes) || supertrendPeriod <= 0 {
 		return supertrendZoneState{}, false
 	}
@@ -55,9 +59,12 @@ func supertrendZone(highs []float64, lows []float64, closes []float64, points []
 	if pivotHigh < pivotLow {
 		pivotHigh, pivotLow = pivotLow, pivotHigh
 	}
-	atrValue, ok := atr(highs, lows, closes, atrPeriod)
-	if !ok {
-		return supertrendZoneState{}, false
+	if !atrOK {
+		var ok bool
+		atrValue, ok = atr(highs, lows, closes, atrPeriod)
+		if !ok {
+			return supertrendZoneState{}, false
+		}
 	}
 	lastPoint := points[len(points)-1]
 	lastClose := closes[len(closes)-1]

@@ -22,11 +22,14 @@ type dynamicSwingVWAPState struct {
 }
 
 func addDynamicSwingAnchoredVWAP(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64) {
-	addDynamicSwingAnchoredVWAPToSet(nil, values, signals, highs, lows, closes, volumes)
+	addDynamicSwingAnchoredVWAPToSet(nil, values, signals, highs, lows, closes, volumes, nil)
 }
 
-func addDynamicSwingAnchoredVWAPToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64) {
-	state := dynamicSwingAnchoredVWAP(highs, lows, closes, volumes, dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, dynamicSwingVWAPUseAdapt, dynamicSwingVWAPVolBias)
+func addDynamicSwingAnchoredVWAPToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, basic *basicIndicatorState) {
+	state, ok := basic.dynamicSwingVWAPValue(dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, dynamicSwingVWAPUseAdapt, dynamicSwingVWAPVolBias)
+	if !ok {
+		state = dynamicSwingAnchoredVWAP(highs, lows, closes, volumes, dynamicSwingVWAPPeriod, dynamicSwingVWAPBaseAPT, dynamicSwingVWAPUseAdapt, dynamicSwingVWAPVolBias)
+	}
 	if !state.ok {
 		return
 	}
@@ -39,6 +42,113 @@ func addDynamicSwingAnchoredVWAPToSet(target *ValueSet, values map[string]string
 	signals["dynamic_swing_vwap_position"] = dynamicSwingVWAPPosition(last, state.value)
 	signals["dynamic_swing_vwap_anchor_type"] = state.anchorType
 	signals["dynamic_swing_vwap_swing_label"] = state.swingLabel
+}
+
+type streamDynamicSwingVWAPState struct {
+	period      int
+	baseAPT     float64
+	fixedAlpha  float64
+	highWindow  floatMonotonicWindow
+	lowWindow   floatMonotonicWindow
+	index       int
+	ph          float64
+	pl          float64
+	phIndex     int
+	plIndex     int
+	previousDir int
+	prevSwing   float64
+	p           float64
+	volume      float64
+	state       dynamicSwingVWAPState
+}
+
+func newStreamDynamicSwingVWAPState(period int, baseAPT float64) streamDynamicSwingVWAPState {
+	return streamDynamicSwingVWAPState{
+		period: period, baseAPT: baseAPT, fixedAlpha: alphaFromAPT(baseAPT),
+		highWindow: newFloatMonotonicWindow(true), lowWindow: newFloatMonotonicWindow(false),
+		index: -1, ph: math.NaN(), pl: math.NaN(), prevSwing: math.NaN(),
+	}
+}
+
+func (s *streamDynamicSwingVWAPState) append(highs []float64, lows []float64, closes []float64, volumes []float64) {
+	if s == nil || s.period < 2 || len(closes) == 0 || len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
+		return
+	}
+	last := len(closes) - 1
+	s.index++
+	index := s.index
+	prevPh, prevPl := s.ph, s.pl
+	s.highWindow.push(index, highs[last])
+	s.lowWindow.push(index, lows[last])
+	s.highWindow.expireBefore(index - s.period + 1)
+	s.lowWindow.expireBefore(index - s.period + 1)
+	windowHigh, highOK := s.highWindow.value()
+	windowLow, lowOK := s.lowWindow.value()
+	if highOK && highs[last] == windowHigh {
+		s.ph, s.phIndex = highs[last], index
+	}
+	if lowOK && lows[last] == windowLow {
+		s.pl, s.plIndex = lows[last], index
+	}
+
+	dir := -1
+	if s.phIndex > s.plIndex {
+		dir = 1
+	}
+	if index == 0 {
+		s.previousDir = dir
+		typical := (highs[last] + lows[last] + closes[last]) / 3
+		s.p = typical * volumes[last]
+		s.volume = volumes[last]
+	}
+
+	if dir != s.previousDir {
+		anchorIndex, anchorPrice, anchorType := s.phIndex, s.ph, "swing_high"
+		if dir > 0 {
+			anchorIndex, anchorPrice, anchorType = s.plIndex, s.pl, "swing_low"
+		}
+		anchorOffset := index - anchorIndex
+		anchorLocal := last - anchorOffset
+		if anchorLocal < 0 || anchorLocal > last || volumes[anchorLocal] <= 0 {
+			s.previousDir = dir
+			return
+		}
+		s.p = anchorPrice * volumes[anchorLocal]
+		s.volume = volumes[anchorLocal]
+		s.state.swingLabel = dynamicSwingLabel(dir, s.ph, s.pl, prevPh, prevPl, s.prevSwing)
+		if dir > 0 {
+			s.prevSwing = prevPh
+		} else {
+			s.prevSwing = prevPl
+		}
+		s.state.anchor = anchorPrice
+		s.state.anchorAge = anchorOffset
+		s.state.anchorType = anchorType
+		for cursor := anchorLocal; cursor <= last; cursor++ {
+			s.p, s.volume, s.state.value = dynamicSwingVWAPStepAlpha(s.p, s.volume, highs[cursor], lows[cursor], closes[cursor], volumes[cursor], s.fixedAlpha)
+		}
+	} else {
+		initializedAnchor := false
+		if s.state.anchorType == "" {
+			s.state.anchor, s.state.anchorAge, s.state.anchorType = dynamicSwingCurrentAnchor(dir, s.ph, s.pl, s.phIndex, s.plIndex, index)
+			s.state.swingLabel = "none"
+			initializedAnchor = true
+		}
+		s.p, s.volume, s.state.value = dynamicSwingVWAPStepAlpha(s.p, s.volume, highs[last], lows[last], closes[last], volumes[last], s.fixedAlpha)
+		if !initializedAnchor {
+			s.state.anchorAge++
+		}
+	}
+	s.state.dir = dir
+	s.state.ok = index+1 >= s.period && s.volume > 0 && !math.IsNaN(s.state.value)
+	s.previousDir = dir
+}
+
+func (s *streamDynamicSwingVWAPState) value(period int, baseAPT float64, useAdapt bool, volBias float64) (dynamicSwingVWAPState, bool) {
+	if s == nil || period != s.period || baseAPT != s.baseAPT || useAdapt || volBias != dynamicSwingVWAPVolBias || !s.state.ok {
+		return dynamicSwingVWAPState{}, false
+	}
+	return s.state, true
 }
 
 func dynamicSwingAnchoredVWAP(highs []float64, lows []float64, closes []float64, volumes []float64, period int, baseAPT float64, useAdapt bool, volBias float64) dynamicSwingVWAPState {

@@ -12,6 +12,10 @@ func addQQEModFeaturesWithFoundation(target *ValueSet, values map[string]string,
 	if !ok {
 		return
 	}
+	addQQEModResult(target, values, signals, line, signal, previousLine, previousSignal)
+}
+
+func addQQEModResult(target *ValueSet, values map[string]string, signals map[string]string, line float64, signal float64, previousLine float64, previousSignal float64) {
 	setValueTarget(target, values, "qqe_line", line, true)
 	setValueTarget(target, values, "qqe_signal", signal, true)
 	setValueTarget(target, values, "qqe_hist", line-signal, true)
@@ -29,6 +33,10 @@ func addQQEModEnhancedFeaturesWithFoundation(target *ValueSet, values map[string
 	if !ok {
 		return
 	}
+	addQQEModEnhancedResult(target, values, signals, result)
+}
+
+func addQQEModEnhancedResult(target *ValueSet, values map[string]string, signals map[string]string, result qqeModEnhancedResult) {
 	setValueTarget(target, values, "qqe_primary_line", result.primaryLine, true)
 	setValueTarget(target, values, "qqe_primary_trend", result.primaryTrend, true)
 	setValueTarget(target, values, "qqe_secondary_line", result.secondaryLine, true)
@@ -39,6 +47,19 @@ func addQQEModEnhancedFeaturesWithFoundation(target *ValueSet, values map[string
 	setValueTarget(target, values, "qqe_secondary_hist", result.secondaryHist, true)
 	signals["qqe_mod_signal"] = result.signal
 	signals["qqe_primary_zero_cross"] = result.zeroCross
+}
+
+func addStreamQQEFeatures(target *ValueSet, values map[string]string, signals map[string]string, state *streamQQEState) bool {
+	if state == nil {
+		return false
+	}
+	if line, signal, previousLine, previousSignal, ok := state.classicValue(); ok {
+		addQQEModResult(target, values, signals, line, signal, previousLine, previousSignal)
+	}
+	if result, ok := state.enhancedValue(); ok {
+		addQQEModEnhancedResult(target, values, signals, result)
+	}
+	return true
 }
 
 type qqeModEnhancedResult struct {
@@ -52,6 +73,215 @@ type qqeModEnhancedResult struct {
 	secondaryHist  float64
 	signal         string
 	zeroCross      string
+}
+
+type streamQQETrendState struct {
+	factor      float64
+	longBand    float64
+	shortBand   float64
+	direction   int
+	value       float64
+	initialized bool
+}
+
+func (s *streamQQETrendState) append(line float64, previousLine float64, rangeValue float64) {
+	newLongBand := line - rangeValue*s.factor
+	newShortBand := line + rangeValue*s.factor
+	if !s.initialized {
+		s.longBand, s.shortBand = newLongBand, newShortBand
+		s.direction = 1
+		s.value = s.longBand
+		s.initialized = true
+		return
+	}
+	previousLongBand, previousShortBand := s.longBand, s.shortBand
+	if previousLine > previousLongBand && line > previousLongBand {
+		s.longBand = math.Max(previousLongBand, newLongBand)
+	} else {
+		s.longBand = newLongBand
+	}
+	if previousLine < previousShortBand && line < previousShortBand {
+		s.shortBand = math.Min(previousShortBand, newShortBand)
+	} else {
+		s.shortBand = newShortBand
+	}
+	if crossesAbove(previousLine, line, previousShortBand) {
+		s.direction = 1
+	} else if crossesBelow(previousLine, line, previousLongBand) {
+		s.direction = -1
+	}
+	if s.direction == 1 {
+		s.value = s.longBand
+	} else {
+		s.value = s.shortBand
+	}
+}
+
+type streamQQEClassicState struct {
+	factor           float64
+	longBand         float64
+	shortBand        float64
+	trend            int
+	trailing         float64
+	previousTrailing float64
+	initialized      bool
+	ready            bool
+}
+
+func (s *streamQQEClassicState) append(line float64, previousLine float64, dynamicRange float64) {
+	newLongBand := line - dynamicRange*s.factor
+	newShortBand := line + dynamicRange*s.factor
+	if !s.initialized {
+		s.longBand, s.shortBand = newLongBand, newShortBand
+		s.trend = 1
+		s.trailing = s.longBand
+		s.previousTrailing = s.trailing
+		s.initialized = true
+		return
+	}
+	if previousLine > s.longBand && line > s.longBand {
+		s.longBand = math.Max(s.longBand, newLongBand)
+	} else {
+		s.longBand = newLongBand
+	}
+	if previousLine < s.shortBand && line < s.shortBand {
+		s.shortBand = math.Min(s.shortBand, newShortBand)
+	} else {
+		s.shortBand = newShortBand
+	}
+	if line > s.shortBand {
+		s.trend = 1
+	} else if line < s.longBand {
+		s.trend = -1
+	}
+	s.previousTrailing = s.trailing
+	if s.trend == 1 {
+		s.trailing = s.longBand
+	} else {
+		s.trailing = s.shortBand
+	}
+	s.ready = true
+}
+
+type streamQQEState struct {
+	rsiCount       int
+	avgGain        float64
+	avgLoss        float64
+	rsiReady       bool
+	smoothed       streamEMAState
+	delta          streamEMAState
+	dynamicRange   streamEMAState
+	previousSmooth float64
+	hasSmooth      bool
+	classic        streamQQEClassicState
+	primary        streamQQETrendState
+	secondary      streamQQETrendState
+	primaryTrends  [50]float64
+	trendCount     int
+}
+
+func newStreamQQEState() streamQQEState {
+	return streamQQEState{
+		smoothed:     *newStreamEMAState(5),
+		delta:        *newStreamEMAState(11),
+		dynamicRange: *newStreamEMAState(11),
+		classic:      streamQQEClassicState{factor: 3},
+		primary:      streamQQETrendState{factor: 3},
+		secondary:    streamQQETrendState{factor: 1.61},
+	}
+}
+
+func (s *streamQQEState) append(previousClose float64, closeValue float64) {
+	difference := closeValue - previousClose
+	if !s.rsiReady {
+		if difference >= 0 {
+			s.avgGain += difference
+		} else {
+			s.avgLoss -= difference
+		}
+		s.rsiCount++
+		if s.rsiCount < 6 {
+			return
+		}
+		s.avgGain /= 6
+		s.avgLoss /= 6
+		s.rsiReady = true
+	} else {
+		gain, loss := 0.0, 0.0
+		if difference >= 0 {
+			gain = difference
+		} else {
+			loss = -difference
+		}
+		s.avgGain = (s.avgGain*5 + gain) / 6
+		s.avgLoss = (s.avgLoss*5 + loss) / 6
+	}
+	s.smoothed.append(rsiFromAverages(s.avgGain, s.avgLoss))
+	if !s.smoothed.ready {
+		return
+	}
+	line := s.smoothed.value
+	if !s.hasSmooth {
+		s.previousSmooth, s.hasSmooth = line, true
+		return
+	}
+	previousLine := s.previousSmooth
+	s.previousSmooth = line
+	s.delta.append(math.Abs(line - previousLine))
+	if !s.delta.ready {
+		return
+	}
+	s.primary.append(line, previousLine, s.delta.value)
+	s.secondary.append(line, previousLine, s.delta.value)
+	s.appendPrimaryTrend(s.primary.value)
+	s.dynamicRange.append(s.delta.value)
+	if s.dynamicRange.ready {
+		s.classic.append(line, previousLine, s.dynamicRange.value)
+	}
+}
+
+func (s *streamQQEState) appendPrimaryTrend(value float64) {
+	if s.trendCount < len(s.primaryTrends) {
+		s.primaryTrends[s.trendCount] = value
+		s.trendCount++
+		return
+	}
+	copy(s.primaryTrends[:len(s.primaryTrends)-1], s.primaryTrends[1:])
+	s.primaryTrends[len(s.primaryTrends)-1] = value
+}
+
+func (s *streamQQEState) classicValue() (float64, float64, float64, float64, bool) {
+	if s == nil || !s.classic.ready {
+		return 0, 0, 0, 0, false
+	}
+	return s.smoothed.value, s.classic.trailing, s.smoothed.previous, s.classic.previousTrailing, true
+}
+
+func (s *streamQQEState) enhancedValue() (qqeModEnhancedResult, bool) {
+	if s == nil || s.trendCount < len(s.primaryTrends) || !s.primary.initialized || !s.secondary.initialized || !s.smoothed.hasPrevious {
+		return qqeModEnhancedResult{}, false
+	}
+	var basis float64
+	for _, value := range s.primaryTrends {
+		basis += value - 50
+	}
+	basis /= float64(len(s.primaryTrends))
+	var variance float64
+	for _, value := range s.primaryTrends {
+		difference := value - 50 - basis
+		variance += difference * difference
+	}
+	deviation := math.Sqrt(variance / float64(len(s.primaryTrends)))
+	line, previousLine := s.smoothed.value, s.smoothed.previous
+	upper, lower := basis+deviation*0.35, basis-deviation*0.35
+	return qqeModEnhancedResult{
+		primaryLine: line, primaryTrend: s.primary.value,
+		secondaryLine: line, secondaryTrend: s.secondary.value,
+		bbUpper: upper, bbLower: lower,
+		primaryHist: line - 50, secondaryHist: line - 50,
+		signal:    qqeModSignal(line-50, line-50, upper, lower, 3),
+		zeroCross: qqeZeroCross(previousLine, line),
+	}, true
 }
 
 func qqeModEnhanced(

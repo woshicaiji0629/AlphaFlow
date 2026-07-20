@@ -108,8 +108,9 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	if window == nil {
 		return Result{}, fmt.Errorf("nil calculation window")
 	}
-	closed := window.Klines()
-	if len(closed) == 0 {
+	sampleCount := window.klineCount()
+	last, hasLast := window.lastKline()
+	if sampleCount == 0 || !hasLast {
 		return Result{}, fmt.Errorf("no closed klines")
 	}
 	if len(options.SMAPeriods) == 0 && len(options.EMAPeriods) == 0 && len(options.WMAPeriods) == 0 {
@@ -120,17 +121,17 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	numericSet := NewValueSet(resultValuesCapacity)
 	signals := make(map[string]string, resultSignalsCapacity)
 	requiredSamples := requiredSampleCount(options)
-	setValueSet(numericSet, "sample_count", float64(len(closed)), true)
+	setValueSet(numericSet, "sample_count", float64(sampleCount), true)
 	setValueSet(numericSet, "required_count", float64(requiredSamples), true)
 	opens, highs, lows, closes, volumes, err := window.Series()
 	if err != nil {
+		closed := window.Klines()
 		quality, reason := assessDataQuality(closed, requiredSamples)
 		signals["data_quality"] = quality
 		if reason != "" {
 			signals["data_quality_reason"] = reason
 		}
 		if quality == dataQualityInvalidOHLC {
-			last := closed[len(closed)-1]
 			encodedValues, numericValues := finalizeValueSet(numericSet, values, encodeValues)
 			return Result{
 				OpenTime:      last.OpenTime,
@@ -142,12 +143,11 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 		}
 		return Result{}, err
 	}
-	quality, reason := assessDataQualityFromSeries(closed, requiredSamples, opens, highs, lows, closes, volumes)
+	quality, reason := window.assessDataQuality(requiredSamples)
 	signals["data_quality"] = quality
 	if reason != "" {
 		signals["data_quality_reason"] = reason
 	}
-	last := closed[len(closed)-1]
 	if quality == dataQualityInvalidOHLC {
 		encodedValues, numericValues := finalizeValueSet(numericSet, values, encodeValues)
 		return Result{
@@ -158,7 +158,12 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 			Signals:       signals,
 		}, nil
 	}
-	setValueSet(numericSet, "close", closes[len(closes)-1], true)
+	lastIndex := len(closes) - 1
+	setValueSet(numericSet, "open", opens[lastIndex], true)
+	setValueSet(numericSet, "high", highs[lastIndex], true)
+	setValueSet(numericSet, "low", lows[lastIndex], true)
+	setValueSet(numericSet, "close", closes[lastIndex], true)
+	setValueSet(numericSet, "volume", volumes[lastIndex], true)
 	basic := window.basic
 	if window.aiPreview == nil {
 		window.prepareAISourcePrefix()
@@ -221,6 +226,7 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	if !ok {
 		volumeMA, ok = sma(volumes, 20)
 	}
+	volumeMAOK := ok
 	setValueSet(numericSet, "volume_ma20", volumeMA, ok)
 	if obvValue, ok := basic.obvValue(); ok {
 		setValueSet(numericSet, "obv", obvValue, true)
@@ -237,7 +243,7 @@ func calculateWindow(window *CalculationWindow, options Options, encodeValues bo
 	} else {
 		setValueSet(numericSet, "vwap", vwap(highs, lows, closes, volumes), true)
 	}
-	addDerivedToSet(numericSet, values, opens, highs, lows, closes, volumes)
+	addDerivedToSet(numericSet, values, opens, highs, lows, closes, volumes, volumeMA, volumeMAOK)
 	addEnhancedToSet(numericSet, values, signals, opens, highs, lows, closes, volumes, basic, features, window.aiPreview)
 
 	encodedValues, numericResult := finalizeValueSet(numericSet, values, encodeValues)

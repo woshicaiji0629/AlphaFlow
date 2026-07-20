@@ -118,17 +118,17 @@ func (r *Runner) calculateClosedIndicators(
 	rule Rule,
 	symbol string,
 	interval string,
-	window *indicatorcalc.CalculationWindow,
+	closed []model.Kline,
 ) (calculatedIndicators, error) {
-	cached := r.cachedIndicatorSnapshotsForWindow(key, window)
+	cached := r.cachedIndicatorSnapshotsForWindow(key, closed)
 	if len(cached) == 0 {
 		recent, err := r.store.RecentIndicators(ctx, rule.Exchange, rule.Market, symbol, interval, r.options.SnapshotCacheLimit)
 		if err != nil {
 			return calculatedIndicators{}, err
 		}
-		cached = alignedIndicatorSnapshotsInWindow(window.Klines(), recent, r.options.SnapshotCacheLimit)
+		cached = alignedIndicatorSnapshotsInWindow(closed, recent, r.options.SnapshotCacheLimit)
 	}
-	snapshots, err := r.calculatedIndicatorSnapshotsForWindow(window, cached)
+	snapshots, err := r.calculatedIndicatorSnapshotsForWindow(closed, cached)
 	if err != nil {
 		return calculatedIndicators{}, err
 	}
@@ -179,13 +179,9 @@ func indicatorSnapshotFromResult(kline model.Kline, result indicatorcalc.Result,
 }
 
 func (r *Runner) calculatedIndicatorSnapshotsForWindow(
-	window *indicatorcalc.CalculationWindow,
+	closed []model.Kline,
 	cached []model.IndicatorSnapshot,
 ) ([]model.IndicatorSnapshot, error) {
-	if window == nil {
-		return nil, fmt.Errorf("nil calculation window")
-	}
-	closed := window.Klines()
 	if len(closed) == 0 {
 		return nil, fmt.Errorf("no closed klines")
 	}
@@ -323,12 +319,8 @@ func appendIndicatorSnapshot(
 
 func (r *Runner) cachedIndicatorSnapshotsForWindow(
 	key string,
-	window *indicatorcalc.CalculationWindow,
+	closed []model.Kline,
 ) []model.IndicatorSnapshot {
-	if window == nil {
-		return nil
-	}
-	closed := window.Klines()
 	if len(closed) == 0 {
 		return nil
 	}

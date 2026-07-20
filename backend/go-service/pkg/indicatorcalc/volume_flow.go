@@ -12,8 +12,11 @@ type volumeFlowIndicatorResult struct {
 	priceCutoff    float64
 }
 
-func addVolumeFlowIndicatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs, lows, closes, volumes []float64, length int, coef, volumeCoef float64, signalLength int) {
-	result, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+func addVolumeFlowIndicatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs, lows, closes, volumes []float64, length int, coef, volumeCoef float64, signalLength int, basic *basicIndicatorState) {
+	result, ok := basic.volumeFlowIndicatorValue(length, coef, volumeCoef, signalLength)
+	if !ok {
+		result, ok = volumeFlowIndicatorCompact(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
+	}
 	if !ok {
 		result, ok = volumeFlowIndicator(highs, lows, closes, volumes, length, coef, volumeCoef, signalLength)
 	}
@@ -28,6 +31,137 @@ func addVolumeFlowIndicatorFeaturesToSet(target *ValueSet, values map[string]str
 	signals["vfi_state"] = vfiState(result.value)
 	signals["vfi_cross"] = crossSignal(result.previousValue, result.previousSignal, result.value, result.signal)
 	signals["vfi_momentum"] = vfiMomentum(result.hist)
+}
+
+type streamVolumeFlowIndicatorState struct {
+	length           int
+	coef             float64
+	volumeCoef       float64
+	signalLength     int
+	index            int
+	previousTypical  float64
+	volumeSum        float64
+	interWindow      [30]float64
+	interSum         float64
+	interSumSq       float64
+	vcpWindow        [130]float64
+	validWindow      [130]bool
+	vcpSum           float64
+	invalidCount     int
+	vfiCount         int
+	previousValue    float64
+	currentValue     float64
+	lastPriceCutoff  float64
+	lastVolumeCutoff float64
+	signalEMA        streamEMAState
+}
+
+func newStreamVolumeFlowIndicatorState(length int, coef float64, volumeCoef float64, signalLength int) streamVolumeFlowIndicatorState {
+	return streamVolumeFlowIndicatorState{
+		length: length, coef: coef, volumeCoef: volumeCoef, signalLength: signalLength,
+		index: -1, invalidCount: 1, signalEMA: *newStreamEMAState(signalLength),
+	}
+}
+
+func (s *streamVolumeFlowIndicatorState) append(highs []float64, lows []float64, closes []float64, volumes []float64) {
+	if s == nil || s.length != len(s.vcpWindow) || len(closes) == 0 || len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
+		return
+	}
+	last := len(closes) - 1
+	s.index++
+	index := s.index
+	typical := (highs[last] + lows[last] + closes[last]) / 3
+	if index == 0 {
+		s.previousTypical = typical
+		return
+	}
+
+	s.volumeSum += volumes[last-1]
+	if index-s.length-1 >= 0 {
+		s.volumeSum -= volumes[last-s.length-1]
+	}
+	interValue := 0.0
+	if typical > 0 && s.previousTypical > 0 {
+		interValue = math.Log(typical) - math.Log(s.previousTypical)
+	}
+	interSlot := index % len(s.interWindow)
+	previousInter := s.interWindow[interSlot]
+	s.interSum -= previousInter
+	s.interSumSq -= previousInter * previousInter
+	s.interWindow[interSlot] = interValue
+	s.interSum += interValue
+	s.interSumSq += interValue * interValue
+
+	vcpValue := 0.0
+	validVCP := false
+	priceCutoff := 0.0
+	volumeCutoff := 0.0
+	if index >= s.length && index >= len(s.interWindow) && s.volumeSum != 0 {
+		mean := s.interSum / float64(len(s.interWindow))
+		variance := s.interSumSq/float64(len(s.interWindow)) - mean*mean
+		if variance < 0 {
+			variance = 0
+		}
+		volatility := math.Sqrt(variance)
+		volumeAverage := s.volumeSum / float64(s.length)
+		priceCutoff = s.coef * volatility * closes[last]
+		volumeCutoff = volumeAverage * s.volumeCoef
+		cappedVolume := volumes[last]
+		if cappedVolume > volumeCutoff {
+			cappedVolume = volumeCutoff
+		}
+		moneyFlow := typical - s.previousTypical
+		switch {
+		case moneyFlow > priceCutoff:
+			vcpValue = cappedVolume
+		case moneyFlow < -priceCutoff:
+			vcpValue = -cappedVolume
+		}
+		validVCP = true
+	}
+
+	slot := index % s.length
+	if index >= s.length {
+		s.vcpSum -= s.vcpWindow[slot]
+		if !s.validWindow[slot] {
+			s.invalidCount--
+		}
+	}
+	s.vcpWindow[slot] = vcpValue
+	s.validWindow[slot] = validVCP
+	s.vcpSum += vcpValue
+	if !validVCP {
+		s.invalidCount++
+	}
+	s.previousTypical = typical
+
+	if index < s.length-1 || s.invalidCount > 0 || s.volumeSum == 0 {
+		return
+	}
+	volumeAverage := s.volumeSum / float64(s.length)
+	value := s.vcpSum / volumeAverage
+	if s.vfiCount > 0 {
+		s.previousValue = s.currentValue
+	}
+	s.currentValue = value
+	s.vfiCount++
+	s.signalEMA.append(value)
+	if s.signalEMA.ready {
+		s.lastPriceCutoff = priceCutoff
+		s.lastVolumeCutoff = volumeCutoff
+	}
+}
+
+func (s *streamVolumeFlowIndicatorState) value(length int, coef float64, volumeCoef float64, signalLength int) (volumeFlowIndicatorResult, bool) {
+	if s == nil || length != s.length || coef != s.coef || volumeCoef != s.volumeCoef || signalLength != s.signalLength ||
+		s.vfiCount < s.signalLength+1 || !s.signalEMA.ready || !s.signalEMA.hasPrevious {
+		return volumeFlowIndicatorResult{}, false
+	}
+	return volumeFlowIndicatorResult{
+		value: s.currentValue, signal: s.signalEMA.value, hist: s.currentValue - s.signalEMA.value,
+		previousValue: s.previousValue, previousSignal: s.signalEMA.previous,
+		volumeCutoff: s.lastVolumeCutoff, priceCutoff: s.lastPriceCutoff,
+	}, true
 }
 
 func volumeFlowIndicatorCompact(highs []float64, lows []float64, closes []float64, volumes []float64, length int, coef float64, volumeCoef float64, signalLength int) (volumeFlowIndicatorResult, bool) {

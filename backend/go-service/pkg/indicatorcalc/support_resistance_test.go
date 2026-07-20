@@ -1,6 +1,9 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestSupportResistanceUsesPivotClusters(t *testing.T) {
 	highs := []float64{105, 108, 106, 110, 107, 111, 108, 112, 109, 113, 110, 112, 109, 111, 108}
@@ -25,6 +28,27 @@ func TestSupportResistanceUsesPivotClusters(t *testing.T) {
 	}
 	if signals["sr_position"] == "" {
 		t.Fatalf("expected sr_position, got %#v", signals)
+	}
+}
+
+func TestSupportResistanceWithFeaturesMatchesFallback(t *testing.T) {
+	for _, length := range []int{10, 120} {
+		_, highs, lows, closes := trendingSeries(length, 100, 0.4)
+		wantValues := map[string]string{}
+		wantSignals := map[string]string{}
+		addSupportResistanceToSet(nil, wantValues, wantSignals, highs, lows, closes)
+
+		gotValues := map[string]string{}
+		gotSignals := map[string]string{}
+		features := newFeatureContext(highs, lows, closes, nil)
+		addSupportResistanceWithFeaturesToSet(nil, gotValues, gotSignals, highs, lows, closes, features)
+
+		if !reflect.DeepEqual(gotValues, wantValues) {
+			t.Fatalf("length=%d cached values = %#v, want %#v", length, gotValues, wantValues)
+		}
+		if !reflect.DeepEqual(gotSignals, wantSignals) {
+			t.Fatalf("length=%d cached signals = %#v, want %#v", length, gotSignals, wantSignals)
+		}
 	}
 }
 

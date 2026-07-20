@@ -79,15 +79,21 @@
 - SMA 和 volume SMA。
 - EMA。
 - RSI 14 序列。
-- ATR 14 序列。
+- ATR 14 和 ATR 22 序列。
 - ADX 14、DI+ 和 DI-。
 - 标准 MACD 和快速 MACD 序列。
 - OBV。
 - VWAP。
 - WaveTrend。
 - MoneyFlow 中的 OBV slope、PVT、PVT slope、AD line 和 AD line slope。
+- AlphaTrend、Dynamic Swing VWAP、VFI 和 Heikin Ashi。
+- PSAR、KAMA、HMA、EMD、SSL、Range Filter、Williams Vix Fix、TD Sequential、Nadaraya-Watson、UT Bot、QQE 和 Alligator 的末值状态。
 
 这些状态只用于减少重复计算；指标输出仍由 `CalculateWindow` 统一生成。窗口出现缺口或需要替换最后一根 K 线时，runner 会回退到重新构建窗口，优先保持语义正确。
+
+EMA、SMA、volume SMA 和 MACD 的连续状态按配置列表动态创建，不维护固定槽位编号。新增受支持周期或 MACD 组合时，只在对应配置列表追加配置；已经运行的窗口不会凭空获得新周期的历史状态，配置变化后必须用历史 K 线新建或重建窗口。算法内部的 `[5]`、`[10]`、`[50]` 等数组表示公式要求的固定滚动长度，不属于配置槽位，不应为追求表面动态化改成 map。
+
+Realtime preview 不立即复制完整 K 线列表，而是引用 closed base 并保存一根 preview K 线；只有调用 `Klines`、继续 `Append`、再次 preview 或 clone 时才物化独立列表。OHLCV series、连续指标状态和会被追加的历史切片仍保持克隆隔离，preview 计算不能修改 closed window。
 
 `pkg/indicatorcalc.CalculateWindows` 可在固定 warmup 后连续计算结果后缀。market-data runner 用它在 cold start 或缓存缺口时补齐 recent 指标 snapshot；缓存对齐后，窗口分析阶段只读取 recent 指标，不再回放 K 线补算历史指标。
 
@@ -126,6 +132,7 @@ go test ./market-data/internal/indicator -run '^$' -bench BenchmarkWindowWithTem
 go test ./pkg/indicatorcalc -run '^$' -bench 'BenchmarkCalculate(250|300)Bars' -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowStreaming -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculateWindowNumericStreaming -benchmem
+go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkCalculationWindowRealtimePreview -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkVolumeFlowIndicatorCompact -benchmem
 go test ./pkg/indicatorcalc -run '^$' -bench BenchmarkDynamicSwingAnchoredVWAP -benchmem
 go test ./pkg/indicatorwindow -run '^$' -bench BenchmarkAnalyzeOrderedWindow20 -benchmem
@@ -138,7 +145,7 @@ go test ./pkg/strategyframe -run '^$' -bench BenchmarkWindowViewFromResult -benc
 BenchmarkWindowWithTemporaryKlineRealtime-12    12    84095641 ns/op    6730386 B/op    4830 allocs/op
 ```
 
-早期 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应优先评估是否为 realtime path 提供更小的指标集合、增量计算结果或按策略需要裁剪的计算选项。
+早期完整 realtime 基线约 `84ms/op`、`6.7MB/op`、`4830 allocs/op`。针对 `CalculationWindow.RealtimePreview` 的窗口级基准从约 `224850 B/op`、`71 allocs/op` 降至约 `144656 B/op`、`48 allocs/op`；动态配置槽位相对固定数组增加少量小对象分配，但避免周期、下标和 switch 三处同步维护。后续本地 benchmark 受 CPU 负载影响较明显，只作为趋势参考。继续降 CPU 时，应先用生产 profile 证明 AI Source 深克隆或历史切片复制已成为瓶颈，不能仅为压低 alloc 数引入复杂写时复制。
 
 2026-07 的纯数值 streaming 优化基线从约 `255KB/op`、`488 allocs/op` 降至约 `76KB/op`、`146–147 allocs/op`，约 278 个数值字段和 145 个信号保持输出。该数据来自 Intel i7 本地 benchmark，主要用于比较分配趋势；墙钟耗时会受机器负载影响。年度五周期回测保持每个周期内部的时间顺序，并在周期间做有界并发。
 
@@ -847,6 +854,8 @@ K 线形态容易受单根波动影响，建议只作为辅助确认。
 - 跨指标使用的纯函数放入公共 helper；只服务单个指标族的函数不要为了表面复用扩大作用域。
 
 新增指标时优先新增内聚文件并接入已有编排入口。禁止把一次性实验参数、报告逻辑或失败方案写入生产指标模块；实验应通过研究命令的插件接口隔离。拆分或优化不得改变字段名称、默认参数、递推顺序和缺失值语义，必须继续通过 compact/batch 等价性测试及 `go test ./...`。
+
+若新增指标需要连续状态，优先把配置加入现有动态状态列表并提供批量实现对照测试；只有无法复用现有状态类型时才增加新状态字段。状态 clone 必须明确区分可安全值复制的标量/固定数组和必须深拷贝的可变切片，测试至少覆盖逐点 batch 等价、clone 独立性和不支持配置的返回语义。
 
 ## 策略使用建议
 

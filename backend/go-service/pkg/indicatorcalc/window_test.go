@@ -47,6 +47,44 @@ func TestCalculationWindowCloneIsIndependent(t *testing.T) {
 	}
 }
 
+func TestCalculationWindowQualitySummaryMatchesSeriesAcrossTrim(t *testing.T) {
+	klines := testWindowKlines(6)
+	klines[1].Volume = "0"
+	klines[3].OpenTime = klines[2].CloseTime + 2
+	window := NewCalculationWindowFromKlines(klines[:4], 4)
+	assertWindowQualityMatchesSeries(t, window, 4)
+
+	window.Append(klines[4:5])
+	assertWindowQualityMatchesSeries(t, window, 4)
+	window.Append(klines[5:])
+	assertWindowQualityMatchesSeries(t, window, 4)
+}
+
+func TestCalculationWindowQualitySummaryPreservesInvalidReasonOrder(t *testing.T) {
+	klines := testWindowKlines(3)
+	klines[0].OpenTime = 10
+	klines[0].CloseTime = 1
+	klines[1].High = "0"
+	window := NewCalculationWindowFromKlines(klines, 3)
+	quality, reason := window.assessDataQuality(1)
+	if quality != dataQualityInvalidOHLC || reason != "invalid_time_range" {
+		t.Fatalf("quality = (%q, %q), want (%q, %q)", quality, reason, dataQualityInvalidOHLC, "invalid_time_range")
+	}
+}
+
+func assertWindowQualityMatchesSeries(t *testing.T, window *CalculationWindow, required int) {
+	t.Helper()
+	opens, highs, lows, closes, volumes, err := window.Series()
+	if err != nil {
+		t.Fatalf("window series: %v", err)
+	}
+	wantQuality, wantReason := assessDataQualityFromSeries(window.Klines(), required, opens, highs, lows, closes, volumes)
+	gotQuality, gotReason := window.assessDataQuality(required)
+	if gotQuality != wantQuality || gotReason != wantReason {
+		t.Fatalf("window quality = (%q, %q), want (%q, %q)", gotQuality, gotReason, wantQuality, wantReason)
+	}
+}
+
 func TestCalculationWindowCloneForAppendIsIndependent(t *testing.T) {
 	window := NewCalculationWindowFromKlines(testWindowKlines(3), 10)
 	window.EnableBasicState()
@@ -57,6 +95,26 @@ func TestCalculationWindowCloneForAppendIsIndependent(t *testing.T) {
 	}
 	if len(clone.Klines()) != 4 {
 		t.Fatalf("clone klines = %d, want 4", len(clone.Klines()))
+	}
+}
+
+func TestCalculationWindowRealtimePreviewLazilyMaterializesKlines(t *testing.T) {
+	window := NewCalculationWindowFromKlines(testWindowKlines(3), 3)
+	window.EnableBasicState()
+	preview := window.RealtimePreview(testWindowKlines(1)[0])
+	if preview.previewKline == nil || preview.klines != nil {
+		t.Fatalf("preview eagerly materialized klines: %#v", preview.klines)
+	}
+	if preview.klineCount() != 3 {
+		t.Fatalf("preview sample count = %d, want 3", preview.klineCount())
+	}
+	klines := preview.Klines()
+	if len(klines) != 3 || preview.previewKline != nil {
+		t.Fatalf("materialized preview klines = %#v", klines)
+	}
+	klines[0].OpenTime = -1
+	if window.Klines()[1].OpenTime == -1 {
+		t.Fatal("materialized preview aliases source klines")
 	}
 }
 

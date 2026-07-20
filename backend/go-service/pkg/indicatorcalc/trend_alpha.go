@@ -1,11 +1,14 @@
 package indicatorcalc
 
 func addAlphaTrend(values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) {
-	addAlphaTrendToSet(nil, values, signals, highs, lows, closes, volumes, period, multiplier)
+	addAlphaTrendToSet(nil, values, signals, highs, lows, closes, volumes, period, multiplier, nil)
 }
 
-func addAlphaTrendToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) {
-	points, lastMFI, ok := alphaTrendSeries(highs, lows, closes, volumes, period, multiplier)
+func addAlphaTrendToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64, basic *basicIndicatorState) {
+	points, lastMFI, ok := basic.alphaTrendValues(period, multiplier)
+	if !ok {
+		points, lastMFI, ok = alphaTrendSeries(highs, lows, closes, volumes, period, multiplier)
+	}
 	if !ok {
 		return
 	}
@@ -22,6 +25,95 @@ func addAlphaTrendToSet(target *ValueSet, values map[string]string, signals map[
 	cross, signal := alphaTrendSignals(points)
 	signals["alphatrend_cross"] = cross
 	signals["alphatrend_signal"] = signal
+}
+
+type streamAlphaTrendState struct {
+	period       int
+	multiplier   float64
+	atrSum       float64
+	positiveFlow float64
+	negativeFlow float64
+	lastMFI      float64
+	points       []trendPoint
+}
+
+func newStreamAlphaTrendState(period int, multiplier float64) streamAlphaTrendState {
+	return streamAlphaTrendState{period: period, multiplier: multiplier}
+}
+
+func (s *streamAlphaTrendState) cloneWithExtraCapacity(extra int) streamAlphaTrendState {
+	if s == nil {
+		return streamAlphaTrendState{}
+	}
+	cloned := *s
+	cloned.points = cloneSliceWithExtra(s.points, extra)
+	return cloned
+}
+
+func (s *streamAlphaTrendState) append(highs []float64, lows []float64, closes []float64, volumes []float64) {
+	if s == nil || s.period <= 0 || len(closes) <= 1 || len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
+		return
+	}
+	index := len(closes) - 1
+	currentTypical := (highs[index] + lows[index] + closes[index]) / 3
+	previousTypical := (highs[index-1] + lows[index-1] + closes[index-1]) / 3
+	flow := currentTypical * volumes[index]
+	currentPositive := currentTypical >= previousTypical
+
+	if index <= s.period {
+		s.atrSum += trueRangeAt(highs, lows, closes, index)
+		if currentPositive {
+			s.positiveFlow += flow
+		} else {
+			s.negativeFlow += flow
+		}
+	} else {
+		dropIndex := index - s.period
+		s.atrSum += trueRangeAt(highs, lows, closes, index) - trueRangeAt(highs, lows, closes, dropIndex)
+		if currentPositive {
+			s.positiveFlow += flow
+		} else {
+			s.negativeFlow += flow
+		}
+		dropTypical := (highs[dropIndex] + lows[dropIndex] + closes[dropIndex]) / 3
+		dropPreviousTypical := (highs[dropIndex-1] + lows[dropIndex-1] + closes[dropIndex-1]) / 3
+		dropFlow := dropTypical * volumes[dropIndex]
+		if dropTypical >= dropPreviousTypical {
+			s.positiveFlow -= dropFlow
+		} else {
+			s.negativeFlow -= dropFlow
+		}
+	}
+	if index < s.period {
+		return
+	}
+
+	s.lastMFI = moneyFlowIndexFromSums(s.positiveFlow, s.negativeFlow)
+	atrValue := s.atrSum / float64(s.period)
+	up := lows[index] - s.multiplier*atrValue
+	down := highs[index] + s.multiplier*atrValue
+	point := trendPoint{}
+	if len(s.points) == 0 {
+		if s.lastMFI >= 50 {
+			point = trendPoint{value: up, direction: trendDirectionUp}
+		} else {
+			point = trendPoint{value: down, direction: trendDirectionDown}
+		}
+	} else if s.lastMFI >= 50 {
+		previous := s.points[len(s.points)-1]
+		point = trendPoint{value: maxFloat(up, previous.value), direction: trendDirectionUp}
+	} else {
+		previous := s.points[len(s.points)-1]
+		point = trendPoint{value: minFloat(down, previous.value), direction: trendDirectionDown}
+	}
+	s.points = append(s.points, point)
+}
+
+func (s *streamAlphaTrendState) value() ([]trendPoint, float64, bool) {
+	if s == nil || len(s.points) < 2 {
+		return nil, 0, false
+	}
+	return s.points, s.lastMFI, true
 }
 
 func alphaTrend(highs []float64, lows []float64, closes []float64, volumes []float64, period int, multiplier float64) (float64, float64, string, bool) {

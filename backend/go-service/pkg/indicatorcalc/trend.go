@@ -32,7 +32,13 @@ func addTrendFeaturesWithContextToSet(target *ValueSet, values map[string]string
 	}
 	if len(closes) >= 35 {
 		recent, okRecent := ema25, ok25
-		prev, okPrev := ema(closes[:len(closes)-5], 25)
+		var prev float64
+		var okPrev bool
+		if features != nil {
+			prev, okPrev = features.emaHistoricalValue(25, 5)
+		} else {
+			prev, okPrev = ema(closes[:len(closes)-5], 25)
+		}
 		if okRecent && okPrev && prev != 0 {
 			slope := (recent - prev) / prev * 100
 			setValueTarget(target, values, "ema25_slope5_pct", slope, true)

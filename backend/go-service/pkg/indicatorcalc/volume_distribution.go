@@ -3,20 +3,33 @@ package indicatorcalc
 import "math"
 
 func priceVolumeBuckets(highs []float64, lows []float64, closes []float64, volumes []float64, lookback int, bins int, bucketSteps int) ([]float64, float64, float64, float64, bool) {
-	if lookback <= 0 || bins < 2 || bucketSteps <= 0 || len(closes) < lookback ||
-		len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) {
-		return nil, 0, 0, 0, false
-	}
-	start := len(closes) - lookback
-	rangeHigh, rangeLow, ok := rangeHighLow(highs, lows, start, len(closes))
-	if !ok || rangeHigh <= rangeLow {
-		return nil, 0, 0, 0, false
-	}
-	bucketSize := (rangeHigh - rangeLow) / float64(bucketSteps)
-	if bucketSize <= 0 {
+	if bins < 2 {
 		return nil, 0, 0, 0, false
 	}
 	bucketVolumes := make([]float64, bins)
+	rangeHigh, rangeLow, bucketSize, ok := priceVolumeBucketsInto(bucketVolumes, highs, lows, closes, volumes, lookback, bins, bucketSteps)
+	if !ok {
+		return nil, 0, 0, 0, false
+	}
+	return bucketVolumes, rangeHigh, rangeLow, bucketSize, true
+}
+
+func priceVolumeBucketsInto(bucketVolumes []float64, highs []float64, lows []float64, closes []float64, volumes []float64, lookback int, bins int, bucketSteps int) (float64, float64, float64, bool) {
+	if lookback <= 0 || bins < 2 || bucketSteps <= 0 || len(closes) < lookback ||
+		len(highs) != len(closes) || len(lows) != len(closes) || len(volumes) != len(closes) || len(bucketVolumes) < bins {
+		return 0, 0, 0, false
+	}
+	bucketVolumes = bucketVolumes[:bins]
+	clear(bucketVolumes)
+	start := len(closes) - lookback
+	rangeHigh, rangeLow, ok := rangeHighLow(highs, lows, start, len(closes))
+	if !ok || rangeHigh <= rangeLow {
+		return 0, 0, 0, false
+	}
+	bucketSize := (rangeHigh - rangeLow) / float64(bucketSteps)
+	if bucketSize <= 0 {
+		return 0, 0, 0, false
+	}
 	for index := start; index < len(closes); index++ {
 		lowBucket := priceVolumeBucketIndex(lows[index], rangeLow, bucketSize, bins)
 		highBucket := priceVolumeBucketIndex(highs[index], rangeLow, bucketSize, bins)
@@ -29,7 +42,7 @@ func priceVolumeBuckets(highs []float64, lows []float64, closes []float64, volum
 			bucketVolumes[bucket] += volumePerBucket
 		}
 	}
-	return bucketVolumes, rangeHigh, rangeLow, bucketSize, true
+	return rangeHigh, rangeLow, bucketSize, true
 }
 
 func rangeHighLow(highs []float64, lows []float64, start int, end int) (float64, float64, bool) {

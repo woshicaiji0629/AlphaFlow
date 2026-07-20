@@ -156,7 +156,37 @@ ClickHouse K 线
 | 完整 `CalculateWindow` | 约 106.9 KiB/op，431 allocs/op | 约 84.2 KiB/op，425 allocs/op | 分配字节下降约 21.2% |
 | QQE shared foundation | 16,896 B/op，8 allocs/op | 12,800 B/op，6 allocs/op | 分配字节下降约 24.2% |
 
+2026-07-20 对 `CalculationWindow` 连续状态和 realtime preview 做了进一步收口：
+
+- AlphaTrend、Dynamic Swing VWAP、VFI、Heikin Ashi、ATR22/Chandelier 以及多种 TradingView 指标改为复用流式末值状态。
+- EMA 历史、DEMA/TEMA21、volume MA 和派生成交量分桶不再重复构造或扫描。
+- Realtime preview 的 K 线列表改为 closed base + 单根 overlay 惰性物化；OHLCV 和可变指标历史继续克隆隔离。
+- EMA、SMA、volume SMA 和 MACD 的配置槽位最终采用动态状态切片。固定数组版本最低达到 `44 allocs/op`，但需要同步维护周期、下标和 switch；动态版本以约 4 次小分配换取单一配置来源，最终为约 `48 allocs/op`。
+
+同机窗口级结果：
+
+| 路径 | Git HEAD 基线 | 当前版本 | 结果 |
+| --- | ---: | ---: | ---: |
+| Realtime Preview | 166,530 ns/op | 135,180 ns/op | CPU 约提升 18.8% |
+| Preview 分配字节 | 224,850 B/op | 144,656 B/op | 下降约 35.7% |
+| Preview 分配次数 | 71 allocs/op | 48 allocs/op | 下降约 32.4% |
+
+按 `3m * 365天 = 175,200` 次迭代执行合成年度负载时，纯数值 streaming 从 `683,597 ns/op`、`70,719 B/op`、`145 allocs/op` 降到 `224,643 ns/op`、`43,582 B/op`、`129 allocs/op`。当前版本输出 287 个 numeric values，Git HEAD 输出 283 个，因此这不是完全相同输出集合的单函数对比；当前功能更多但仍显示约 3.04 倍指标吞吐。它也不是完整回测结果，不包含 ClickHouse、策略执行、事件持久化和报告生成。
+
 完整指标结果继续同时保留字符串和数值表示：在线存储、发布协议需要字符串字段，窗口和策略内部优先消费数值字段。若要继续消除其中一张结果 map，需要先调整存储和消息协议边界，不能仅在计算器内部删除。CPU 和 market-data 冷启动墙钟结果在本机波动较大，本轮只把分配下降和输出一致性作为确定结论。
+
+### market-data 冷启动采样
+
+`market-data-indicator-loadtest` 使用四个模拟交易所和服务当前周期集合，不连接真实 Redis、ClickHouse 或交易所。每交易所 100 个 symbol 时共有 2800 个任务，`lookback=268`、`warmup=268`、`runs=1` 的交错采样如下：
+
+| 版本 | 三次 cold elapsed | 中位数 | 中位吞吐 |
+| --- | --- | ---: | ---: |
+| Git HEAD | 21.51s / 23.44s / 21.82s | 21.82s | 约 128.33 tasks/s |
+| 当前版本 | 13.26s / 18.21s / 16.28s | 16.28s | 约 172.04 tasks/s |
+
+该规模下当前版本中位耗时约降低 25.4%，吞吐约提升 34.1%。每交易所 500 个 symbol 时共有 14000 个 symbol/interval 任务；当前版本实跑超过 4m38s 仍未结束，RSS 峰值观测约 3GB，CPU 约 220%–310%。该运行按时间盒主动终止，因此不能声称 top500 完成时间，也没有同规模 Git HEAD 结果。结论只包括：中等规模冷启动有收益；top500 已受窗口、snapshot 常驻量和 GC 非线性影响，不能按 100-symbol 样本线性外推。
+
+冷启动比较应先交错运行至少三次中等规模样本，再对 top500 使用固定时间盒并记录已完成任务、RSS、heap/alloc 和 GC。无时间限制等待一次全量墙钟，或让两个版本并行竞争资源，都不能得到可靠结论。
 
 ### ETHUSDT 一年回测
 
@@ -252,6 +282,8 @@ go run ./backtest-engine/cmd/backtest-dataset-check \
 go run ./backtest-engine/cmd/backtest-engine \
   -config configs/backtest-engine.ethusdt-1y.toml
 ```
+
+当前仓库中上述配置名虽然包含 `1y`，但 `[data]` 区间实际为 `2025-09-01` 至 `2025-12-01`。完整年度验证必须显式设置连续 365 天区间；不能根据文件名宣称已经完成一年回测。
 
 年度性能比较必须尽量保持相同系统负载，并分别记录主循环耗时、端到端耗时、吞吐、RSS/heap 和 profile。一次受后台索引影响的墙钟结果不能单独作为性能回退依据。
 

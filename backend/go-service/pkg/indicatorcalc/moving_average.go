@@ -9,20 +9,32 @@ func addMovingAverageFeatures(values map[string]string, signals map[string]strin
 }
 
 func addMovingAverageFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, volumes []float64, basic *basicIndicatorState) {
-	hma21, ok := hma(closes, 21)
+	hma21, ok := basic.hma21Value()
+	if !ok {
+		hma21, ok = hma(closes, 21)
+	}
 	setValueTarget(target, values, "hma21", hma21, ok)
 	vwma20, ok := vwma(closes, volumes, 20)
 	setValueTarget(target, values, "vwma20", vwma20, ok)
-	dema21, tema21, demaOK, temaOK := demaTema(closes, 21)
+	dema21, tema21, demaOK, temaOK := basic.demaTema21Value()
+	if !demaOK && !temaOK {
+		dema21, tema21, demaOK, temaOK = demaTema(closes, 21)
+	}
 	setValueTarget(target, values, "dema21", dema21, demaOK)
 	setValueTarget(target, values, "tema21", tema21, temaOK)
-	kama10, ok := kama(closes, 10, 2, 30)
+	kama10, ok := basic.kama10Value()
+	if !ok {
+		kama10, ok = kama(closes, 10, 2, 30)
+	}
 	setValueTarget(target, values, "kama10", kama10, ok)
-	addAlligatorFeaturesToSet(target, values, signals, closes)
+	addAlligatorFeaturesToSet(target, values, signals, closes, basic)
 
 	if len(closes) >= 30 {
 		recentHMA, okRecent := hma21, ok
-		previousHMA, okPrevious := hma(closes[:len(closes)-3], 21)
+		previousHMA, okPrevious := basic.hma21Previous3Value()
+		if !okPrevious {
+			previousHMA, okPrevious = hma(closes[:len(closes)-3], 21)
+		}
 		if okRecent && okPrevious && previousHMA != 0 {
 			setValueTarget(target, values, "hma21_slope3_pct", percentDistance(recentHMA, previousHMA), true)
 		}
@@ -43,11 +55,14 @@ func addMovingAverageFeaturesToSet(target *ValueSet, values map[string]string, s
 	addEZEMASuiteFeaturesToSet(target, values, signals, closes, basic)
 	addScriptDualMovingAverageToSet(target, values, signals, closes, volumes)
 	addScriptMovingAverageSignalToSet(target, values, signals, closes, basic)
-	addEMDFeaturesToSet(target, values, signals, closes, 25, 1)
+	addEMDFeaturesToSet(target, values, signals, closes, 25, 1, basic)
 }
 
-func addAlligatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64) {
-	jaw, teeth, lips, ok := alligator(closes)
+func addAlligatorFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
+	jaw, teeth, lips, ok := basic.alligatorValue()
+	if !ok {
+		jaw, teeth, lips, ok = alligator(closes)
+	}
 	if !ok {
 		return
 	}

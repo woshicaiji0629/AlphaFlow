@@ -29,7 +29,19 @@ type volumeProfileResult struct {
 }
 
 func volumeProfile(highs []float64, lows []float64, closes []float64, volumes []float64, lookback int, bins int, valueAreaPct float64) (volumeProfileResult, bool) {
-	bucketVolumes, rangeHigh, rangeLow, bucketSize, ok := priceVolumeBuckets(highs, lows, closes, volumes, lookback, bins, bins-1)
+	if bins < 2 {
+		return volumeProfileResult{}, false
+	}
+	var fixedBuckets [100]float64
+	var bucketVolumes []float64
+	var rangeHigh, rangeLow, bucketSize float64
+	var ok bool
+	if bins <= len(fixedBuckets) {
+		bucketVolumes = fixedBuckets[:bins]
+		rangeHigh, rangeLow, bucketSize, ok = priceVolumeBucketsInto(bucketVolumes, highs, lows, closes, volumes, lookback, bins, bins-1)
+	} else {
+		bucketVolumes, rangeHigh, rangeLow, bucketSize, ok = priceVolumeBuckets(highs, lows, closes, volumes, lookback, bins, bins-1)
+	}
 	if !ok {
 		return volumeProfileResult{}, false
 	}

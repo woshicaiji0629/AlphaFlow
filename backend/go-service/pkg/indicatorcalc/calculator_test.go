@@ -17,6 +17,26 @@ func TestCalculateWindowsContextHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestAddDerivedUsesPrecomputedVolumeMA(t *testing.T) {
+	opens := []float64{10}
+	highs := []float64{12}
+	lows := []float64{9}
+	closes := []float64{11}
+	volumes := []float64{30}
+	values := map[string]string{}
+
+	addDerivedToSet(nil, values, opens, highs, lows, closes, volumes, 10, true)
+	if values["volume_ratio20"] != "3" {
+		t.Fatalf("volume_ratio20 = %q, want 3", values["volume_ratio20"])
+	}
+
+	values = map[string]string{}
+	addDerivedToSet(nil, values, opens, highs, lows, closes, volumes, 10, false)
+	if _, ok := values["volume_ratio20"]; ok {
+		t.Fatalf("unexpected volume_ratio20 with invalid precomputed average: %#v", values)
+	}
+}
+
 func TestCalculateCommonIndicators(t *testing.T) {
 	klines := make([]model.Kline, 0, 120)
 	for index := 0; index < 120; index++ {
@@ -29,7 +49,11 @@ func TestCalculateCommonIndicators(t *testing.T) {
 		t.Fatalf("Calculate: %v", err)
 	}
 	for _, key := range []string{
+		"open",
+		"high",
+		"low",
 		"close",
+		"volume",
 		"sma7",
 		"ema25",
 		"wma99",
@@ -244,6 +268,16 @@ func TestCalculateCommonIndicators(t *testing.T) {
 	if result.Values["close"] != "220" {
 		t.Fatalf("close = %q, want 220", result.Values["close"])
 	}
+	for key, want := range map[string]string{
+		"open":   "219",
+		"high":   "221",
+		"low":    "217",
+		"volume": "14",
+	} {
+		if got := result.Values[key]; got != want {
+			t.Fatalf("%s = %q, want %s", key, got, want)
+		}
+	}
 }
 
 func TestCalculateIgnoresOpenKline(t *testing.T) {
@@ -283,6 +317,16 @@ func TestCalculateWindowNumericSkipsLegacyEncoding(t *testing.T) {
 	}
 	if result.NumericValues["close"] != 102 {
 		t.Fatalf("numeric close = %v, want 102", result.NumericValues["close"])
+	}
+	for key, want := range map[string]float64{
+		"open":   101,
+		"high":   103,
+		"low":    99,
+		"volume": 12,
+	} {
+		if got := result.NumericValues[key]; got != want {
+			t.Fatalf("numeric %s = %v, want %v", key, got, want)
+		}
 	}
 }
 
@@ -338,6 +382,11 @@ func TestCalculateReportsInvalidOHLC(t *testing.T) {
 	if result.Signals["data_quality_reason"] == "" {
 		t.Fatal("expected data quality reason")
 	}
+	for _, key := range []string{"open", "high", "low", "close", "volume"} {
+		if _, ok := result.NumericValues[key]; ok {
+			t.Fatalf("invalid OHLC result unexpectedly contains %s", key)
+		}
+	}
 }
 
 func TestCalculationWindowAppendsAndTrims(t *testing.T) {
@@ -387,6 +436,58 @@ func TestCalculateWindowMatchesCalculate(t *testing.T) {
 	if fromWindow.Signals["data_quality"] != fromKlines.Signals["data_quality"] {
 		t.Fatalf("data quality = %q, want %q", fromWindow.Signals["data_quality"], fromKlines.Signals["data_quality"])
 	}
+}
+
+func TestStreamingCalculationWindowMatchesBatchBeforeTrim(t *testing.T) {
+	klines := make([]model.Kline, 0, 120)
+	for index := 0; index < 120; index++ {
+		klines = append(klines, testKline(int64(index), 100+float64(index%30), true))
+	}
+	window := NewCalculationWindowFromKlines(klines[:100], 120)
+	window.EnableBasicState()
+	window.Append(klines[100:])
+
+	got, err := CalculateWindow(window, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CalculateWindow: %v", err)
+	}
+	want, err := Calculate(klines, DefaultOptions())
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	assertResultEqual(t, 0, got, want)
+}
+
+func TestStreamingCalculationWindowPreservesContinuousAndBoundedSemanticsAfterTrim(t *testing.T) {
+	klines := benchmarkKlines(240)
+	window := NewCalculationWindowFromKlines(klines[:100], 200)
+	window.EnableBasicState()
+	window.Append(klines[100:])
+
+	result, err := CalculateWindowNumeric(window, DefaultOptions())
+	if err != nil {
+		t.Fatalf("CalculateWindowNumeric: %v", err)
+	}
+	_, fullHighs, fullLows, fullCloses, fullVolumes, err := NewCalculationWindowFromKlines(klines, 0).Series()
+	if err != nil {
+		t.Fatalf("full Series: %v", err)
+	}
+	_, _, _, boundedCloses, _, err := window.Series()
+	if err != nil {
+		t.Fatalf("bounded Series: %v", err)
+	}
+	wantSMA, ok := sma(boundedCloses, 99)
+	if !ok {
+		t.Fatal("missing bounded sma99")
+	}
+	wantEMA, ok := ema(fullCloses, 99)
+	if !ok {
+		t.Fatal("missing continuous ema99")
+	}
+
+	assertFloatClose(t, "bounded sma99", result.NumericValues["sma99"], wantSMA)
+	assertFloatClose(t, "continuous ema99", result.NumericValues["ema99"], wantEMA)
+	assertFloatClose(t, "continuous vwap", result.NumericValues["vwap"], vwap(fullHighs, fullLows, fullCloses, fullVolumes))
 }
 
 func TestCalculateWindowsMatchesSequentialCalculateWindow(t *testing.T) {

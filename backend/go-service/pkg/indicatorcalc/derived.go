@@ -2,7 +2,7 @@ package indicatorcalc
 
 import "math"
 
-func addDerivedToSet(target *ValueSet, values map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64) {
+func addDerivedToSet(target *ValueSet, values map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, volumes []float64, volumeMA float64, volumeMAOK bool) {
 	last := len(closes) - 1
 	open := opens[last]
 	high := highs[last]
@@ -20,8 +20,7 @@ func addDerivedToSet(target *ValueSet, values map[string]string, opens []float64
 		setValueTarget(target, values, "upper_shadow_ratio", (high-math.Max(open, closeValue))/rangeValue, true)
 		setValueTarget(target, values, "lower_shadow_ratio", (math.Min(open, closeValue)-low)/rangeValue, true)
 	}
-	volumeMA, ok := sma(volumes, 20)
-	if ok && volumeMA != 0 {
+	if volumeMAOK && volumeMA != 0 {
 		setValueTarget(target, values, "volume_ratio20", volumes[last]/volumeMA, true)
 	}
 }

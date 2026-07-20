@@ -10,11 +10,14 @@ type heikinAshiCandle struct {
 }
 
 func addHeikinAshiFeatures(values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
-	addHeikinAshiFeaturesToSet(nil, values, signals, opens, highs, lows, closes)
+	addHeikinAshiFeaturesToSet(nil, values, signals, opens, highs, lows, closes, nil)
 }
 
-func addHeikinAshiFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64) {
-	last, ok := heikinAshiLast(opens, highs, lows, closes)
+func addHeikinAshiFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, opens []float64, highs []float64, lows []float64, closes []float64, basic *basicIndicatorState) {
+	last, ok := basic.heikinAshiValue()
+	if !ok {
+		last, ok = heikinAshiLast(opens, highs, lows, closes)
+	}
 	if !ok {
 		return
 	}
@@ -24,6 +27,33 @@ func addHeikinAshiFeaturesToSet(target *ValueSet, values map[string]string, sign
 	setValueTarget(target, values, "ha_close", last.close, true)
 	signals["ha_trend"] = heikinAshiTrend([]heikinAshiCandle{last})
 	signals["ha_strength"] = heikinAshiStrength(last)
+}
+
+type streamHeikinAshiState struct {
+	current heikinAshiCandle
+	ready   bool
+}
+
+func (s *streamHeikinAshiState) append(open float64, high float64, low float64, closeValue float64) {
+	if s == nil {
+		return
+	}
+	haClose := (open + high + low + closeValue) / 4
+	haOpen := (open + closeValue) / 2
+	if s.ready {
+		haOpen = (s.current.open + s.current.close) / 2
+	}
+	s.current = heikinAshiCandle{
+		open: haOpen, high: maxFloat(high, haOpen, haClose), low: minFloat(low, haOpen, haClose), close: haClose,
+	}
+	s.ready = true
+}
+
+func (s *streamHeikinAshiState) value() (heikinAshiCandle, bool) {
+	if s == nil || !s.ready {
+		return heikinAshiCandle{}, false
+	}
+	return s.current, true
 }
 
 func heikinAshiLast(opens []float64, highs []float64, lows []float64, closes []float64) (heikinAshiCandle, bool) {

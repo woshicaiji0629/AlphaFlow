@@ -102,14 +102,14 @@ func movingAverageState(ema7 float64, ema25 float64, ema99 float64, last float64
 }
 
 func addEZEMASuiteFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, basic *basicIndicatorState) {
-	periods := []int{5, 8, 9, 34, 55, 89, 144, 200}
+	periods := [...]int{5, 8, 9, 34, 55, 89, 144, 200}
 	if len(closes) < periods[len(periods)-1]+1 {
 		return
 	}
 
-	current := make(map[int]float64, len(periods))
-	previous := make(map[int]float64, len(periods))
-	for _, period := range periods {
+	var current [len(periods)]float64
+	var previous [len(periods)]float64
+	for index, period := range periods {
 		value, ok := emaFromStateOrSeries(basic, closes, period)
 		if !ok {
 			return
@@ -118,15 +118,15 @@ func addEZEMASuiteFeaturesToSet(target *ValueSet, values map[string]string, sign
 		if !ok {
 			return
 		}
-		current[period] = value
-		previous[period] = prev
+		current[index] = value
+		previous[index] = prev
 		setValueTarget(target, values, "ez_ema_"+strconv.Itoa(period), value, true)
 	}
 
-	fast := current[9]
-	slow := current[55]
-	prevFast := previous[9]
-	prevSlow := previous[55]
+	fast := current[2]
+	slow := current[4]
+	prevFast := previous[2]
+	prevSlow := previous[4]
 	last := closes[len(closes)-1]
 	prevClose := closes[len(closes)-2]
 
@@ -139,8 +139,8 @@ func addEZEMASuiteFeaturesToSet(target *ValueSet, values map[string]string, sign
 	signals["ez_price_below_ema_pair"] = boolText(last < fast && last < slow)
 	signals["ez_ema_stack"] = ezEMAStack(current)
 
-	currentSpread := ezEMASpread(current, periods)
-	previousSpread := ezEMASpread(previous, periods)
+	currentSpread := ezEMASpread(current)
+	previousSpread := ezEMASpread(previous)
 	setValueTarget(target, values, "ez_ema_group_spread_pct", currentSpread/last*100, last != 0)
 	signals["ez_ema_spread_state"] = spreadState(currentSpread, previousSpread)
 	signals["ez_ema_compression"] = compressionState(currentSpread, last)
@@ -166,21 +166,21 @@ func priceCrossEMAPair(
 	}
 }
 
-func ezEMAStack(values map[int]float64) string {
-	bull := values[5] > values[8] &&
-		values[8] > values[9] &&
-		values[9] > values[34] &&
-		values[34] > values[55] &&
-		values[55] > values[89] &&
-		values[89] > values[144] &&
-		values[144] > values[200]
-	bear := values[5] < values[8] &&
-		values[8] < values[9] &&
-		values[9] < values[34] &&
-		values[34] < values[55] &&
-		values[55] < values[89] &&
-		values[89] < values[144] &&
-		values[144] < values[200]
+func ezEMAStack(values [8]float64) string {
+	bull := values[0] > values[1] &&
+		values[1] > values[2] &&
+		values[2] > values[3] &&
+		values[3] > values[4] &&
+		values[4] > values[5] &&
+		values[5] > values[6] &&
+		values[6] > values[7]
+	bear := values[0] < values[1] &&
+		values[1] < values[2] &&
+		values[2] < values[3] &&
+		values[3] < values[4] &&
+		values[4] < values[5] &&
+		values[5] < values[6] &&
+		values[6] < values[7]
 	switch {
 	case bull:
 		return "bull"
@@ -191,12 +191,12 @@ func ezEMAStack(values map[int]float64) string {
 	}
 }
 
-func ezEMASpread(values map[int]float64, periods []int) float64 {
-	minValue := values[periods[0]]
-	maxValue := values[periods[0]]
-	for _, period := range periods[1:] {
-		minValue = math.Min(minValue, values[period])
-		maxValue = math.Max(maxValue, values[period])
+func ezEMASpread(values [8]float64) float64 {
+	minValue := values[0]
+	maxValue := values[0]
+	for _, value := range values[1:] {
+		minValue = math.Min(minValue, value)
+		maxValue = math.Max(maxValue, value)
 	}
 	return maxValue - minValue
 }

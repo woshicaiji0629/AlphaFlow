@@ -2,6 +2,48 @@ package indicatorcalc
 
 import "math"
 
+type streamEMDState struct {
+	period          int
+	average         streamSMMAState
+	deviation       streamEMAState
+	closeCount      int
+	previousAverage float64
+}
+
+func newStreamEMDState(period int) streamEMDState {
+	return streamEMDState{
+		period:    period,
+		average:   newStreamSMMAState(period),
+		deviation: *newStreamEMAState(period),
+	}
+}
+
+func (s *streamEMDState) append(closeValue float64) {
+	if s == nil || s.period <= 0 {
+		return
+	}
+	s.closeCount++
+	averageWasReady := s.average.ready
+	if averageWasReady {
+		s.previousAverage = s.average.current
+	}
+	s.average.append(closeValue)
+	if !s.average.ready {
+		return
+	}
+	if !averageWasReady {
+		s.previousAverage = s.average.current
+	}
+	s.deviation.append(math.Abs(closeValue - s.average.current))
+}
+
+func (s *streamEMDState) value() (float64, float64, float64, float64, bool) {
+	if s == nil || s.closeCount < 2*s.period+1 || !s.average.ready || !s.deviation.ready || !s.deviation.hasPrevious {
+		return 0, 0, 0, 0, false
+	}
+	return s.average.current, s.previousAverage, s.deviation.value, s.deviation.previous, true
+}
+
 func addScriptDualMovingAverageToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, volumes []float64) {
 	const (
 		period1  = 20
@@ -66,7 +108,7 @@ func addScriptMovingAverageSignalToSet(target *ValueSet, values map[string]strin
 	ema12, ok12 := emaFromStateOrSeries(basic, closes, 12)
 	ema26, ok26 := emaFromStateOrSeries(basic, closes, 26)
 	prevEMA10, okPrev10 := previousEMAFromStateOrSeries(basic, closes, 10, 1)
-	prevBreakthrough, okPrevBreakthrough := ema(closes[:len(closes)-2], 13)
+	prevBreakthrough, okPrevBreakthrough := previousEMAFromStateOrSeries(basic, closes, 13, 2)
 	if !ok10 || !okBreakthrough || !ok12 || !ok26 || !okPrev10 || !okPrevBreakthrough || breakthrough == 0 || prevBreakthrough == 0 {
 		return
 	}
@@ -87,8 +129,11 @@ func addScriptMovingAverageSignalToSet(target *ValueSet, values map[string]strin
 	}
 }
 
-func addEMDFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64) {
-	avg, previousAvg, emd, previousEMD, ok := emdLastTwo(closes, period)
+func addEMDFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, closes []float64, period int, multiplier float64, basic *basicIndicatorState) {
+	avg, previousAvg, emd, previousEMD, ok := basic.emd25Value(period)
+	if !ok {
+		avg, previousAvg, emd, previousEMD, ok = emdLastTwo(closes, period)
+	}
 	if !ok {
 		return
 	}

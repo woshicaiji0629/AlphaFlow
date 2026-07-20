@@ -12,7 +12,10 @@ func addMoneyFlowFeaturesToSet(target *ValueSet, values map[string]string, signa
 	mfi := moneyFlowIndex(highs, lows, closes, volumes, 14)
 	setValueTarget(target, values, "mfi14", mfi, true)
 
-	vwapValue := vwap(highs, lows, closes, volumes)
+	vwapValue, streamVWAPOK := basic.vwapValue(closes[last])
+	if !streamVWAPOK {
+		vwapValue = vwap(highs, lows, closes, volumes)
+	}
 	setValueTarget(target, values, "vwap_distance_pct", percentDistance(closes[last], vwapValue), vwapValue != 0)
 	rollingVWAP, ok := rollingVWAP(highs, lows, closes, volumes, 20)
 	setValueTarget(target, values, "rolling_vwap20", rollingVWAP, ok)
@@ -62,7 +65,7 @@ func addMoneyFlowFeaturesToSet(target *ValueSet, values map[string]string, signa
 	signals["breakout_volume_strength"] = breakoutVolumeStrength(volumeBreakoutRatio, okBreakout)
 	signals["volume_divergence"] = volumeDivergenceFromScore(divergenceScore)
 	signals["volume_phase"] = volumePhase(pressure, cmfValue, ok)
-	addVolumeFlowIndicatorFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 130, 0.2, 2.5, 5)
+	addVolumeFlowIndicatorFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 130, 0.2, 2.5, 5, basic)
 	addVolumeProfileFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 200, 100, 68)
 	addSupplyDemandRangeFeaturesToSet(target, values, signals, highs, lows, closes, volumes, 120, 50, 10)
 }

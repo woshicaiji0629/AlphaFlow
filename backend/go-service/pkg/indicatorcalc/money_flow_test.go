@@ -1,6 +1,9 @@
 package indicatorcalc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestMoneyFlowFeaturesConfirmUp(t *testing.T) {
 	highs, lows, closes, volumes := moneyFlowSeries(30, 100, 1, 100)
@@ -60,6 +63,51 @@ func TestRollingVWAP(t *testing.T) {
 	}
 }
 
+func TestPriceVolumeBucketsIntoClearsAndMatchesAllocatingVersion(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(40, 100, 0.3, 100)
+	want, wantHigh, wantLow, wantSize, wantOK := priceVolumeBuckets(highs, lows, closes, volumes, 30, 20, 20)
+	storage := make([]float64, 20)
+	for index := range storage {
+		storage[index] = 999
+	}
+	gotHigh, gotLow, gotSize, gotOK := priceVolumeBucketsInto(storage, highs, lows, closes, volumes, 30, 20, 20)
+	if gotOK != wantOK {
+		t.Fatalf("price volume buckets ok = %t, want %t", gotOK, wantOK)
+	}
+	assertFloatClose(t, "price volume range high", gotHigh, wantHigh)
+	assertFloatClose(t, "price volume range low", gotLow, wantLow)
+	assertFloatClose(t, "price volume bucket size", gotSize, wantSize)
+	if !reflect.DeepEqual(storage, want) {
+		t.Fatalf("reused price volume buckets = %#v, want %#v", storage, want)
+	}
+}
+
+func TestMoneyFlowFeaturesStreamVWAPMatchesBatch(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(30, 100, 1, 100)
+	streamValues := map[string]string{}
+	batchValues := map[string]string{}
+
+	addMoneyFlowFeatures(streamValues, map[string]string{}, highs, lows, closes, volumes, buildBasicIndicatorState(highs, lows, closes, volumes))
+	addMoneyFlowFeatures(batchValues, map[string]string{}, highs, lows, closes, volumes, nil)
+
+	if streamValues["vwap_distance_pct"] != batchValues["vwap_distance_pct"] {
+		t.Fatalf("stream vwap_distance_pct = %q, batch = %q", streamValues["vwap_distance_pct"], batchValues["vwap_distance_pct"])
+	}
+}
+
+func TestMoneyFlowFeaturesStreamVWAPMatchesBatchWithZeroVolume(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(30, 100, 1, 0)
+	streamValues := map[string]string{}
+	batchValues := map[string]string{}
+
+	addMoneyFlowFeatures(streamValues, map[string]string{}, highs, lows, closes, volumes, buildBasicIndicatorState(highs, lows, closes, volumes))
+	addMoneyFlowFeatures(batchValues, map[string]string{}, highs, lows, closes, volumes, nil)
+
+	if streamValues["vwap_distance_pct"] != batchValues["vwap_distance_pct"] {
+		t.Fatalf("stream vwap_distance_pct = %q, batch = %q", streamValues["vwap_distance_pct"], batchValues["vwap_distance_pct"])
+	}
+}
+
 func TestVolumeFlowIndicatorOutputsSignals(t *testing.T) {
 	highs, lows, closes, volumes := moneyFlowSeries(320, 100, 0.3, 100)
 	values := map[string]string{}
@@ -114,6 +162,43 @@ func BenchmarkVolumeFlowIndicatorCompact(b *testing.B) {
 		if _, ok := volumeFlowIndicatorCompact(highs, lows, closes, volumes, 130, 0.2, 2.5, 5); !ok {
 			b.Fatal("volumeFlowIndicatorCompact returned false")
 		}
+	}
+}
+
+func TestVolumeFlowIndicatorStreamMatchesCompactForEveryAppend(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(340, 100, 0.3, 100)
+	stream := newStreamVolumeFlowIndicatorState(130, 0.2, 2.5, 5)
+	for index := range closes {
+		start := maxInt(0, index-299)
+		stream.append(highs[start:index+1], lows[start:index+1], closes[start:index+1], volumes[start:index+1])
+		got, gotOK := stream.value(130, 0.2, 2.5, 5)
+		want, wantOK := volumeFlowIndicatorCompact(highs[:index+1], lows[:index+1], closes[:index+1], volumes[:index+1], 130, 0.2, 2.5, 5)
+		if gotOK != wantOK {
+			t.Fatalf("stream vfi ok at index %d = %t, want %t", index, gotOK, wantOK)
+		}
+		if !gotOK {
+			continue
+		}
+		assertFloatClose(t, "stream vfi value", got.value, want.value)
+		assertFloatClose(t, "stream vfi signal", got.signal, want.signal)
+		assertFloatClose(t, "stream vfi hist", got.hist, want.hist)
+		assertFloatClose(t, "stream vfi previous value", got.previousValue, want.previousValue)
+		assertFloatClose(t, "stream vfi previous signal", got.previousSignal, want.previousSignal)
+		assertFloatClose(t, "stream vfi volume cutoff", got.volumeCutoff, want.volumeCutoff)
+		assertFloatClose(t, "stream vfi price cutoff", got.priceCutoff, want.priceCutoff)
+	}
+}
+
+func TestVolumeFlowIndicatorStreamCloneContinuesIndependently(t *testing.T) {
+	highs, lows, closes, volumes := moneyFlowSeries(310, 100, 0.3, 100)
+	state := buildBasicIndicatorState(highs[:300], lows[:300], closes[:300], volumes[:300])
+	cloned := state.clone()
+	state.append(highs[:301], lows[:301], closes[:301], volumes[:301])
+	cloned.append(highs[:301], lows[:301], closes[:301], volumes[:301])
+	got, gotOK := state.volumeFlowIndicatorValue(130, 0.2, 2.5, 5)
+	want, wantOK := cloned.volumeFlowIndicatorValue(130, 0.2, 2.5, 5)
+	if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+		t.Fatalf("cloned stream vfi = %#v, want %#v", want, got)
 	}
 }
 

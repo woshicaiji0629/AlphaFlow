@@ -29,6 +29,26 @@ func TestFeatureContextCachesATRSeriesByPeriod(t *testing.T) {
 	}
 }
 
+func TestFeatureContextATRPeriodsShareTrueRangeFoundation(t *testing.T) {
+	highs, lows, closes := testPriceSeries(120)
+	ctx := newFeatureContext(highs, lows, closes, nil)
+	for _, period := range []int{10, 14} {
+		got, gotOK := ctx.atrSeries(period)
+		want, wantOK := atrSeries(highs, lows, closes, period)
+		if gotOK != wantOK || len(got) != len(want) {
+			t.Fatalf("ATR(%d) availability/length = %v/%d, want %v/%d", period, gotOK, len(got), wantOK, len(want))
+		}
+		for index := range want {
+			if got[index] != want[index] {
+				t.Fatalf("ATR(%d)[%d] = %v, want %v", period, index, got[index], want[index])
+			}
+		}
+	}
+	if ctx.trueRange.values == nil || !ctx.trueRange.ok {
+		t.Fatal("ATR periods did not retain the shared True Range foundation")
+	}
+}
+
 func TestFeatureContextCachesTrueRangeSeries(t *testing.T) {
 	highs, lows, closes := testPriceSeries(120)
 	ctx := newFeatureContext(highs, lows, closes, nil)

@@ -14,13 +14,21 @@ func addSupportResistance(values map[string]string, signals map[string]string, h
 }
 
 func addSupportResistanceToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64) {
+	addSupportResistanceWithFeaturesToSet(target, values, signals, highs, lows, closes, nil)
+}
+
+func addSupportResistanceWithFeaturesToSet(target *ValueSet, values map[string]string, signals map[string]string, highs []float64, lows []float64, closes []float64, features *featureContext) {
 	period := minInt(50, len(closes))
 	if period < 5 {
 		return
 	}
 	start := len(closes) - period
 	last := closes[len(closes)-1]
-	tolerance := supportResistanceTolerance(highs, lows, closes, period)
+	atrValue, atrOK := 0.0, false
+	if features != nil && minInt(14, period-1) == 14 {
+		atrValue, atrOK = features.atrValue(14)
+	}
+	tolerance := supportResistanceToleranceWithATR(highs, lows, closes, period, atrValue, atrOK)
 	supports, resistances := supportResistanceLevels(highs[start:], lows[start:], closes[start:], tolerance)
 	if len(supports) == 0 || len(resistances) == 0 {
 		resistance, support := highLow(highs[start:], lows[start:])
@@ -120,10 +128,18 @@ func clusterLevels(pivots []priceLevel, tolerance float64, last float64, resista
 }
 
 func supportResistanceTolerance(highs []float64, lows []float64, closes []float64, period int) float64 {
-	atrValue, ok := atr(highs, lows, closes, minInt(14, period-1))
+	return supportResistanceToleranceWithATR(highs, lows, closes, period, 0, false)
+}
+
+func supportResistanceToleranceWithATR(highs []float64, lows []float64, closes []float64, period int, atrValue float64, atrOK bool) float64 {
+	if !atrOK {
+		var ok bool
+		atrValue, ok = atr(highs, lows, closes, minInt(14, period-1))
+		atrOK = ok
+	}
 	last := closes[len(closes)-1]
 	percent := last * 0.002
-	if ok && atrValue > 0 {
+	if atrOK && atrValue > 0 {
 		return math.Max(atrValue*0.35, percent)
 	}
 	return percent

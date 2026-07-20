@@ -735,7 +735,7 @@ func TestRunnerCachedIndicatorSnapshotsForWindowAlignsBeforeLatest(t *testing.T)
 		testIndicatorSnapshot(klines[23], "cached-23"),
 	}
 
-	snapshots := runner.cachedIndicatorSnapshotsForWindow(key, window)
+	snapshots := runner.cachedIndicatorSnapshotsForWindow(key, window.Klines())
 
 	if len(snapshots) != 4 {
 		t.Fatalf("snapshots = %d, want 4", len(snapshots))
@@ -756,7 +756,7 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowOnlyFillsMissingSnapshots(t 
 	}
 	runner := NewRunner(&fakeStore{}, RunnerOptions{})
 
-	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), cached)
 	if err != nil {
 		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowUsesCompleteCache(t *testing
 		},
 	})
 
-	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), cached)
 	if err != nil {
 		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}
@@ -820,7 +820,7 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowRejectsDifferentFeatureMetad
 	var calculateCalls atomic.Uint64
 	runner := NewRunner(&fakeStore{}, RunnerOptions{OnCalculateWindow: func() { calculateCalls.Add(1) }})
 
-	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), cached)
 	if err != nil {
 		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestRunnerCalculatedIndicatorSnapshotsForWindowCalculatesOnlyMissingLatest(
 		},
 	})
 
-	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), cached)
 	if err != nil {
 		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}
@@ -876,7 +876,7 @@ func TestRunnerCalculatedIndicatorSnapshotsUsesFixedWarmupWindow(t *testing.T) {
 		WindowLookback:  50,
 	})
 
-	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, nil)
+	snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), nil)
 	if err != nil {
 		t.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 	}

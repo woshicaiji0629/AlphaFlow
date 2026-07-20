@@ -49,6 +49,52 @@ func TestRealtimeWindowForKlineMatchesIsolatedPreview(t *testing.T) {
 	}
 }
 
+func TestWindowForClosedKlineReturnsIsolatedKlineSnapshot(t *testing.T) {
+	klines := minuteKlines(250)
+	next := minuteKline(int64(len(klines)), 350)
+	next.IsClosed = true
+	rule := Rule{Exchange: "binance", Market: "um"}
+	runner := NewRunner(&fakeStore{}, RunnerOptions{LookbackPeriods: 250})
+	key := windowKey(rule.Exchange, rule.Market, next.Symbol, next.Interval)
+	cached := newCalculationWindowFromKlines(klines, 250)
+	runner.windowShard(key).windows[key] = cached
+
+	snapshot, err := runner.windowForKline(context.Background(), rule, next, 60*1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) != 250 || snapshot[len(snapshot)-1].OpenTime != next.OpenTime {
+		t.Fatalf("closed snapshot bounds = (%d, %d), want (250, %d)", len(snapshot), snapshot[len(snapshot)-1].OpenTime, next.OpenTime)
+	}
+	snapshot[len(snapshot)-1].OpenTime = -1
+	if cached.Klines()[len(cached.Klines())-1].OpenTime != next.OpenTime {
+		t.Fatal("mutating closed snapshot changed cached window")
+	}
+}
+
+func BenchmarkClosedWindowCacheSnapshot(b *testing.B) {
+	klines := minuteKlines(250)
+	next := minuteKline(int64(len(klines)), 350)
+	next.IsClosed = true
+	rule := Rule{Exchange: "binance", Market: "um"}
+	runner := NewRunner(&fakeStore{}, RunnerOptions{LookbackPeriods: 250})
+	key := windowKey(rule.Exchange, rule.Market, next.Symbol, next.Interval)
+	runner.windowShard(key).windows[key] = newCalculationWindowFromKlines(klines, 250)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		snapshot, err := runner.windowForKline(ctx, rule, next, 60*1000)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(snapshot) == 0 {
+			b.Fatal("empty closed snapshot")
+		}
+	}
+}
+
 func BenchmarkWindowWithTemporaryKlineRealtime(b *testing.B) {
 	klines := minuteKlines(250)
 	window := newCalculationWindowFromKlines(klines, 250)
@@ -141,7 +187,7 @@ func BenchmarkCalculateOnlyMissingLatestSnapshot(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
-		snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window, cached)
+		snapshots, err := runner.calculatedIndicatorSnapshotsForWindow(window.Klines(), cached)
 		if err != nil {
 			b.Fatalf("calculatedIndicatorSnapshotsForWindow: %v", err)
 		}
