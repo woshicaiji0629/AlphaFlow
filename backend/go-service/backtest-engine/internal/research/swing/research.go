@@ -11,16 +11,17 @@ import (
 )
 
 type Summary struct {
-	DefinitionVersion string         `json:"definition_version"`
-	StartTimeMS       int64          `json:"start_time_ms"`
-	EndTimeMS         int64          `json:"end_time_ms"`
-	Total             int            `json:"total"`
-	Buckets           map[string]int `json:"buckets"`
-	UpSwings          int            `json:"up_swings"`
-	DownSwings        int            `json:"down_swings"`
+	DefinitionVersion string                            `json:"definition_version"`
+	StartTimeMS       int64                             `json:"start_time_ms"`
+	EndTimeMS         int64                             `json:"end_time_ms"`
+	Total             int                               `json:"total"`
+	Buckets           map[string]int                    `json:"buckets"`
+	UpSwings          int                               `json:"up_swings"`
+	DownSwings        int                               `json:"down_swings"`
+	Opportunities     []signalresearch.SwingOpportunity `json:"opportunities,omitempty"`
 }
 
-func Run(ctx context.Context, configPath string, minimumMovePoints, reversalPoints float64) (Summary, error) {
+func Run(ctx context.Context, configPath string, reviewConfig signalresearch.SwingReviewConfig) (Summary, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return Summary{}, fmt.Errorf("load config: %w", err)
@@ -64,39 +65,38 @@ func Run(ctx context.Context, configPath string, minimumMovePoints, reversalPoin
 	if err != nil {
 		return Summary{}, err
 	}
-	review, err := signalresearch.ReviewSwings(series.Klines, nil, nil, nil, signalresearch.SwingReviewConfig{
-		MinimumMovePoints: minimumMovePoints, ReversalPoints: reversalPoints,
-	})
+	review, err := signalresearch.ReviewSwings(series.Klines, nil, nil, nil, reviewConfig)
 	if err != nil {
 		return Summary{}, err
 	}
-	swings := signalresearch.BuildMarketSwings(
-		cfg.Data.Exchange, cfg.Data.Market, cfg.Data.Symbols[0], cfg.Data.Interval, review,
-	)
-	researchStore, err := signalresearch.NewStore(ctx, signalresearch.StoreOptions{
-		Addr: cfg.ClickHouse.Addr, Database: cfg.ClickHouse.Database,
-		Username: cfg.ClickHouse.Username, Password: cfg.ClickHouse.Password,
-		DialTimeout: dialTimeout, ReadTimeout: readTimeout,
-	})
-	if err != nil {
-		return Summary{}, err
+	swings := signalresearch.BuildMarketSwings(cfg.Data.Exchange, cfg.Data.Market, cfg.Data.Symbols[0], cfg.Data.Interval, review)
+	if review.ThresholdMode == signalresearch.SwingThresholdPoints {
+		researchStore, storeErr := signalresearch.NewStore(ctx, signalresearch.StoreOptions{
+			Addr: cfg.ClickHouse.Addr, Database: cfg.ClickHouse.Database,
+			Username: cfg.ClickHouse.Username, Password: cfg.ClickHouse.Password,
+			DialTimeout: dialTimeout, ReadTimeout: readTimeout,
+		})
+		if storeErr != nil {
+			return Summary{}, storeErr
+		}
+		defer researchStore.Close()
+		if err := researchStore.SaveMarketSwings(ctx, swings, 500); err != nil {
+			return Summary{}, err
+		}
 	}
-	defer researchStore.Close()
-	if err := researchStore.SaveMarketSwings(ctx, swings, 500); err != nil {
-		return Summary{}, err
+	buckets := map[string]int{}
+	for _, opportunity := range review.Opportunities {
+		buckets[opportunity.MoveBucket]++
 	}
 	result := Summary{
-		DefinitionVersion: signalresearch.MarketSwingDefinitionVersion,
-		StartTimeMS:       start.UnixMilli(), EndTimeMS: end.UnixMilli(), Total: len(swings),
-		Buckets: map[string]int{"30_60": 0, "60_100": 0, "100_150": 0, "150_plus": 0},
+		DefinitionVersion: string(review.ThresholdMode) + "-v1",
+		StartTimeMS:       start.UnixMilli(), EndTimeMS: end.UnixMilli(), Total: len(review.Opportunities), Buckets: buckets,
+		UpSwings: review.UpSwings, DownSwings: review.DownSwings,
 	}
-	for _, swing := range swings {
-		result.Buckets[swing.MoveBucket]++
-		if swing.Side == "buy" {
-			result.UpSwings++
-		} else {
-			result.DownSwings++
-		}
+	if review.ThresholdMode == signalresearch.SwingThresholdPoints {
+		result.DefinitionVersion = signalresearch.MarketSwingDefinitionVersion
+	} else {
+		result.Opportunities = review.Opportunities
 	}
 	return result, nil
 }

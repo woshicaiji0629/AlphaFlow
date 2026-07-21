@@ -17,6 +17,45 @@ func TestSwingMoveBucketUsesMutuallyExclusiveBoundaries(t *testing.T) {
 	}
 }
 
+func TestSwingMoveATRBucketUsesMutuallyExclusiveBoundaries(t *testing.T) {
+	tests := map[float64]string{
+		1.49: "below_1_5_atr", 1.5: "1_5_3_atr", 2.99: "1_5_3_atr", 3: "3_5_atr",
+		4.99: "3_5_atr", 5: "5_8_atr", 7.99: "5_8_atr", 8: "8_plus_atr",
+	}
+	for move, want := range tests {
+		if got := SwingMoveATRBucket(move); got != want {
+			t.Fatalf("SwingMoveATRBucket(%v)=%q, want %q", move, got, want)
+		}
+	}
+}
+
+func TestReviewSwingsSupportsCausalATRThresholds(t *testing.T) {
+	bars := []marketmodel.Kline{
+		{CloseTime: 1, High: "100", Low: "100", Close: "100"},
+		{CloseTime: 2, High: "102", Low: "100", Close: "101"},
+		{CloseTime: 3, High: "103", Low: "101", Close: "102"},
+		{CloseTime: 4, High: "106", Low: "102", Close: "105"},
+		{CloseTime: 5, High: "110", Low: "105", Close: "109"},
+		{CloseTime: 6, High: "109", Low: "106", Close: "107"},
+	}
+	report, err := ReviewSwings(bars, nil, nil, nil, SwingReviewConfig{
+		Mode: SwingThresholdATR, ATRPeriod: 2, MinimumMoveATR: 1.5, ReversalATR: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ThresholdMode != SwingThresholdATR || len(report.Opportunities) != 1 {
+		t.Fatalf("unexpected ATR report: %+v", report)
+	}
+	opportunity := report.Opportunities[0]
+	if opportunity.MoveATR <= 0 || opportunity.MoveBucket == "" {
+		t.Fatalf("ATR metadata missing: %+v", opportunity)
+	}
+	if swings := BuildMarketSwings("binance", "um", "ETHUSDT", "3m", report); len(swings) != 0 {
+		t.Fatalf("ATR analysis must not persist as point-defined market swings: %+v", swings)
+	}
+}
+
 func TestReviewSwingsFindsThirtyPointMoves(t *testing.T) {
 	bars := []marketmodel.Kline{
 		{CloseTime: 1, High: "100", Low: "100", Close: "100"},

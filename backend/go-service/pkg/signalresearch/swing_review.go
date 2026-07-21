@@ -13,8 +13,19 @@ import (
 type SwingReviewConfig struct {
 	MinimumMovePoints float64
 	ReversalPoints    float64
+	Mode              SwingThresholdMode
+	ATRPeriod         int
+	MinimumMoveATR    float64
+	ReversalATR       float64
 	LeadWindowMS      int64
 }
+
+type SwingThresholdMode string
+
+const (
+	SwingThresholdPoints SwingThresholdMode = "points"
+	SwingThresholdATR    SwingThresholdMode = "atr"
+)
 
 type SwingSignal struct {
 	TimeMS  int64               `json:"time_ms"`
@@ -37,6 +48,7 @@ type SwingOpportunity struct {
 	EndPrice          float64              `json:"end_price"`
 	MovePoints        float64              `json:"move_points"`
 	MoveBucket        string               `json:"move_bucket"`
+	MoveATR           float64              `json:"move_atr,omitempty"`
 	MovePct           float64              `json:"move_pct"`
 	DurationMinutes   float64              `json:"duration_minutes"`
 	HitStage          string               `json:"hit_stage"`
@@ -74,8 +86,12 @@ type MarketSwing struct {
 }
 
 type SwingReviewReport struct {
+	ThresholdMode     SwingThresholdMode `json:"threshold_mode"`
 	MinimumMovePoints float64            `json:"minimum_move_points"`
 	ReversalPoints    float64            `json:"reversal_points"`
+	ATRPeriod         int                `json:"atr_period,omitempty"`
+	MinimumMoveATR    float64            `json:"minimum_move_atr,omitempty"`
+	ReversalATR       float64            `json:"reversal_atr,omitempty"`
 	Opportunities     []SwingOpportunity `json:"opportunities"`
 	UpSwings          int                `json:"up_swings"`
 	DownSwings        int                `json:"down_swings"`
@@ -91,21 +107,32 @@ type SwingReviewReport struct {
 type swingPoint struct {
 	timeMS int64
 	price  float64
+	atr    float64
 }
 
 func ReviewSwings(bars []marketmodel.Kline, signals []SwingSignal, evidence []SwingEvidence, trades []SinglePositionTrade, config SwingReviewConfig) (SwingReviewReport, error) {
-	if config.MinimumMovePoints <= 0 || config.ReversalPoints <= 0 || config.ReversalPoints >= config.MinimumMovePoints {
-		return SwingReviewReport{}, fmt.Errorf("invalid swing review thresholds")
+	if config.Mode == "" {
+		config.Mode = SwingThresholdPoints
+	}
+	if err := validateSwingReviewConfig(config); err != nil {
+		return SwingReviewReport{}, err
 	}
 	points, err := detectSwingPoints(bars, config)
 	if err != nil {
 		return SwingReviewReport{}, err
 	}
-	report := SwingReviewReport{MinimumMovePoints: config.MinimumMovePoints, ReversalPoints: config.ReversalPoints}
+	report := SwingReviewReport{
+		ThresholdMode: config.Mode, MinimumMovePoints: config.MinimumMovePoints, ReversalPoints: config.ReversalPoints,
+		ATRPeriod: config.ATRPeriod, MinimumMoveATR: config.MinimumMoveATR, ReversalATR: config.ReversalATR,
+	}
 	for i := 1; i < len(points); i++ {
 		start, end := points[i-1], points[i]
 		move := math.Abs(end.price - start.price)
-		if move < config.MinimumMovePoints {
+		moveATR := 0.0
+		if start.atr > 0 {
+			moveATR = move / start.atr
+		}
+		if !swingMoveEligible(config, move, moveATR) {
 			continue
 		}
 		side := strategy.SignalSideBuy
@@ -115,7 +142,7 @@ func ReviewSwings(bars []marketmodel.Kline, signals []SwingSignal, evidence []Sw
 		op := SwingOpportunity{
 			StartTimeMS: start.timeMS, EndTimeMS: end.timeMS, Side: side,
 			StartPrice: start.price, EndPrice: end.price, MovePoints: move,
-			MoveBucket: SwingMoveBucket(move), MovePct: move / start.price * 100,
+			MoveBucket: swingMoveBucket(config.Mode, move, moveATR), MoveATR: moveATR, MovePct: move / start.price * 100,
 			DurationMinutes: float64(end.timeMS-start.timeMS) / 60000, HitStage: "missed",
 		}
 		if side == strategy.SignalSideBuy {
@@ -179,6 +206,9 @@ func ReviewSwings(bars []marketmodel.Kline, signals []SwingSignal, evidence []Sw
 }
 
 func BuildMarketSwings(exchange, market, symbol, interval string, report SwingReviewReport) []MarketSwing {
+	if report.ThresholdMode != "" && report.ThresholdMode != SwingThresholdPoints {
+		return nil
+	}
 	items := make([]MarketSwing, 0, len(report.Opportunities))
 	for _, opportunity := range report.Opportunities {
 		identity := fmt.Sprintf("%s|%s|%s|%s|%s|%g|%g|%d|%d|%s",
@@ -215,6 +245,51 @@ func SwingMoveBucket(movePoints float64) string {
 	}
 }
 
+func SwingMoveATRBucket(moveATR float64) string {
+	switch {
+	case moveATR >= 8:
+		return "8_plus_atr"
+	case moveATR >= 5:
+		return "5_8_atr"
+	case moveATR >= 3:
+		return "3_5_atr"
+	case moveATR >= 1.5:
+		return "1_5_3_atr"
+	default:
+		return "below_1_5_atr"
+	}
+}
+
+func swingMoveBucket(mode SwingThresholdMode, movePoints, moveATR float64) string {
+	if mode == SwingThresholdATR {
+		return SwingMoveATRBucket(moveATR)
+	}
+	return SwingMoveBucket(movePoints)
+}
+
+func swingMoveEligible(config SwingReviewConfig, movePoints, moveATR float64) bool {
+	if config.Mode == SwingThresholdATR {
+		return moveATR >= config.MinimumMoveATR
+	}
+	return movePoints >= config.MinimumMovePoints
+}
+
+func validateSwingReviewConfig(config SwingReviewConfig) error {
+	switch config.Mode {
+	case SwingThresholdPoints:
+		if config.MinimumMovePoints <= 0 || config.ReversalPoints <= 0 || config.ReversalPoints >= config.MinimumMovePoints {
+			return fmt.Errorf("invalid point swing review thresholds")
+		}
+	case SwingThresholdATR:
+		if config.ATRPeriod <= 0 || config.MinimumMoveATR <= 0 || config.ReversalATR <= 0 || config.ReversalATR >= config.MinimumMoveATR {
+			return fmt.Errorf("invalid ATR swing review thresholds")
+		}
+	default:
+		return fmt.Errorf("unsupported swing threshold mode %q", config.Mode)
+	}
+	return nil
+}
+
 func classifyMissedSwing(start swingPoint, end swingPoint, side strategy.SignalSide, evidence []SwingEvidence) (string, *SwingEvidence) {
 	cutoff := start.timeMS + (end.timeMS-start.timeMS)/5
 	priority := []struct{ source, classification string }{
@@ -240,15 +315,28 @@ func detectSwingPoints(bars []marketmodel.Kline, config SwingReviewConfig) ([]sw
 	if len(bars) == 0 {
 		return nil, nil
 	}
-	first, err := strconv.ParseFloat(bars[0].Close, 64)
+	startIndex := 0
+	atrValues := make([]float64, len(bars))
+	if config.Mode == SwingThresholdATR {
+		var err error
+		atrValues, startIndex, err = causalATR(bars, config.ATRPeriod)
+		if err != nil {
+			return nil, err
+		}
+		if startIndex < 0 {
+			return nil, nil
+		}
+	}
+	first, err := strconv.ParseFloat(bars[startIndex].Close, 64)
 	if err != nil {
 		return nil, err
 	}
-	pivot := swingPoint{bars[0].CloseTime, first}
+	pivot := swingPoint{timeMS: bars[startIndex].CloseTime, price: first, atr: atrValues[startIndex]}
 	extreme := pivot
 	direction := 0
 	points := []swingPoint{pivot}
-	for _, bar := range bars {
+	for index := startIndex; index < len(bars); index++ {
+		bar := bars[index]
 		high, e := strconv.ParseFloat(bar.High, 64)
 		if e != nil {
 			return nil, e
@@ -257,38 +345,86 @@ func detectSwingPoints(bars []marketmodel.Kline, config SwingReviewConfig) ([]sw
 		if e != nil {
 			return nil, e
 		}
+		minimumMove, reversal := swingThresholds(config, atrValues[index])
 		if direction == 0 {
-			if high-pivot.price >= config.MinimumMovePoints {
+			if high-pivot.price >= minimumMove {
 				direction = 1
-				extreme = swingPoint{bar.CloseTime, high}
-			} else if pivot.price-low >= config.MinimumMovePoints {
+				extreme = swingPoint{timeMS: bar.CloseTime, price: high, atr: atrValues[index]}
+			} else if pivot.price-low >= minimumMove {
 				direction = -1
-				extreme = swingPoint{bar.CloseTime, low}
+				extreme = swingPoint{timeMS: bar.CloseTime, price: low, atr: atrValues[index]}
 			}
 			continue
 		}
 		if direction > 0 {
 			if high > extreme.price {
-				extreme = swingPoint{bar.CloseTime, high}
-			} else if extreme.price-low >= config.ReversalPoints {
+				extreme = swingPoint{timeMS: bar.CloseTime, price: high, atr: atrValues[index]}
+			} else if extreme.price-low >= reversal {
 				points = append(points, extreme)
 				pivot = extreme
-				extreme = swingPoint{bar.CloseTime, low}
+				extreme = swingPoint{timeMS: bar.CloseTime, price: low, atr: atrValues[index]}
 				direction = -1
 			}
 		} else {
 			if low < extreme.price {
-				extreme = swingPoint{bar.CloseTime, low}
-			} else if high-extreme.price >= config.ReversalPoints {
+				extreme = swingPoint{timeMS: bar.CloseTime, price: low, atr: atrValues[index]}
+			} else if high-extreme.price >= reversal {
 				points = append(points, extreme)
 				pivot = extreme
-				extreme = swingPoint{bar.CloseTime, high}
+				extreme = swingPoint{timeMS: bar.CloseTime, price: high, atr: atrValues[index]}
 				direction = 1
 			}
 		}
 	}
-	if math.Abs(extreme.price-points[len(points)-1].price) >= config.MinimumMovePoints {
+	minimumMove, _ := swingThresholds(config, extreme.atr)
+	if math.Abs(extreme.price-points[len(points)-1].price) >= minimumMove {
 		points = append(points, extreme)
 	}
 	return points, nil
+}
+
+func swingThresholds(config SwingReviewConfig, atrValue float64) (float64, float64) {
+	if config.Mode == SwingThresholdATR {
+		return config.MinimumMoveATR * atrValue, config.ReversalATR * atrValue
+	}
+	return config.MinimumMovePoints, config.ReversalPoints
+}
+
+func causalATR(bars []marketmodel.Kline, period int) ([]float64, int, error) {
+	values := make([]float64, len(bars))
+	if len(bars) <= period {
+		return values, -1, nil
+	}
+	previousClose, err := strconv.ParseFloat(bars[0].Close, 64)
+	if err != nil {
+		return nil, -1, err
+	}
+	current := 0.0
+	for index := 1; index < len(bars); index++ {
+		high, highErr := strconv.ParseFloat(bars[index].High, 64)
+		low, lowErr := strconv.ParseFloat(bars[index].Low, 64)
+		closeValue, closeErr := strconv.ParseFloat(bars[index].Close, 64)
+		if highErr != nil {
+			return nil, -1, highErr
+		}
+		if lowErr != nil {
+			return nil, -1, lowErr
+		}
+		if closeErr != nil {
+			return nil, -1, closeErr
+		}
+		trueRange := math.Max(high-low, math.Max(math.Abs(high-previousClose), math.Abs(low-previousClose)))
+		if index <= period {
+			current += trueRange
+			if index == period {
+				current /= float64(period)
+				values[index] = current
+			}
+		} else {
+			current = (current*float64(period-1) + trueRange) / float64(period)
+			values[index] = current
+		}
+		previousClose = closeValue
+	}
+	return values, period, nil
 }

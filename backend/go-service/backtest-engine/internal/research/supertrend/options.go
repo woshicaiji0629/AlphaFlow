@@ -23,6 +23,7 @@ type commandOptions struct {
 	appendVersionRunID                                                              bool
 	runIDTag                                                                        string
 	skipPersist, scanSinglePosition, compareSupertrendVersions, logTradeDiagnostics bool
+	ribbonTrendV1                                                                   bool
 	swingReviewPath                                                                 string
 	swingMinimumPoints, swingReversalPoints                                         float64
 	stopReviewPath                                                                  string
@@ -91,6 +92,7 @@ func parseCommandOptions(args []string) (commandOptions, error) {
 	singlePositionScan := commandLine.Bool("single-position-scan", false, "compare staged single-position protection parameters in one replay")
 	supertrendVersionCompare := commandLine.Bool("supertrend-version-compare", false, "compare standard, SMA-ATR, adaptive, and AI Supertrend flips with identical single-position rules")
 	supertrendTradeDiagnostics := commandLine.Bool("supertrend-trade-diagnostics", false, "log standard Supertrend v4 flip decisions and completed trades")
+	ribbonTrendV1 := commandLine.Bool("ribbon-trend-v1", false, "run the causal EMA-ribbon and momentum expansion replay")
 	swingReviewPath := commandLine.String("swing-review-json", "", "write ETH swing opportunity and AI Supertrend coverage review JSON")
 	swingMinimumPoints := commandLine.Float64("swing-minimum-points", 30, "minimum absolute ETH price move included in the swing review")
 	swingReversalPoints := commandLine.Float64("swing-reversal-points", 10, "absolute ETH price reversal used to confirm a swing pivot")
@@ -119,6 +121,7 @@ func parseCommandOptions(args []string) (commandOptions, error) {
 		eventCooldownBars: *eventCooldownBars, counterTrend: signalresearch.CounterTrendConfig{WaitBars: *counterTrendWaitBars, StructureBars: *counterTrendStructureBars, MinVolumeRatio: *counterTrendMinVolumeRatio, SizeFactor: *counterTrendSizeFactor}, counterTrendEnabled: *counterTrendEnabled,
 		validationBars: *validationObservationBars, chop: signalresearch.ChopConfig{WindowBars: *chopWindowBars, MaxEfficiencyRatio: *chopMaxEfficiency, MaxADX: *chopMaxADX, MinFlips: *chopMinFlips, MaxNormalizedSlope: *chopMaxSlope, MaxRangeATR: *chopMaxRangeATR, MinVotes: *chopMinVotes, ConfirmBars: *chopConfirmBars, ExitBars: *chopExitBars, BreakoutVolumeRatio: *chopBreakoutVolumeRatio},
 		regimeAnalyzer: regimeAnalyzer, appendVersionRunID: *regimeAppendVersionRunID, runIDTag: *regimeRunIDTag, skipPersist: *researchSkipPersist, scanSinglePosition: *singlePositionScan, compareSupertrendVersions: *supertrendVersionCompare, logTradeDiagnostics: *supertrendTradeDiagnostics,
+		ribbonTrendV1:   *ribbonTrendV1,
 		swingReviewPath: *swingReviewPath, swingMinimumPoints: *swingMinimumPoints, swingReversalPoints: *swingReversalPoints, stopReviewPath: *stopReviewPath,
 	}, nil
 }

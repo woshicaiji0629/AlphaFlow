@@ -15,6 +15,7 @@ import (
 	"alphaflow/go-service/backtest-engine/internal/research/marketstructure"
 	"alphaflow/go-service/backtest-engine/internal/research/supertrend"
 	"alphaflow/go-service/backtest-engine/internal/research/swing"
+	"alphaflow/go-service/pkg/signalresearch"
 )
 
 const defaultConfigPath = "configs/supertrend-signal-research.ethusdt-20250801-20251101.toml"
@@ -49,12 +50,20 @@ func run(ctx context.Context, args []string) (any, error) {
 	case "swing":
 		flags := flag.NewFlagSet("market-research swing", flag.ContinueOnError)
 		configPath := flags.String("config", defaultConfigPath, "market data and ClickHouse config")
+		mode := flags.String("mode", "points", "swing threshold mode: points or atr")
 		minimumMovePoints := flags.Float64("minimum-move-points", 30, "minimum absolute price move")
 		reversalPoints := flags.Float64("reversal-points", 10, "absolute reversal used to confirm a pivot")
+		atrPeriod := flags.Int("atr-period", 14, "causal Wilder ATR period")
+		minimumMoveATR := flags.Float64("minimum-move-atr", 1.5, "minimum move as an ATR multiple")
+		reversalATR := flags.Float64("reversal-atr", 0.5, "reversal confirmation as an ATR multiple")
 		if err := flags.Parse(args[1:]); err != nil {
 			return nil, err
 		}
-		return swing.Run(ctx, *configPath, *minimumMovePoints, *reversalPoints)
+		return swing.Run(ctx, *configPath, signalresearch.SwingReviewConfig{
+			Mode:              signalresearch.SwingThresholdMode(*mode),
+			MinimumMovePoints: *minimumMovePoints, ReversalPoints: *reversalPoints,
+			ATRPeriod: *atrPeriod, MinimumMoveATR: *minimumMoveATR, ReversalATR: *reversalATR,
+		})
 	case "analysis":
 		flags := flag.NewFlagSet("market-research analysis", flag.ContinueOnError)
 		configPath := flags.String("config", defaultConfigPath, "market data and ClickHouse config")

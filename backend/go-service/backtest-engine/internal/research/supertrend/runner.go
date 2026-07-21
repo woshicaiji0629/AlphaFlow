@@ -29,6 +29,7 @@ func run(ctx context.Context, options commandOptions) error {
 	validationBarsText, chopConfig, regimeAnalyzer := options.validationBars, options.chop, options.regimeAnalyzer
 	appendVersionRunID, runIDTag, skipPersist := options.appendVersionRunID, options.runIDTag, options.skipPersist
 	scanSinglePosition, compareSupertrendVersions := options.scanSinglePosition, options.compareSupertrendVersions
+	ribbonTrendV1 := options.ribbonTrendV1
 	logTradeDiagnostics, swingReviewPath := options.logTradeDiagnostics, options.swingReviewPath
 	swingMinimumPoints, swingReversalPoints, stopReviewPath := options.swingMinimumPoints, options.swingReversalPoints, options.stopReviewPath
 	cfg, err := config.Load(configPath)
@@ -120,6 +121,13 @@ func run(ctx context.Context, options commandOptions) error {
 		return err
 	}
 	experimentItems := []experiments.Experiment{singlePositionExperiment}
+	if ribbonTrendV1 {
+		ribbonExperiment, err := experiments.NewRibbonTrendExperiment(singlePositionConfig)
+		if err != nil {
+			return err
+		}
+		experimentItems = append(experimentItems, ribbonExperiment)
+	}
 	if compareSupertrendVersions {
 		breakoutExperiment, err := experiments.NewBreakoutExperiment(singlePositionConfig)
 		if err != nil {

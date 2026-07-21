@@ -245,6 +245,41 @@ func regimeSkipReason(side strategy.SignalSide, regime marketregime.Result) stri
 
 func (r *SinglePositionReplay) SkipConflict() { r.summary.SkippedConflict++ }
 
+func (r *SinglePositionReplay) OpenSide() (strategy.SignalSide, bool) {
+	if r.position == nil {
+		return "", false
+	}
+	return r.position.side, true
+}
+
+// OpenReturnBps reports the gross return of the open position at the supplied
+// bar close. It is intended for causal, close-of-bar experiment exits.
+func (r *SinglePositionReplay) OpenReturnBps(bar marketmodel.Kline) (float64, bool, error) {
+	if r.position == nil {
+		return 0, false, nil
+	}
+	closePrice, err := parsePositivePrice("open return", bar.Close)
+	if err != nil {
+		return 0, false, err
+	}
+	return directionalReturnBps(r.position.side, r.position.entryPrice, closePrice), true, nil
+}
+
+func (r *SinglePositionReplay) CloseAtMarket(bar marketmodel.Kline, reason string) (bool, error) {
+	if r.position == nil {
+		return false, nil
+	}
+	closePrice, err := parsePositivePrice("market exit", bar.Close)
+	if err != nil {
+		return false, err
+	}
+	if bar.CloseTime <= 0 {
+		return false, fmt.Errorf("market exit close time must be positive")
+	}
+	r.close(directionalReturnBps(r.position.side, r.position.entryPrice, closePrice), bar.CloseTime, reason)
+	return true, nil
+}
+
 func (r *SinglePositionReplay) Finish() {
 	if r.position != nil && r.lastClose > 0 {
 		r.close(directionalReturnBps(r.position.side, r.position.entryPrice, r.lastClose), r.lastCloseTimeMS, "dataset_end")
