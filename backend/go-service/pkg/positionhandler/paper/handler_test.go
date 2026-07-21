@@ -173,7 +173,7 @@ func TestHandlerUsesSymbolCapabilityForContractQuantity(t *testing.T) {
 		}),
 		PositionStore: store,
 		EventStore:    store,
-		Broker:        execution.NewPaperBroker("10", func() int64 { return 2000 }),
+		Broker:        execution.NewPaperBroker("", func() int64 { return 2000 }),
 		SizingConfig: SizingConfig{
 			MarginQuote: 100,
 			Leverage:    1,
@@ -205,7 +205,10 @@ func TestHandlerUsesSymbolCapabilityForContractQuantity(t *testing.T) {
 			Interval: "3m",
 		},
 		Snapshots: map[string]strategy.Snapshot{
-			"3m": {Current: marketmodel.Kline{Close: "10"}},
+			"3m": {
+				Current:   marketmodel.Kline{Close: "10"},
+				Execution: &strategy.ExecutionView{Price: strategy.PriceView{LastPrice: "11"}, Time: 2000},
+			},
 		},
 		Positions: map[string]*strategy.Position{"supertrend": nil},
 	}
@@ -236,8 +239,11 @@ func TestHandlerUsesSymbolCapabilityForContractQuantity(t *testing.T) {
 	if currentPosition == nil {
 		t.Fatal("position = nil, want opened position")
 	}
-	if currentPosition.Size != 100 {
-		t.Fatalf("position size = %f, want 100 contracts", currentPosition.Size)
+	if currentPosition.Size != 90 {
+		t.Fatalf("position size = %f, want 90 contracts at next open price", currentPosition.Size)
+	}
+	if currentPosition.EntryPrice != "11" {
+		t.Fatalf("entry price = %q, want next bar open 11", currentPosition.EntryPrice)
 	}
 }
 

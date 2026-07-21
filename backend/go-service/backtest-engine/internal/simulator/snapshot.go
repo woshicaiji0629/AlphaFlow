@@ -188,6 +188,13 @@ func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok b
 		}
 		current := i.entry.Result.Klines[i.index]
 		i.index++
+		var next *marketmodel.Kline
+		if i.index < len(i.entry.Result.Klines) {
+			candidate := &i.entry.Result.Klines[i.index]
+			if candidate.OpenTime < i.entry.Result.End {
+				next = candidate
+			}
+		}
 		if !current.IsClosed {
 			return strategy.Context{}, false, fmt.Errorf("entry kline open_time=%d is not closed", current.OpenTime)
 		}
@@ -204,7 +211,7 @@ func (i *ContextIterator) Next(ctx context.Context) (item strategy.Context, ok b
 			i.Close()
 			return strategy.Context{}, false, nil
 		}
-		item, err := i.builder.buildAt(current)
+		item, err := i.builder.buildAt(current, next)
 		if errors.Is(err, errSnapshotNotReady) {
 			continue
 		}
@@ -377,7 +384,7 @@ func (s *replaySeriesState) peekPrepared(ctx context.Context) (*preparedIndicato
 	return s.next, nil
 }
 
-func (b *SnapshotBuilder) buildAt(current marketmodel.Kline) (strategy.Context, error) {
+func (b *SnapshotBuilder) buildAt(current marketmodel.Kline, next *marketmodel.Kline) (strategy.Context, error) {
 	if !current.IsClosed {
 		return strategy.Context{}, fmt.Errorf("entry kline open_time=%d is not closed", current.OpenTime)
 	}
@@ -388,7 +395,7 @@ func (b *SnapshotBuilder) buildAt(current marketmodel.Kline) (strategy.Context, 
 	intervals := snapshotIntervals(b.interval, b.confirmIntervals)
 	snapshots := make(map[string]strategy.Snapshot, len(intervals))
 	for _, interval := range intervals {
-		snapshot, err := b.buildIntervalSnapshot(interval, asOf, interval == b.interval, current)
+		snapshot, err := b.buildIntervalSnapshot(interval, asOf, interval == b.interval, current, next)
 		if err != nil {
 			return strategy.Context{}, err
 		}
@@ -404,6 +411,7 @@ func (b *SnapshotBuilder) buildIntervalSnapshot(
 	asOf int64,
 	entry bool,
 	entryKline marketmodel.Kline,
+	nextEntryKline *marketmodel.Kline,
 ) (strategy.Snapshot, error) {
 	state := b.stateByKey[reader.SeriesKey{Symbol: b.target.Symbol, Interval: interval}]
 	if state == nil || !state.ready {
@@ -421,6 +429,13 @@ func (b *SnapshotBuilder) buildIntervalSnapshot(
 	indicator := strategyframe.IndicatorView(state.latestIndicator)
 	window := state.latestWindow
 	updatedAt := maxInt64(indicator.UpdatedAt, window.UpdatedAt)
+	var execution *strategy.ExecutionView
+	if entry && nextEntryKline != nil && nextEntryKline.Open != "" {
+		execution = &strategy.ExecutionView{
+			Price: strategy.PriceView{LastPrice: nextEntryKline.Open},
+			Time:  nextEntryKline.OpenTime,
+		}
+	}
 	return strategy.Snapshot{
 		Target:    target,
 		Current:   current,
@@ -429,6 +444,7 @@ func (b *SnapshotBuilder) buildIntervalSnapshot(
 		Price: strategy.PriceView{
 			LastPrice: current.Close,
 		},
+		Execution: execution,
 		Health:    strategy.HealthView{OK: true, UpdatedAt: updatedAt},
 		AsOf:      asOf,
 		Trigger:   strategy.TriggerOnEntryClose,

@@ -192,8 +192,15 @@ func (s *Store) validateFreshMessage(envelope marketbus.SnapshotEnvelope) error 
 
 func (s *Store) degradedReason(item intervalState, requireRealtime bool) string {
 	now := s.now()
-	if requireRealtime && item.realtimeIndicator.UpdatedAt > 0 &&
-		item.realtimeIndicator.UpdatedAt+s.options.RealtimeStaleAge.Milliseconds() < now {
+	if requireRealtime && item.realtimeIndicator.UpdatedAt <= 0 {
+		return fmt.Sprintf("realtime missing for %s/%s/%s/%s",
+			item.target.Exchange,
+			item.target.Market,
+			item.target.Symbol,
+			item.target.Interval,
+		)
+	}
+	if requireRealtime && item.realtimeIndicator.UpdatedAt+s.options.RealtimeStaleAge.Milliseconds() < now {
 		return fmt.Sprintf("realtime stale for %s/%s/%s/%s",
 			item.target.Exchange,
 			item.target.Market,

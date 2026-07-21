@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -125,6 +126,54 @@ func TestMessageTriggersTargetOnlyForEntryClosedSnapshot(t *testing.T) {
 	if messageTriggersTarget(confirm, target) {
 		t.Fatal("confirm closed snapshot should update state without triggering target")
 	}
+}
+
+func TestHandleMarketSnapshotFailureWaitsForRedeliveryBeforeLimit(t *testing.T) {
+	bus := &recordingMarketInputBus{}
+	cfg := config.Config{MarketInput: config.MarketInputConfig{MaxDeliveries: 5}}
+	message := marketbus.SnapshotMessage{ID: "42", DeliveryCount: 4}
+
+	if err := handleMarketSnapshotFailure(context.Background(), cfg, bus, message, errors.New("publish failed")); err != nil {
+		t.Fatalf("handleMarketSnapshotFailure() error = %v", err)
+	}
+	if len(bus.acked) != 0 || len(bus.deadLettered) != 0 {
+		t.Fatalf("acked/dead-lettered = %v/%v, want neither before delivery limit", bus.acked, bus.deadLettered)
+	}
+}
+
+func TestHandleMarketSnapshotFailureDeadLettersAndAcksAtLimit(t *testing.T) {
+	bus := &recordingMarketInputBus{}
+	cfg := config.Config{MarketInput: config.MarketInputConfig{MaxDeliveries: 5}}
+	message := marketbus.SnapshotMessage{ID: "42", DeliveryCount: 5}
+
+	if err := handleMarketSnapshotFailure(context.Background(), cfg, bus, message, errors.New("publish failed")); err != nil {
+		t.Fatalf("handleMarketSnapshotFailure() error = %v", err)
+	}
+	if !reflect.DeepEqual(bus.acked, []string{"42"}) {
+		t.Fatalf("acked = %v, want [42]", bus.acked)
+	}
+	if !reflect.DeepEqual(bus.deadLettered, []string{"42:publish failed"}) {
+		t.Fatalf("dead-lettered = %v, want processing failure", bus.deadLettered)
+	}
+}
+
+type recordingMarketInputBus struct {
+	acked        []string
+	deadLettered []string
+}
+
+func (b *recordingMarketInputBus) ReadSnapshots(context.Context) ([]marketbus.SnapshotMessage, error) {
+	return nil, nil
+}
+
+func (b *recordingMarketInputBus) Ack(_ context.Context, ids ...string) error {
+	b.acked = append(b.acked, ids...)
+	return nil
+}
+
+func (b *recordingMarketInputBus) DeadLetter(_ context.Context, message marketbus.SnapshotMessage, reason string) error {
+	b.deadLettered = append(b.deadLettered, message.ID+":"+reason)
+	return nil
 }
 
 type fakeHashReader struct{}

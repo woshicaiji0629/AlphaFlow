@@ -25,6 +25,7 @@ type fakeStore struct {
 	klines            int64
 	lastPrices        int64
 	lastPriceBySymbol map[string]model.LastPrice
+	lastPriceBlock    <-chan struct{}
 	bookTickers       int64
 	rangeKlines       []model.Kline
 	upsertKlineErrors []error
@@ -163,7 +164,14 @@ func (s *fakeStore) SetOpenInterest(context.Context, model.OpenInterest) error {
 	return nil
 }
 
-func (s *fakeStore) SetLastPrice(_ context.Context, price model.LastPrice) error {
+func (s *fakeStore) SetLastPrice(ctx context.Context, price model.LastPrice) error {
+	if s.lastPriceBlock != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.lastPriceBlock:
+		}
+	}
 	atomic.AddInt64(&s.lastPrices, 1)
 	s.mu.Lock()
 	if s.lastPriceBySymbol == nil {
@@ -878,7 +886,7 @@ func TestStatsTracksEventLatencyAndOutOfOrderEvents(t *testing.T) {
 		}
 	}
 	now = time.UnixMilli(10_025)
-	if err := c.processEvent(context.Background(), <-c.eventQueue); err != nil {
+	if err := c.processEvent(context.Background(), <-c.events.queue); err != nil {
 		t.Fatalf("processEvent: %v", err)
 	}
 
@@ -964,9 +972,9 @@ func TestCollectorRetainsBoundedKlineVersions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c.klineVersionMu.Lock()
-	got := len(c.klineVersions["binance:um:ETHUSDT:1m"])
-	c.klineVersionMu.Unlock()
+	c.klines.versionMu.Lock()
+	got := len(c.klines.versions["binance:um:ETHUSDT:1m"])
+	c.klines.versionMu.Unlock()
 	if got != klineVersionRetention {
 		t.Fatalf("retained versions = %d, want %d", got, klineVersionRetention)
 	}
@@ -1038,6 +1046,36 @@ func TestCollectorDetectsClosedKlineGapFromStartupCursor(t *testing.T) {
 	}
 }
 
+func TestStartupCursorAndRealtimeContinuityAreConcurrentSafe(t *testing.T) {
+	const minute = int64(time.Minute / time.Millisecond)
+	c := New(testOptions(), &fakeREST{}, nil, &fakeStore{})
+	base := model.Kline{Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m", IsClosed: true}
+
+	var wg sync.WaitGroup
+	for index := int64(1); index <= 100; index++ {
+		kline := base
+		kline.OpenTime = index * minute
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			c.rememberStoredKlines([]model.Kline{kline}, klineSourceStartupREST, false)
+		}()
+		go func() {
+			defer wg.Done()
+			c.recordKlineContinuity(context.Background(), kline)
+		}()
+	}
+	wg.Wait()
+
+	streamKey := klineStreamKey(base)
+	c.klines.continuityMu.Lock()
+	got := c.klines.lastClosedOpenTimes[streamKey]
+	c.klines.continuityMu.Unlock()
+	if got != 100*minute {
+		t.Fatalf("last closed open time = %d, want %d", got, 100*minute)
+	}
+}
+
 func TestCollectorGapPublishFailureDoesNotFailKlineStore(t *testing.T) {
 	const minute = int64(time.Minute / time.Millisecond)
 	options := testOptions()
@@ -1085,8 +1123,8 @@ func TestLatestEventBypassesFullCriticalQueue(t *testing.T) {
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
 	}, &fakeREST{}, nil, &fakeStore{})
-	c.eventQueue = make(chan collectorEvent, 1)
-	c.eventQueue <- collectorEvent{eventType: collectorEventKline}
+	c.events.queue = make(chan collectorEvent, 1)
+	c.events.queue <- collectorEvent{eventType: collectorEventKline}
 
 	startedAt := time.Now()
 	err := c.HandleLastPrice(context.Background(), model.LastPrice{
@@ -1100,10 +1138,10 @@ func TestLatestEventBypassesFullCriticalQueue(t *testing.T) {
 	if time.Since(startedAt) > 500*time.Millisecond {
 		t.Fatal("latest event should bypass full critical queue")
 	}
-	if len(c.eventQueue) != 1 {
-		t.Fatalf("queue length = %d, want 1", len(c.eventQueue))
+	if len(c.events.queue) != 1 {
+		t.Fatalf("queue length = %d, want 1", len(c.events.queue))
 	}
-	if got := len(c.latestEvents); got != 1 {
+	if got := len(c.events.latest); got != 1 {
 		t.Fatalf("latest events = %d, want 1", got)
 	}
 }
@@ -1119,8 +1157,8 @@ func TestCriticalEventWaitsWhenQueueIsFull(t *testing.T) {
 		OpenInterestInterval: time.Minute,
 		MarkPriceInterval:    "1s",
 	}, &fakeREST{}, nil, &fakeStore{})
-	c.eventQueue = make(chan collectorEvent, 1)
-	c.eventQueue <- collectorEvent{eventType: collectorEventLastPrice}
+	c.events.queue = make(chan collectorEvent, 1)
+	c.events.queue <- collectorEvent{eventType: collectorEventLastPrice}
 
 	done := make(chan error, 1)
 	go func() {
@@ -1139,7 +1177,7 @@ func TestCriticalEventWaitsWhenQueueIsFull(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	<-c.eventQueue
+	<-c.events.queue
 	select {
 	case err := <-done:
 		if err != nil {
@@ -1161,7 +1199,7 @@ func TestWaitForEventDrainCompletesWithinTimeout(t *testing.T) {
 	if !c.waitForEventDrain(time.Second) {
 		t.Fatal("waitForEventDrain timed out")
 	}
-	if pending := c.eventPending.Load(); pending != 0 {
+	if pending := c.events.pending.Load(); pending != 0 {
 		t.Fatalf("pending = %d, want 0", pending)
 	}
 }
@@ -1180,6 +1218,28 @@ func TestWaitForEventDrainTimesOutAndCanBeReused(t *testing.T) {
 	c.completePendingEvent()
 	if !c.waitForEventDrain(20 * time.Millisecond) {
 		t.Fatal("waitForEventDrain did not recover after pending event completed")
+	}
+}
+
+func TestLatestEventFinalFlushUsesDrainTimeout(t *testing.T) {
+	blocked := make(chan struct{})
+	store := &fakeStore{lastPriceBlock: blocked}
+	options := testOptions()
+	options.EventDrainTimeout = 20 * time.Millisecond
+	c := New(options, &fakeREST{}, nil, store)
+	if err := c.HandleLastPrice(context.Background(), model.LastPrice{Exchange: "binance", Market: "um", Symbol: "ETHUSDT"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	c.runLatestEventFlusher(ctx)
+	if elapsed := time.Since(startedAt); elapsed < 15*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("final flush elapsed = %s, want bounded timeout", elapsed)
+	}
+	if stats := c.Stats(); stats.ProcessEventErrors != 1 {
+		t.Fatalf("process event errors = %d, want 1", stats.ProcessEventErrors)
 	}
 }
 

@@ -20,6 +20,7 @@ func buildCollectors(
 	marketStore *store.MarketStore,
 	reconnectDelay time.Duration,
 	gapPublisher collector.GapPublisher,
+	aggregationRules []aggregator.Rule,
 ) []*collector.Collector {
 	httpClient := httpclient.New()
 	collectors := []*collector.Collector{}
@@ -36,7 +37,7 @@ func buildCollectors(
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Binance.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
-				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "binance"),
+				StartupDerivedRules:  rulesForExchange(aggregationRules, "binance"),
 				GapPublisher:         gapPublisher,
 			},
 			binance.NewRESTClient(config.BinanceRESTBase(), httpClient),
@@ -58,7 +59,7 @@ func buildCollectors(
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Gate.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
-				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "gate"),
+				StartupDerivedRules:  rulesForExchange(aggregationRules, "gate"),
 				GapPublisher:         gapPublisher,
 			},
 			gate.NewRESTClient(config.GateRESTBase(), config.GateSettle(), httpClient),
@@ -81,7 +82,7 @@ func buildCollectors(
 				WebSocketConnections: cfg.Bitget.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
 				BackfillIntervals:    bitgetBackfillIntervals,
-				StartupDerivedRules:  rulesExceptTarget(aggregationRules(cfg), "bitget", "3m"),
+				StartupDerivedRules:  rulesExceptTarget(aggregationRules, "bitget", "3m"),
 				GapPublisher:         gapPublisher,
 			},
 			bitget.NewRESTClient(config.BitgetRESTBase(), config.BitgetProductType(), httpClient),
@@ -102,7 +103,7 @@ func buildCollectors(
 				MarkPriceInterval:    config.MarkPriceInterval(),
 				WebSocketConnections: cfg.Bybit.WebSocketConnections,
 				StartupLookback:      config.KlineLimit(),
-				StartupDerivedRules:  rulesForExchange(aggregationRules(cfg), "bybit"),
+				StartupDerivedRules:  rulesForExchange(aggregationRules, "bybit"),
 				GapPublisher:         gapPublisher,
 			},
 			bybit.NewRESTClient(config.BybitRESTBase(), config.BybitCategory(), httpClient),

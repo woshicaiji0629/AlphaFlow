@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,7 +73,7 @@ func main() {
 	}
 	results = append(results, exchangeSymbols{Name: "bybit", Symbols: bybitSymbols})
 
-	if err := os.WriteFile(*output, []byte(renderConfig(results)), 0o644); err != nil {
+	if err := writeFileAtomically(*output, []byte(renderConfig(results)), 0o644); err != nil {
 		exitWithError("write config failed", "path", *output, "error", err)
 	}
 
@@ -80,6 +81,37 @@ func main() {
 		fmt.Printf("%s symbols=%d first=%s\n", result.Name, len(result.Symbols), firstSymbol(result.Symbols))
 	}
 	fmt.Printf("wrote %s\n", *output)
+}
+
+func writeFileAtomically(path string, data []byte, mode os.FileMode) (err error) {
+	dir := filepath.Dir(path)
+	temporary, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() {
+		_ = temporary.Close()
+		if err != nil {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err = temporary.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err = temporary.Write(data); err != nil {
+		return err
+	}
+	if err = temporary.Sync(); err != nil {
+		return err
+	}
+	if err = temporary.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func setupLogger() {

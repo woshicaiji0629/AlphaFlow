@@ -47,6 +47,7 @@ func TestExecutorOpensBacktestPosition(t *testing.T) {
 					Close:    "100",
 					OpenTime: 1000,
 				},
+				Execution: &strategy.ExecutionView{Price: strategy.PriceView{LastPrice: "100"}, Time: 2000},
 			},
 		},
 	}})
@@ -128,6 +129,9 @@ func TestExecutorIncrementalRetainsEventStateWithoutMaterializingHistory(t *test
 	}
 	for _, event := range store.Events() {
 		want := event.BarOpenTime + 999
+		if event.EventType != strategy.EventTypeSignalGenerated {
+			want = event.BarOpenTime + 1000
+		}
 		if event.EventTime != want || event.CreatedAt != want {
 			t.Fatalf("event time = %d/%d, want %d for bar open time %d", event.EventTime, event.CreatedAt, want, event.BarOpenTime)
 		}
@@ -160,8 +164,12 @@ func TestExecutorPreservesConfiguredClock(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	for _, event := range store.Events() {
-		if event.EventTime != 4242 || event.CreatedAt != 4242 {
-			t.Fatalf("event time = %d/%d, want configured time 4242", event.EventTime, event.CreatedAt)
+		want := int64(2000)
+		if event.EventType == strategy.EventTypeSignalGenerated {
+			want = 4242
+		}
+		if event.EventTime != want || event.CreatedAt != want {
+			t.Fatalf("event time = %d/%d, want %d", event.EventTime, event.CreatedAt, want)
 		}
 	}
 }
@@ -257,6 +265,64 @@ func TestExecutorTracksBarEquityCurveWithUnrealizedPnL(t *testing.T) {
 	}
 	if second.RealizedPnL != 0 || second.UnrealizedPnL != 10 || second.Equity != 10 {
 		t.Fatalf("second equity point = %#v, want unrealized/equity 10", second)
+	}
+}
+
+func TestExecutorAlignsPostFillEquityToNextOpen(t *testing.T) {
+	store := position.NewMemoryStore()
+	executor, err := NewExecutor(ExecutorOptions{
+		Engine: strategy.NewEngine([]strategy.Strategy{fixedStrategy{
+			name: "fixed", signalSide: strategy.SignalSideBuy, confidence: 0.9,
+		}}),
+		Store: store,
+		ManagerConfig: position.ManagerConfig{
+			MarginQuote: 100, Leverage: 1, MaxPositionSize: 10, MinOpenConfidence: 0.5,
+		},
+		SizingConfig:  paper.SizingConfig{MarginQuote: 100, Leverage: 1},
+		AccountConfig: AccountConfig{InitialEquity: 1000, MarginQuote: 100, Leverage: 1},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	input := executorTestContext("ETHUSDT", 1000, "100")
+	snapshot := input.Snapshots["3m"]
+	snapshot.Execution = &strategy.ExecutionView{Price: strategy.PriceView{LastPrice: "110"}, Time: 2000}
+	input.Snapshots["3m"] = snapshot
+
+	summary, err := executor.Execute(context.Background(), []strategy.Context{input})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	bar := summary.BarEquityCurve[0]
+	if bar.Time != 2000 || bar.Price != 110 || bar.UnrealizedPnL != 0 {
+		t.Fatalf("bar equity = %#v, want next-open mark at entry price", bar)
+	}
+	account := summary.AccountCurve[0]
+	if account.Time != 2000 || account.UnrealizedPnL != 0 || account.Equity != 1000 {
+		t.Fatalf("account equity = %#v, want next-open mark at entry price", account)
+	}
+}
+
+func TestRealizedPnLFromEventsDoesNotDoubleCountEntryFee(t *testing.T) {
+	events := []strategy.StrategyEvent{
+		{EventType: strategy.EventTypeOrderFilled, PnL: "-1", Metadata: map[string]string{"cashflow": "-1"}},
+		{EventType: strategy.EventTypeOrderFilled, PnL: "8", Metadata: map[string]string{"cashflow": "9"}},
+	}
+
+	if got := realizedPnLFromEvents(events); got != 8 {
+		t.Fatalf("realized PnL = %v, want 8", got)
+	}
+}
+
+func TestContextForStrategyEvaluationHidesBacktestExecution(t *testing.T) {
+	input := executorTestContext("ETHUSDT", 1000, "100")
+	evaluation := contextForStrategyEvaluation(input)
+
+	if evaluation.Snapshots["3m"].Execution != nil {
+		t.Fatalf("evaluation execution = %#v, want hidden from strategy", evaluation.Snapshots["3m"].Execution)
+	}
+	if input.Snapshots["3m"].Execution == nil {
+		t.Fatal("original execution was mutated")
 	}
 }
 
@@ -521,6 +587,49 @@ func TestExecutorLiquidatesAccountWhenEquityFallsToZero(t *testing.T) {
 	}
 }
 
+func TestExecutorLiquidatesAccountOnIntrabarAdverseMove(t *testing.T) {
+	store := position.NewMemoryStore()
+	executor, err := NewExecutor(ExecutorOptions{
+		Engine: strategy.NewEngine([]strategy.Strategy{fixedStrategy{
+			name: "fixed", signalSide: strategy.SignalSideBuy, confidence: 0.9,
+		}}),
+		Store: store,
+		ManagerConfig: position.ManagerConfig{
+			MarginQuote: 100, Leverage: 2, MaxPositionSize: 10, MinOpenConfidence: 0.5,
+		},
+		SizingConfig:  paper.SizingConfig{MarginQuote: 100, Leverage: 2},
+		AccountConfig: AccountConfig{InitialEquity: 100, MarginQuote: 100, Leverage: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewExecutor() error = %v", err)
+	}
+	first := executorTestContext("ETHUSDT", 1000, "100")
+	second := executorTestContext("ETHUSDT", 2000, "100")
+	second.Snapshots["3m"] = strategy.Snapshot{
+		Current: marketmodel.Kline{Open: "100", High: "100", Low: "0.01", Close: "100", OpenTime: 2000, CloseTime: 2999},
+		AsOf:    2999,
+	}
+
+	summary, err := executor.Execute(context.Background(), []strategy.Context{first, second})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	last := summary.AccountCurve[len(summary.AccountCurve)-1]
+	if !last.Liquidated || last.Equity != 0 {
+		t.Fatalf("last account point = %#v, want intrabar liquidation", last)
+	}
+	if summary.OpenPositions != 0 {
+		t.Fatalf("open positions = %d, want 0 after intrabar liquidation", summary.OpenPositions)
+	}
+	trades, err := BuildBacktestTrades(store.Events())
+	if err != nil {
+		t.Fatalf("BuildBacktestTrades() error = %v", err)
+	}
+	if len(trades) != 1 || trades[0].ExitReason != "liquidation" || trades[0].ExitPrice != "0.01" {
+		t.Fatalf("liquidation trades = %#v, want one trade closed at adverse low", trades)
+	}
+}
+
 func executorTestContext(symbol string, openTime int64, close string) strategy.Context {
 	return strategy.Context{
 		Target: strategy.Target{
@@ -538,7 +647,8 @@ func executorTestContext(symbol string, openTime int64, close string) strategy.C
 					OpenTime:  openTime,
 					CloseTime: openTime + 999,
 				},
-				AsOf: openTime + 999,
+				Execution: &strategy.ExecutionView{Price: strategy.PriceView{LastPrice: close}, Time: openTime + 1000},
+				AsOf:      openTime + 999,
 			},
 		},
 	}

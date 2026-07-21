@@ -70,7 +70,11 @@ Redis 只承担缓存和当前状态，不承担队列。`market-data` 仍会写
 
 ```text
 market-data/
-  cmd/market-data/           # 进程入口
+  cmd/market-data/           # 正式服务入口
+  cmd/market-data-admin/     # 数据检查、回填和维护命令
+  cmd/market-data-symbols/   # 生成交易对配置
+  cmd/market-data-loadtest/  # Collector 事件吞吐负载测试
+  cmd/market-data-indicator-loadtest/ # 指标计算负载测试
   configs/                   # 本地 TOML 配置
   internal/app/              # 运行时组装和 goroutine 编排
   internal/collector/        # REST 启动、WebSocket 同步、轮询任务
@@ -85,7 +89,7 @@ market-data/
 `market-data/internal` 的核心包按运行职责拆分，避免单文件同时承载编排、IO、缓存和计算逻辑：
 
 - `internal/app`：`app.go` 保留进程入口编排；`runtime.go` 负责 Redis、store、collector、aggregator、indicator runner、health runner 和 market snapshot publisher 的组装；`collectors.go` 和 `rules.go` 分别承载交易所 collector 构造和规则生成。
-- `internal/collector`：`collector.go` 保留类型、配置和 `Run` 主循环；`websocket.go`、`polling.go`、`backfill.go`、`event_queue.go`、`handlers.go`、`status.go` 分别承载 WebSocket、轮询、补偿、事件队列、事件处理和状态写入。
+- `internal/collector`：`collector.go` 保留类型、配置和 `Run` 主循环；`event.go` 负责事件接收和处理；`event_queue.go` 只负责队列、latest 合并与排空；`kline_state.go` 负责 K 线版本、连续性和 gap 状态；`websocket.go`、`polling.go`、`backfill.go`、`handlers.go`、`status.go` 分别承载 WebSocket、轮询、补偿、事件处理和状态写入。事件态与 K 线态各自持有锁，避免一个大状态对象同时承担无关并发职责。
 - `internal/indicator`：`runner.go` 保留 runner 类型和主计算流程；`runner_queue.go` 负责 NATS 指标任务队列消费；`window_cache.go` 负责 K 线窗口缓存、增量推进和 realtime 临时窗口；`snapshot.go` 负责 closed/realtime market snapshot 发布和指标窗口快照复用。
 - `internal/store`：`market_store.go` 保留 `MarketStore` 聚合入口；`market_kline.go`、`market_latest.go`、`market_indicator.go`、`market_status.go`、`market_clickhouse.go` 按数据域拆分 Redis/ClickHouse 边界；`redis_store.go` 保留 Redis store 类型和构造，具体 Redis 写入拆到 `redis_kline.go`、`redis_latest.go`、`redis_indicator.go`、`redis_status.go` 和 `redis_liquidation.go`。
 
@@ -123,6 +127,10 @@ backend/go-service/pkg/
 - 一个可选的指标冷启动任务进程内 worker。
 
 Collector 运行在重启循环中。聚合器和指标 runner 按固定扫描间隔运行。Context cancellation 会停止所有长时间运行的循环。
+
+`internal/app` 使用单一 runtime 对象持有 store、collector、runner、publisher 和后台 worker，并由一个幂等 `Close` 入口按依赖逆序释放资源。Collector 收到取消信号后会先停止接收新事件，再在配置的 `event_drain_timeout` 内处理队列和 latest 合并事件；超时后返回，避免关闭过程无限等待。未显式配置时 Collector 使用 10 秒默认排空时间。
+
+辅助入口不参与正式服务编排：两个 loadtest 使用内存或模拟依赖；admin 命令自行管理所需连接；`market-data-symbols` 在目标配置同目录写临时文件，完成 flush/close 后通过 rename 原子替换，写入失败不会截断已有配置。
 
 当 `MarketBus.Enabled=true` 时，`internal/app/runtime.go` 会创建 `marketbus.NATSPublisher`，并把 publisher 和默认 TTL 传入 indicator runner。Indicator runner 在 closed K 线计算完成后发布 `market.snapshot.closed`，在当前未收盘 K 线实时计算完成后发布 `market.snapshot.realtime`。如果 publisher 构造失败，服务启动失败并关闭已创建的 store 资源。
 

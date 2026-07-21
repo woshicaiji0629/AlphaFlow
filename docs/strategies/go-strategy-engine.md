@@ -190,6 +190,7 @@ backend/go-service/pkg/execution/paper.go
 - 根据回测配置读取历史 K 线
 - 支持多 symbol 和入场/确认多周期数据集
 - 对缺失的必要周期返回显式错误
+- 在正式回测读取路径拒绝重复 `OpenTime`，避免同一根行情被重复计算或执行
 - 为回测 simulator 提供按 `exchange + market + symbol + interval` 索引的历史序列
 
 关键文件：
@@ -212,6 +213,13 @@ backend/go-service/backtest-engine/internal/reader/reader.go
 - 指标窗口分析按策略读取惰性执行，并按最新 close time 缓存
 - 通过 context cancellation 响应 SIGINT/SIGTERM，长回测可安全停止
 - 回测进度同时按里程碑和最长 10 秒间隔输出，并包含处理速率、elapsed 和 ETA
+- 信号只读取当前已闭合 K 线；普通策略订单使用下一根 K 线开盘价和开盘时间成交
+- 下一开盘执行信息通过 `Snapshot.Execution` 单独携带，并在调用策略前移除，策略不能读取未来开盘价
+- 最后一根 K 线没有下一开盘时只产生决策，不执行普通订单；当前 K 线内已生效的风险退出仍可执行
+- 成交后的逐 K 和账户权益使用实际执行时点及执行价格估值，避免跳空被错误计入未实现收益
+- 清算检查使用当前 OHLC 对账户最不利的可达价格；清算会生成 `exit_reason=liquidation` 的成交事件并关闭仓位
+- `order_filled` 的 `cashflow` 表示本次成交现金流，权益累计优先使用该字段，避免入场手续费重复扣除
+- 移动止损只允许进入当前 K 线前已经生效的参考价触发；当前 K 线形成的新参考价从下一根 K 线生效
 
 关键文件：
 
@@ -231,6 +239,8 @@ backend/go-service/configs/backtest-engine.ethusdt-1y.toml
 ```
 
 性能判断以预编译二进制、真实多周期数据和结构化进度日志为准；`go run` 包含编译时间，短样本还会被各周期 warmup 占比放大，不适合直接线性外推年度耗时。
+
+`backtest-engine/cmd/supertrend-signal-research` 是独立研究回放，不等同正式账户回测。其回测作用域入场同样使用 `Snapshot.Execution` 的下一开盘价和时间，最后一根没有执行视图时不建仓；但账户保证金、清算和事件持久化仍以正式 `backtest-engine` 报告为准。`forward-market-label-research` 和 `market-structure-regime-research` 使用当前收盘价作为未来标签基准，输出是研究标签而不是可成交收益。
 
 ### `pkg/positionhandler/paper`
 
@@ -348,6 +358,8 @@ realtime_stale_after: 15s
 
 `market.snapshot.closed` 携带已收盘底层指标和窗口特征；`market.snapshot.realtime` 携带当前未收盘 K 线、实时指标和价格上下文。Redis `indwin` / `indrt` 仍作为启动恢复、故障恢复、观测和兼容缓存。
 
+策略引擎逐条处理 market snapshot。单条处理失败且尚未达到 `max_deliveries` 时不 Ack，等待 JetStream 重新投递，同时继续消费其他消息；达到最大投递次数后先发布到 dead-letter subject，再 Ack 原消息。dead-letter 发布或 Ack 失败会终止消费循环，避免静默丢失。
+
 ### `strategy-engine/internal/marketstate`
 
 职责：
@@ -356,7 +368,7 @@ realtime_stale_after: 15s
 - 启动后应用 NATS market snapshot 更新进程内市场态。
 - 按 target 和确认周期构造策略运行所需的 `strategy.Context`。
 - 校验消息实时性，拒绝过期、过旧和低版本 open time / updated at 消息覆盖内存态。
-- 判断行情输入是否降级，并把降级原因交给 runner。
+- 判断行情输入是否降级，并把降级原因交给 runner；入场周期的实时指标完全缺失或超过 stale 时间都属于降级，确认周期只要求闭合窗口。
 
 关键文件：
 

@@ -3,7 +3,9 @@ package simulator
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
 
 	"alphaflow/go-service/backtest-engine/internal/report"
 	"alphaflow/go-service/pkg/execution"
@@ -167,13 +169,14 @@ func (e *Executor) execute(
 	for index := 0; index < len(contexts); {
 		batchEnd := nextContextBatch(contexts, index)
 		batch := contexts[index:batchEnd]
+		equityBatch := append([]strategy.Context(nil), batch...)
 		if e.account != nil {
 			e.refreshAccountPrices(batch)
-			if err := e.liquidateIfNeeded(ctx, batch[0]); err != nil {
+			if err := e.liquidateIfNeeded(ctx, batch); err != nil {
 				return ExecutionSummary{}, err
 			}
 		}
-		for _, item := range batch {
+		for batchIndex, item := range batch {
 			if err := ctx.Err(); err != nil {
 				return ExecutionSummary{}, err
 			}
@@ -182,7 +185,7 @@ func (e *Executor) execute(
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
-			decision, err := e.engine.Evaluate(ctx, input)
+			decision, err := e.engine.Evaluate(ctx, contextForStrategyEvaluation(input))
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
@@ -210,7 +213,12 @@ func (e *Executor) execute(
 				e.account.ApplyEvents(newEvents)
 			}
 			state.eventCursor = nextEventCursor
-			point, ok, err := e.barEquityPoint(ctx, item, state.realizedPnL)
+			equityItem := item
+			if hasExecutionFill(item, newEvents) {
+				equityItem = executionAlignedContext(item)
+				equityBatch[batchIndex] = equityItem
+			}
+			point, ok, err := e.barEquityPoint(ctx, equityItem, state.realizedPnL)
 			if err != nil {
 				return ExecutionSummary{}, err
 			}
@@ -226,7 +234,10 @@ func (e *Executor) execute(
 				e.progress(e.processed, total, summary.OrderFills)
 			}
 		}
-		accountPoint, ok, err := e.accountEquityPoint(ctx, batch[0])
+		if e.account != nil {
+			e.refreshAccountPrices(equityBatch)
+		}
+		accountPoint, ok, err := e.accountEquityPoint(ctx, equityBatch[0])
 		if err != nil {
 			return ExecutionSummary{}, err
 		}
@@ -257,6 +268,52 @@ func (e *Executor) execute(
 		summary.OpenPositions = len(positions)
 	}
 	return summary, nil
+}
+
+func executionAlignedContext(item strategy.Context) strategy.Context {
+	snapshot, ok := item.Snapshots[item.Target.Interval]
+	if !ok || snapshot.Execution == nil || snapshot.Execution.Price.LastPrice == "" || snapshot.Execution.Time <= 0 {
+		return item
+	}
+	aligned := item
+	aligned.Snapshots = make(map[string]strategy.Snapshot, len(item.Snapshots))
+	for interval, current := range item.Snapshots {
+		aligned.Snapshots[interval] = current
+	}
+	snapshot.Current.Close = snapshot.Execution.Price.LastPrice
+	snapshot.Current.OpenTime = snapshot.Execution.Time
+	snapshot.Current.CloseTime = snapshot.Execution.Time
+	aligned.Snapshots[item.Target.Interval] = snapshot
+	return aligned
+}
+
+func hasExecutionFill(item strategy.Context, events []strategy.StrategyEvent) bool {
+	snapshot, ok := item.Snapshots[item.Target.Interval]
+	if !ok || snapshot.Execution == nil || snapshot.Execution.Time <= 0 {
+		return false
+	}
+	for _, event := range events {
+		if event.EventType == strategy.EventTypeOrderFilled &&
+			event.Symbol == item.Target.Symbol &&
+			event.BarOpenTime == snapshot.Current.OpenTime &&
+			event.EventTime == snapshot.Execution.Time {
+			return true
+		}
+	}
+	return false
+}
+
+func contextForStrategyEvaluation(input strategy.Context) strategy.Context {
+	if input.Target.Scope != strategy.PositionScopeBacktest {
+		return input
+	}
+	filtered := input
+	filtered.Snapshots = make(map[string]strategy.Snapshot, len(input.Snapshots))
+	for interval, snapshot := range input.Snapshots {
+		snapshot.Execution = nil
+		filtered.Snapshots[interval] = snapshot
+	}
+	return filtered
 }
 
 func (e *Executor) setContextTime(item strategy.Context) {
@@ -327,18 +384,119 @@ func (e *Executor) refreshAccountPrices(contexts []strategy.Context) {
 	}
 }
 
-func (e *Executor) liquidateIfNeeded(ctx context.Context, item strategy.Context) error {
+func (e *Executor) liquidateIfNeeded(ctx context.Context, batch []strategy.Context) error {
 	if e.account == nil {
 		return nil
 	}
-	point, ok, err := e.accountEquityPoint(ctx, item)
-	if err != nil || !ok {
+	if len(batch) == 0 {
+		return nil
+	}
+	item := batch[0]
+	positions, err := e.store.ListPositions(ctx, position.Filter{
+		Scope:    item.Target.Scope,
+		RunID:    item.Target.RunID,
+		Account:  item.Target.Account,
+		Exchange: item.Target.Exchange,
+		Market:   item.Target.Market,
+	})
+	if err != nil {
 		return err
 	}
+	point, liquidationPrices, ok := e.account.SnapshotWorstBar(batch, positions)
+	if !ok {
+		return nil
+	}
 	if point.Liquidated {
+		if err := e.appendLiquidationEvents(ctx, batch, positions, liquidationPrices); err != nil {
+			return err
+		}
 		return e.clearBacktestPositions(ctx, item.Target)
 	}
 	return nil
+}
+
+func (e *Executor) appendLiquidationEvents(ctx context.Context, batch []strategy.Context, positions []strategy.Position, liquidationPrices map[string]float64) error {
+	snapshots := make(map[string]strategy.Snapshot, len(batch))
+	for _, item := range batch {
+		if snapshot, ok := item.Snapshots[item.Target.Interval]; ok {
+			snapshots[item.Target.Symbol] = snapshot
+		}
+	}
+	events := make([]strategy.StrategyEvent, 0, len(positions))
+	for _, currentPosition := range positions {
+		snapshot, ok := snapshots[currentPosition.Symbol]
+		if !ok {
+			continue
+		}
+		priceValue, ok := liquidationPrices[currentPosition.Symbol]
+		if !ok || priceValue <= 0 {
+			priceValue, ok = liquidationPrice(currentPosition, snapshot)
+		}
+		entryPrice, entryOK := parseExecutorFloat(currentPosition.EntryPrice)
+		if !ok || !entryOK || currentPosition.Size <= 0 {
+			continue
+		}
+		grossPnL := (priceValue - entryPrice) * currentPosition.Size
+		if currentPosition.Side == strategy.PositionSideShort {
+			grossPnL = (entryPrice - priceValue) * currentPosition.Size
+		}
+		entryFee := liquidationFee(entryPrice*currentPosition.Size, e.account.config)
+		exitFee := liquidationFee(priceValue*currentPosition.Size, e.account.config)
+		eventTime := snapshot.Current.CloseTime
+		if eventTime <= 0 {
+			eventTime = snapshot.AsOf
+		}
+		events = append(events, strategy.StrategyEvent{
+			EventID:      strings.Join([]string{string(currentPosition.Scope), currentPosition.RunID, currentPosition.Exchange, currentPosition.Market, currentPosition.Symbol, currentPosition.StrategyName, "order_filled", strconv.FormatInt(snapshot.Current.OpenTime, 10), "liquidation"}, ":"),
+			Scope:        currentPosition.Scope,
+			RunID:        currentPosition.RunID,
+			Account:      currentPosition.Account,
+			Exchange:     currentPosition.Exchange,
+			Market:       currentPosition.Market,
+			Symbol:       currentPosition.Symbol,
+			StrategyName: currentPosition.StrategyName,
+			EventType:    strategy.EventTypeOrderFilled,
+			EventTime:    eventTime,
+			BarOpenTime:  snapshot.Current.OpenTime,
+			PositionSide: currentPosition.PositionSide,
+			Size:         currentPosition.Size,
+			Price:        formatExecutorFloat(priceValue),
+			Notional:     formatExecutorFloat(priceValue * currentPosition.Size),
+			Fee:          formatExecutorFloat(entryFee + exitFee),
+			PnL:          formatExecutorFloat(grossPnL - entryFee - exitFee),
+			Reason:       "liquidation",
+			Metadata: map[string]string{
+				"exit_reason": "liquidation",
+				"gross_pnl":   formatExecutorFloat(grossPnL),
+				"cashflow":    formatExecutorFloat(grossPnL - exitFee),
+			},
+			CreatedAt: eventTime,
+		})
+	}
+	return e.store.AppendEvents(ctx, events)
+}
+
+func liquidationPrice(currentPosition strategy.Position, snapshot strategy.Snapshot) (float64, bool) {
+	value := snapshot.Current.Low
+	if currentPosition.Side == strategy.PositionSideShort {
+		value = snapshot.Current.High
+	}
+	price, ok := parseExecutorFloat(value)
+	if ok && price > 0 {
+		return price, true
+	}
+	return parseExecutorFloat(snapshot.Current.Close)
+}
+
+func liquidationFee(notional float64, config AccountConfig) float64 {
+	fee := notional * config.FeeRate
+	fee -= fee * normalizedAccountRebatePct(config.RebatePct) / 100
+	return math.Max(0, fee)
+}
+
+func formatExecutorFloat(value float64) string {
+	value = math.Round(value*1e12) / 1e12
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func (e *Executor) barEquityPoint(
@@ -425,7 +583,10 @@ func realizedPnLFromEvents(events []strategy.StrategyEvent) float64 {
 		if event.EventType != strategy.EventTypeOrderFilled {
 			continue
 		}
-		value, ok := parseExecutorFloat(event.PnL)
+		value, ok := parseExecutorFloat(event.Metadata["cashflow"])
+		if !ok {
+			value, ok = parseExecutorFloat(event.PnL)
+		}
 		if ok {
 			total += value
 		}

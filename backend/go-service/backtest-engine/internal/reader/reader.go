@@ -175,6 +175,14 @@ func (r *Reader) ReadKlines(ctx context.Context, request Request) (Result, error
 		return Result{}, fmt.Errorf("read historical klines: %w", err)
 	}
 	klines = normalizeKlines(klines, effectiveStart, request.End)
+	duplicates := duplicateOpenTimes(klines)
+	if len(duplicates) > 0 {
+		return Result{}, fmt.Errorf(
+			"historical klines contain duplicate open times: count %d, first %d",
+			len(duplicates),
+			duplicates[0],
+		)
+	}
 	warmupCount, warmupMissing := countRange(klines, effectiveStart, request.Start, intervalMillis)
 	tradingCount, tradingMissing := countRange(klines, request.Start, request.End, intervalMillis)
 	if len(warmupMissing) > 0 || len(tradingMissing) > 0 {
@@ -280,6 +288,19 @@ func normalizeKlines(klines []marketmodel.Kline, start int64, end int64) []marke
 		return filtered[i].OpenTime < filtered[j].OpenTime
 	})
 	return filtered
+}
+
+func duplicateOpenTimes(klines []marketmodel.Kline) []int64 {
+	duplicates := []int64{}
+	for index := 1; index < len(klines); index++ {
+		if klines[index].OpenTime != klines[index-1].OpenTime {
+			continue
+		}
+		if len(duplicates) == 0 || duplicates[len(duplicates)-1] != klines[index].OpenTime {
+			duplicates = append(duplicates, klines[index].OpenTime)
+		}
+	}
+	return duplicates
 }
 
 func countRange(klines []marketmodel.Kline, start int64, end int64, intervalMillis int64) (int, []int64) {

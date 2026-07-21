@@ -92,6 +92,13 @@ func TestSnapshotBuilderUsesLatestClosedConfirmInterval(t *testing.T) {
 	if entry.AsOf != 7*minute-1 || entry.Trigger != strategy.TriggerOnEntryClose {
 		t.Fatalf("entry timing = as_of %d trigger %q", entry.AsOf, entry.Trigger)
 	}
+	if entry.Execution == nil || entry.Execution.Price.LastPrice != "100" || entry.Execution.Time != 7*minute {
+		t.Fatalf("entry execution = %#v, want next bar open at %d", entry.Execution, 7*minute)
+	}
+	last := contexts[1].Snapshots["1m"]
+	if last.Execution != nil {
+		t.Fatalf("last execution = %#v, want nil without a next trading bar", last.Execution)
+	}
 	if entry.Window.SampleCount == 0 {
 		t.Fatal("entry window sample count = 0, want analyzer sample count")
 	}

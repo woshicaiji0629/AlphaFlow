@@ -100,9 +100,17 @@ type Snapshot struct {
 	Price      PriceView
 	Health     HealthView
 	Realtime   *RealtimeView
+	Execution  *ExecutionView
 	AsOf       int64
 	Trigger    TriggerMode
 	UpdatedAt  int64
+}
+
+// ExecutionView carries simulated order timing separately from strategy inputs.
+// Online snapshots leave it nil.
+type ExecutionView struct {
+	Price PriceView
+	Time  int64
 }
 
 type RealtimeView struct {

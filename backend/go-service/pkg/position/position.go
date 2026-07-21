@@ -148,7 +148,8 @@ func (m *Manager) RiskExit(currentPosition *strategy.Position, currentPrice stri
 
 // RiskExitBar evaluates price-based exit rules against a completed OHLC bar.
 // When multiple rules are touched within the same bar, the deterministic
-// conservative order is stop loss, trailing stop, then take profit.
+// conservative order is stop loss, trailing stop, then take profit. Trailing
+// references learned from this bar become eligible on the next bar.
 func (m *Manager) RiskExitBar(currentPosition *strategy.Position, openValue string, highValue string, lowValue string) (*strategy.OrderPlan, string) {
 	if currentPosition == nil || currentPosition.IsFlat() {
 		return nil, ""
@@ -223,30 +224,7 @@ func barExitTrigger(currentPosition strategy.Position, rule *strategy.ExitRule, 
 			rule.TriggerPrice = formatFloat(previousTrigger)
 			return previousTrigger, true, true
 		}
-		switch currentPosition.Side {
-		case strategy.PositionSideLong:
-			if high > referencePrice {
-				referencePrice = high
-			}
-		case strategy.PositionSideShort:
-			if low < referencePrice {
-				referencePrice = low
-			}
-		default:
-			return 0, false, false
-		}
-		triggerPrice, active := protectedTrailingTriggerPrice(currentPosition, *rule, referencePrice, trailPct)
-		if !active {
-			return 0, false, false
-		}
-		rule.TriggerPrice = formatFloat(triggerPrice)
-		metadata := make(map[string]string, len(rule.Metadata))
-		for key, value := range rule.Metadata {
-			metadata[key] = value
-		}
-		metadata["reference_price"] = formatFloat(referencePrice)
-		rule.Metadata = metadata
-		return triggerPrice, barPriceTouched(currentPosition.Side, rule.Type, high, low, triggerPrice), false
+		return 0, false, false
 	}
 	triggerPrice, ok := parseFloat(rule.TriggerPrice)
 	if !ok || triggerPrice <= 0 {

@@ -78,13 +78,16 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	now := h.now()
 	currentPosition := input.Positions[result.StrategyName]
 	price := currentPrice(input)
+	orderTime := now
 	barOpen, barHigh, barLow := currentBarPrices(input)
 	var plan *strategy.OrderPlan
+	riskExit := false
 	if input.Target.Scope == strategy.PositionScopeBacktest {
 		var riskPrice string
 		plan, riskPrice = h.positionManager.RiskExitBar(currentPosition, barOpen, barHigh, barLow)
 		if plan != nil {
 			price = riskPrice
+			riskExit = true
 		}
 	}
 	if plan == nil {
@@ -98,6 +101,14 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	if err := h.appendEvent(ctx, signalEvent(input.Target, result, now)); err != nil {
 		return err
 	}
+	if input.Target.Scope == strategy.PositionScopeBacktest && !riskExit {
+		execution, ok := backtestExecution(input)
+		if !ok {
+			return nil
+		}
+		price = execution.Price.LastPrice
+		orderTime = execution.Time
+	}
 	orderPlan, err := h.orderPlanWithQuantity(input.Target, *plan, price)
 	if err != nil {
 		return fmt.Errorf("build order quantity for strategy %s: %w", result.StrategyName, err)
@@ -109,7 +120,7 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 		Position:       currentPosition,
 		BarOpenTime:    result.Signal.OpenTime,
 		ReferencePrice: price,
-		CreatedAt:      now,
+		CreatedAt:      orderTime,
 	})
 	if err != nil {
 		return fmt.Errorf("build order intent for strategy %s: %w", result.StrategyName, err)
@@ -117,7 +128,7 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	if !ok {
 		return nil
 	}
-	if err := h.appendEvent(ctx, orderIntentEvent(input.Target, result, intent, plan, now)); err != nil {
+	if err := h.appendEvent(ctx, orderIntentEvent(input.Target, result, intent, plan, orderTime)); err != nil {
 		return err
 	}
 	if h.broker == nil {
@@ -129,6 +140,9 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 	}
 	if alreadyApplied {
 		return nil
+	}
+	if input.Target.Scope == strategy.PositionScopeBacktest && !riskExit {
+		report.UpdatedAt = orderTime
 	}
 	if err := h.appendEvent(ctx, orderFilledEvent(input.Target, result, currentPosition, intent, report, plan, h.feeConfig, h.sizingConfig, now)); err != nil {
 		return err
@@ -143,6 +157,14 @@ func (h *Handler) HandleResult(ctx context.Context, input strategy.Context, resu
 		return err
 	}
 	return nil
+}
+
+func backtestExecution(input strategy.Context) (strategy.ExecutionView, bool) {
+	snapshot, ok := input.Snapshots[input.Target.Interval]
+	if !ok || snapshot.Execution == nil || snapshot.Execution.Price.LastPrice == "" || snapshot.Execution.Time <= 0 {
+		return strategy.ExecutionView{}, false
+	}
+	return *snapshot.Execution, true
 }
 
 func (h *Handler) executeRecoverable(ctx context.Context, intent execution.OrderIntent) (execution.ExecutionReport, bool, error) {
@@ -413,6 +435,7 @@ type Metrics struct {
 	Leverage          float64
 	GrossPnL          float64
 	NetPnL            float64
+	Cashflow          float64
 	ReturnPct         float64
 	ReturnOnMarginPct float64
 }
@@ -452,11 +475,13 @@ func fillMetrics(
 	}
 	if currentPosition == nil || intent.Action == execution.OrderActionOpen {
 		metrics.NetPnL = -fee
+		metrics.Cashflow = metrics.NetPnL
 		return metrics
 	}
 	entryPrice, ok := parseFloat(currentPosition.EntryPrice)
 	if !ok || entryPrice <= 0 {
 		metrics.NetPnL = -fee
+		metrics.Cashflow = metrics.NetPnL
 		return metrics
 	}
 	entryNotional := entryPrice * report.FilledQuantity
@@ -476,6 +501,7 @@ func fillMetrics(
 	} else {
 		metrics.GrossPnL = (price - entryPrice) * report.FilledQuantity
 	}
+	metrics.Cashflow = metrics.GrossPnL - metrics.Fee
 	metrics.Fee += entryFee
 	metrics.GrossFee += entryGrossFee
 	metrics.Rebate += entryRebate
@@ -522,6 +548,7 @@ func exitMetadata(plan *strategy.OrderPlan, metrics *Metrics) map[string]string 
 		}
 	}
 	if metrics != nil {
+		metadata["cashflow"] = formatFloat(metrics.Cashflow)
 		metadata["gross_pnl"] = formatFloat(metrics.GrossPnL)
 		metadata["return_pct"] = formatFloat(metrics.ReturnPct)
 		metadata["return_on_margin_pct"] = formatFloat(metrics.ReturnOnMarginPct)

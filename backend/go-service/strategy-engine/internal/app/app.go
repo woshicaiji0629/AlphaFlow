@@ -318,13 +318,41 @@ func runMarketBusLoop(ctx context.Context, cfg config.Config, runtime runtimeSta
 		}
 		for _, message := range messages {
 			if err := handleMarketSnapshotMessage(ctx, cfg, runtime, marketBus, message, targets); err != nil {
-				return err
+				if err := handleMarketSnapshotFailure(ctx, cfg, marketBus, message, err); err != nil {
+					return err
+				}
 			}
 		}
 		if ctx.Err() != nil {
 			return nil
 		}
 	}
+}
+
+func handleMarketSnapshotFailure(
+	ctx context.Context,
+	cfg config.Config,
+	marketBus marketInputBus,
+	message marketbus.SnapshotMessage,
+	processingErr error,
+) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	attrs := append(marketSnapshotLogAttrs(message, time.Now().UnixMilli()), "error", processingErr)
+	if message.DeliveryCount < int64(cfg.MarketInput.MaxDeliveries) {
+		slog.Warn("market snapshot processing failed; awaiting redelivery", attrs...)
+		return nil
+	}
+	reason := processingErr.Error()
+	if err := marketBus.DeadLetter(ctx, message, reason); err != nil {
+		return fmt.Errorf("dead-letter market snapshot %s after processing failure: %w", message.ID, err)
+	}
+	if err := marketBus.Ack(ctx, message.ID); err != nil {
+		return fmt.Errorf("ack dead-lettered market snapshot %s: %w", message.ID, err)
+	}
+	slog.Error("market snapshot moved to dead letter after processing failures", attrs...)
+	return nil
 }
 
 func handleMarketSnapshotMessage(

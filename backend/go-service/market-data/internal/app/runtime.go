@@ -18,11 +18,35 @@ import (
 	"alphaflow/go-service/pkg/redisclient"
 )
 
+type runtime struct {
+	collectors      []*collector.Collector
+	aggregator      *aggregator.Aggregator
+	indicators      *indicator.Runner
+	health          *health.Runner
+	store           *store.MarketStore
+	closePublishers func()
+	restartDelay    time.Duration
+}
+
+func (r *runtime) Close() {
+	if r == nil {
+		return
+	}
+	if r.closePublishers != nil {
+		r.closePublishers()
+	}
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
+			slog.Error("close market store failed", "error", err)
+		}
+	}
+}
+
 func buildRuntime(
 	ctx context.Context,
 	cfg config.Config,
 	redisManager *redisclient.Manager,
-) ([]*collector.Collector, *aggregator.Aggregator, *indicator.Runner, *health.Runner, *store.MarketStore, func(), time.Duration, error) {
+) (*runtime, error) {
 	reconnectDelay := collector.DefaultReconnectDelay()
 	closePublisher := func() {}
 
@@ -36,18 +60,18 @@ func buildRuntime(
 	})
 	marketStore, err := buildStore(ctx, cfg, redisStore)
 	if err != nil {
-		return nil, nil, nil, nil, nil, closePublisher, 0, err
+		return nil, err
 	}
 	publisher, closePublisher, err := buildMarketSnapshotPublisher(cfg)
 	if err != nil {
 		_ = marketStore.Close()
-		return nil, nil, nil, nil, nil, closePublisher, 0, err
+		return nil, err
 	}
 	gapPublisher, closeGapPublisher, err := buildGapPublisher(cfg)
 	if err != nil {
 		_ = marketStore.Close()
 		closePublisher()
-		return nil, nil, nil, nil, nil, closePublisher, 0, err
+		return nil, err
 	}
 	closeMarketPublisher := closePublisher
 	closePublisher = func() {
@@ -55,14 +79,15 @@ func buildRuntime(
 		closeMarketPublisher()
 	}
 
-	collectors := buildCollectors(cfg, marketStore, reconnectDelay, gapPublisher)
+	aggregationRules := aggregationRules(cfg)
+	collectors := buildCollectors(cfg, marketStore, reconnectDelay, gapPublisher, aggregationRules)
 	if len(collectors) == 0 {
 		_ = marketStore.Close()
 		closePublisher()
-		return nil, nil, nil, nil, nil, closePublisher, 0, fmt.Errorf("no exchange enabled")
+		return nil, fmt.Errorf("no exchange enabled")
 	}
 	klineAggregator := aggregator.New(marketStore, aggregator.Options{
-		Rules:           aggregationRules(cfg),
+		Rules:           aggregationRules,
 		ScanInterval:    config.AggregationScanInterval(),
 		LookbackPeriods: config.KlineLimit(),
 	})
@@ -80,7 +105,7 @@ func buildRuntime(
 		if err != nil {
 			_ = marketStore.Close()
 			closePublisher()
-			return nil, nil, nil, nil, nil, closePublisher, 0, err
+			return nil, err
 		}
 		indicatorRunnerOptions.PublishTTL = publishTTL
 	}
@@ -89,13 +114,13 @@ func buildRuntime(
 		if err != nil {
 			_ = marketStore.Close()
 			closePublisher()
-			return nil, nil, nil, nil, nil, closePublisher, 0, err
+			return nil, err
 		}
 		indicatorWorkerMaxWait, err := config.IndicatorQueueWorkerMaxWait(cfg)
 		if err != nil {
 			_ = marketStore.Close()
 			closePublisher()
-			return nil, nil, nil, nil, nil, closePublisher, 0, err
+			return nil, err
 		}
 		indicatorQueue, err := indicator.NewNATSTaskQueue(indicator.NATSTaskQueueOptions{
 			URL:           cfg.NATS.URL,
@@ -106,7 +131,7 @@ func buildRuntime(
 		if err != nil {
 			_ = marketStore.Close()
 			closePublisher()
-			return nil, nil, nil, nil, nil, closePublisher, 0, fmt.Errorf("connect nats indicator task queue: %w", err)
+			return nil, fmt.Errorf("connect nats indicator task queue: %w", err)
 		}
 		indicatorRunnerOptions.TaskQueue = indicatorQueue
 		indicatorRunnerOptions.TaskBatch = cfg.Indicator.WorkerBatch
@@ -120,7 +145,15 @@ func buildRuntime(
 		ScanInterval: config.HealthScanInterval(),
 		GapLookback:  config.HealthGapLookback(),
 	})
-	return collectors, klineAggregator, indicatorRunner, healthRunner, marketStore, closePublisher, reconnectDelay, nil
+	return &runtime{
+		collectors:      collectors,
+		aggregator:      klineAggregator,
+		indicators:      indicatorRunner,
+		health:          healthRunner,
+		store:           marketStore,
+		closePublishers: closePublisher,
+		restartDelay:    reconnectDelay,
+	}, nil
 }
 
 func buildGapPublisher(cfg config.Config) (collector.GapPublisher, func(), error) {

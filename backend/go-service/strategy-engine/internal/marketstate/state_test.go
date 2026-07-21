@@ -125,6 +125,23 @@ func TestStoreBuildContextReturnsDegradedForStaleRealtime(t *testing.T) {
 	}
 }
 
+func TestStoreBuildContextReturnsDegradedWhenRealtimeIsMissing(t *testing.T) {
+	store := New(Options{Now: func() int64 { return 2500 }, MaxMessageAge: time.Minute, ClosedStaleFactor: 100})
+	frame := parityFixture("3m", 1000, 2000, "bullish", "101")
+	applyParityClosed(t, store, frame)
+
+	context, degraded, reason, err := store.BuildContext(testTarget(), nil)
+	if err != nil {
+		t.Fatalf("BuildContext() error = %v", err)
+	}
+	if !degraded || !strings.Contains(reason, "realtime missing") {
+		t.Fatalf("degraded=%v reason=%q, want realtime missing", degraded, reason)
+	}
+	if context.Snapshots["3m"].Execution != nil {
+		t.Fatalf("online execution view = %#v, want nil", context.Snapshots["3m"].Execution)
+	}
+}
+
 func TestStoreKeepsClosedIndicatorSeparateFromRealtime(t *testing.T) {
 	store := New(Options{Now: func() int64 { return 5000 }, MaxMessageAge: time.Minute, ClosedStaleFactor: 100})
 	closed := marketbus.NewClosedEnvelope(

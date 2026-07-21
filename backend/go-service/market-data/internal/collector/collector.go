@@ -61,23 +61,31 @@ type Collector struct {
 	rest                exchange.RESTClient
 	ws                  exchange.WSClient
 	store               Store
-	eventQueue          chan collectorEvent
-	eventWorkers        int
-	eventPending        atomic.Int64
-	eventDrainNotify    chan struct{}
-	latestMu            sync.Mutex
-	latestEvents        map[string]collectorEvent
-	stats               collectorStats
+	events              eventState
+	klines              klineState
 	now                 func() time.Time
 	lastBackfillRequest time.Time
-	eventTimingMu       sync.Mutex
-	lastExchangeTimes   map[string]int64
-	klineVersionMu      sync.Mutex
-	klineVersions       map[string]map[int64]klineVersion
-	klineWriteLocks     [256]sync.Mutex
-	klineContinuityMu   sync.Mutex
+}
+
+type eventState struct {
+	queue             chan collectorEvent
+	workers           int
+	pending           atomic.Int64
+	drainNotify       chan struct{}
+	latestMu          sync.Mutex
+	latest            map[string]collectorEvent
+	stats             collectorStats
+	timingMu          sync.Mutex
+	lastExchangeTimes map[string]int64
+}
+
+type klineState struct {
+	versionMu           sync.Mutex
+	versions            map[string]map[int64]klineVersion
+	writeLocks          [256]sync.Mutex
+	continuityMu        sync.Mutex
 	lastClosedOpenTimes map[string]int64
-	pendingKlineGaps    map[string]map[string]klineGap
+	pendingGaps         map[string]map[string]klineGap
 }
 
 type Stats struct {
@@ -160,19 +168,23 @@ func New(
 	eventQueueSize := adaptiveEventQueueSize(options)
 	eventWorkers := adaptiveEventWorkers(options)
 	return &Collector{
-		options:             options,
-		rest:                rest,
-		ws:                  ws,
-		store:               store,
-		eventQueue:          make(chan collectorEvent, eventQueueSize),
-		eventWorkers:        eventWorkers,
-		eventDrainNotify:    make(chan struct{}, 1),
-		latestEvents:        make(map[string]collectorEvent),
-		lastExchangeTimes:   make(map[string]int64),
-		klineVersions:       make(map[string]map[int64]klineVersion),
-		lastClosedOpenTimes: make(map[string]int64),
-		pendingKlineGaps:    make(map[string]map[string]klineGap),
-		now:                 time.Now,
+		options: options,
+		rest:    rest,
+		ws:      ws,
+		store:   store,
+		events: eventState{
+			queue:             make(chan collectorEvent, eventQueueSize),
+			workers:           eventWorkers,
+			drainNotify:       make(chan struct{}, 1),
+			latest:            make(map[string]collectorEvent),
+			lastExchangeTimes: make(map[string]int64),
+		},
+		klines: klineState{
+			versions:            make(map[string]map[int64]klineVersion),
+			lastClosedOpenTimes: make(map[string]int64),
+			pendingGaps:         make(map[string]map[string]klineGap),
+		},
+		now: time.Now,
 	}
 }
 
@@ -190,31 +202,31 @@ func (c *Collector) Market() string {
 
 func (c *Collector) Stats() Stats {
 	return Stats{
-		ProcessedEvents:       c.stats.processedEvents.Load(),
-		DroppedLatestEvents:   c.stats.droppedLatestEvents.Load(),
-		CoalescedLatestEvents: c.stats.coalescedLatestEvents.Load(),
-		FlushedLatestEvents:   c.stats.flushedLatestEvents.Load(),
-		ProcessEventErrors:    c.stats.processEventErrors.Load(),
-		QueueLen:              len(c.eventQueue),
-		QueueCap:              cap(c.eventQueue),
-		QueuePeak:             c.stats.queuePeak.Load(),
-		LastEventReceivedAt:   c.stats.lastEventReceivedAt.Load(),
-		LastEventProcessedAt:  c.stats.lastEventProcessedAt.Load(),
-		SourceDelayMaxMillis:  c.stats.sourceDelayMaxMillis.Load(),
-		QueueDelayMaxMillis:   c.stats.queueDelayMaxMillis.Load(),
-		ProcessMaxMillis:      c.stats.processMaxMillis.Load(),
-		OutOfOrderEvents:      c.stats.outOfOrderEvents.Load(),
-		DuplicateKlineEvents:  c.stats.duplicateKlineEvents.Load(),
-		StaleKlineEvents:      c.stats.staleKlineEvents.Load(),
-		OpenAfterClosedEvents: c.stats.openAfterClosedEvents.Load(),
-		WebSocketKlineEvents:  c.stats.webSocketKlineEvents.Load(),
-		StartupRESTKlines:     c.stats.startupRESTKlines.Load(),
-		DerivedKlines:         c.stats.derivedKlines.Load(),
-		KlineCorrections:      c.stats.klineCorrections.Load(),
-		KlineGapsDetected:     c.stats.klineGapsDetected.Load(),
-		KlineGapBars:          c.stats.klineGapBars.Load(),
-		KlineGapRequests:      c.stats.klineGapRequests.Load(),
-		KlineGapRequestErrors: c.stats.klineGapRequestErrors.Load(),
+		ProcessedEvents:       c.events.stats.processedEvents.Load(),
+		DroppedLatestEvents:   c.events.stats.droppedLatestEvents.Load(),
+		CoalescedLatestEvents: c.events.stats.coalescedLatestEvents.Load(),
+		FlushedLatestEvents:   c.events.stats.flushedLatestEvents.Load(),
+		ProcessEventErrors:    c.events.stats.processEventErrors.Load(),
+		QueueLen:              len(c.events.queue),
+		QueueCap:              cap(c.events.queue),
+		QueuePeak:             c.events.stats.queuePeak.Load(),
+		LastEventReceivedAt:   c.events.stats.lastEventReceivedAt.Load(),
+		LastEventProcessedAt:  c.events.stats.lastEventProcessedAt.Load(),
+		SourceDelayMaxMillis:  c.events.stats.sourceDelayMaxMillis.Load(),
+		QueueDelayMaxMillis:   c.events.stats.queueDelayMaxMillis.Load(),
+		ProcessMaxMillis:      c.events.stats.processMaxMillis.Load(),
+		OutOfOrderEvents:      c.events.stats.outOfOrderEvents.Load(),
+		DuplicateKlineEvents:  c.events.stats.duplicateKlineEvents.Load(),
+		StaleKlineEvents:      c.events.stats.staleKlineEvents.Load(),
+		OpenAfterClosedEvents: c.events.stats.openAfterClosedEvents.Load(),
+		WebSocketKlineEvents:  c.events.stats.webSocketKlineEvents.Load(),
+		StartupRESTKlines:     c.events.stats.startupRESTKlines.Load(),
+		DerivedKlines:         c.events.stats.derivedKlines.Load(),
+		KlineCorrections:      c.events.stats.klineCorrections.Load(),
+		KlineGapsDetected:     c.events.stats.klineGapsDetected.Load(),
+		KlineGapBars:          c.events.stats.klineGapBars.Load(),
+		KlineGapRequests:      c.events.stats.klineGapRequests.Load(),
+		KlineGapRequestErrors: c.events.stats.klineGapRequestErrors.Load(),
 	}
 }
 
@@ -289,9 +301,9 @@ func (c *Collector) run(ctx context.Context, backfill bool) error {
 			"exchange", c.rest.Exchange(),
 			"market", c.rest.Market(),
 			"timeout", c.eventDrainTimeout(),
-			"pending_events", c.eventPending.Load(),
-			"queue_length", len(c.eventQueue),
-			"queue_capacity", cap(c.eventQueue),
+			"pending_events", c.events.pending.Load(),
+			"queue_length", len(c.events.queue),
+			"queue_capacity", cap(c.events.queue),
 		)
 	}
 	cancelWorkers()
@@ -310,12 +322,12 @@ func (c *Collector) eventDrainTimeout() time.Duration {
 }
 
 func (c *Collector) waitForEventDrain(timeout time.Duration) bool {
-	if c.eventPending.Load() == 0 {
+	if c.events.pending.Load() == 0 {
 		return true
 	}
 	if timeout <= 0 {
-		for c.eventPending.Load() > 0 {
-			<-c.eventDrainNotify
+		for c.events.pending.Load() > 0 {
+			<-c.events.drainNotify
 		}
 		return true
 	}
@@ -323,24 +335,24 @@ func (c *Collector) waitForEventDrain(timeout time.Duration) bool {
 	defer timer.Stop()
 	for {
 		select {
-		case <-c.eventDrainNotify:
-			if c.eventPending.Load() == 0 {
+		case <-c.events.drainNotify:
+			if c.events.pending.Load() == 0 {
 				return true
 			}
 		case <-timer.C:
-			return c.eventPending.Load() == 0
+			return c.events.pending.Load() == 0
 		}
 	}
 }
 
 func (c *Collector) addPendingEvent() {
-	c.eventPending.Add(1)
+	c.events.pending.Add(1)
 }
 
 func (c *Collector) completePendingEvent() {
-	if c.eventPending.Add(-1) == 0 {
+	if c.events.pending.Add(-1) == 0 {
 		select {
-		case c.eventDrainNotify <- struct{}{}:
+		case c.events.drainNotify <- struct{}{}:
 		default:
 		}
 	}

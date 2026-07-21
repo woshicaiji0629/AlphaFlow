@@ -49,6 +49,27 @@ func TestSinglePositionReplayAppliesProtectionOnFollowingBar(t *testing.T) {
 	}
 }
 
+func TestSinglePositionReplayUsesBacktestNextOpenAndSkipsLastBar(t *testing.T) {
+	replay, err := NewSinglePositionReplay(singlePositionTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	regime := &marketregime.Result{AllowLong: true}
+	last := researchSnapshot("100", strategy.SignalSideBuy)
+	last.Target.Scope = strategy.PositionScopeBacktest
+	if entered, err := replay.TryEnter(last, strategy.SignalSideBuy, regime); err != nil || entered {
+		t.Fatalf("last-bar entered=%t err=%v, want skipped without next open", entered, err)
+	}
+	nextOpen := last
+	nextOpen.Execution = &strategy.ExecutionView{Price: strategy.PriceView{LastPrice: "110"}, Time: 2000}
+	if entered, err := replay.TryEnter(nextOpen, strategy.SignalSideBuy, regime); err != nil || !entered {
+		t.Fatalf("next-open entered=%t err=%v", entered, err)
+	}
+	if replay.position == nil || replay.position.entryPrice != 110 || replay.position.entryTimeMS != 2000 {
+		t.Fatalf("position=%#v, want entry at next open 110/2000", replay.position)
+	}
+}
+
 func TestSinglePositionReplayClassifiesSameBarAmbiguity(t *testing.T) {
 	replay, err := NewSinglePositionReplay(singlePositionTestConfig())
 	if err != nil {

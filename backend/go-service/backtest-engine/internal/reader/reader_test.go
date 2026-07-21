@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +106,27 @@ func TestReadKlinesRejectsMissingWarmup(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ReadKlines() error = nil, want missing warmup error")
+	}
+}
+
+func TestReadKlinesRejectsDuplicateOpenTimes(t *testing.T) {
+	const minute = int64(60_000)
+	store := &fakeKlineStore{klines: []marketmodel.Kline{
+		{OpenTime: 0},
+		{OpenTime: minute},
+		{OpenTime: minute},
+	}}
+	item, err := New(store)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = item.ReadKlines(context.Background(), Request{
+		Exchange: "binance", Market: "um", Symbol: "ETHUSDT", Interval: "1m",
+		Start: 0, End: 2 * minute,
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate open times: count 1, first 60000") {
+		t.Fatalf("ReadKlines() error = %v, want duplicate open time error", err)
 	}
 }
 

@@ -199,9 +199,6 @@ func TestManagerRiskExitBar(t *testing.T) {
 	stopLong := strategy.ExitRule{Type: strategy.ExitReasonStopLoss, TriggerPrice: "90", SizePct: 1}
 	stopShort := strategy.ExitRule{Type: strategy.ExitReasonStopLoss, TriggerPrice: "110", SizePct: 1}
 	takeProfit := strategy.ExitRule{Type: strategy.ExitReasonTakeProfit, TriggerPrice: "110", SizePct: 1}
-	trailing := strategy.ExitRule{Type: strategy.ExitReasonTrailingStop, SizePct: 1, Metadata: map[string]string{
-		"trail_pct": "5", "reference_price": "100",
-	}}
 	tests := []struct {
 		name, open, high, low, fill string
 		side                        strategy.PositionSide
@@ -211,7 +208,6 @@ func TestManagerRiskExitBar(t *testing.T) {
 		{name: "intrabar long stop", open: "100", high: "105", low: "89", fill: "90", side: strategy.PositionSideLong, rules: []strategy.ExitRule{stopLong}, reason: strategy.ExitReasonStopLoss},
 		{name: "short stop gap", open: "112", high: "115", low: "108", fill: "112", side: strategy.PositionSideShort, rules: []strategy.ExitRule{stopShort}, reason: strategy.ExitReasonStopLoss},
 		{name: "stop before take profit", open: "100", high: "111", low: "89", fill: "90", side: strategy.PositionSideLong, rules: []strategy.ExitRule{takeProfit, stopLong}, reason: strategy.ExitReasonStopLoss},
-		{name: "same bar trailing", open: "100", high: "120", low: "113", fill: "114", side: strategy.PositionSideLong, rules: []strategy.ExitRule{trailing}, reason: strategy.ExitReasonTrailingStop},
 	}
 	manager := NewManager(ManagerConfig{})
 	for _, item := range tests {
@@ -222,6 +218,29 @@ func TestManagerRiskExitBar(t *testing.T) {
 				t.Fatalf("plan/fill = %#v/%q, want %q/%q", plan, fill, item.reason, item.fill)
 			}
 		})
+	}
+}
+
+func TestManagerRiskExitBarDefersNewTrailingReferenceUntilNextBar(t *testing.T) {
+	manager := NewManager(ManagerConfig{})
+	current := strategy.Position{
+		Side:       strategy.PositionSideLong,
+		Size:       1,
+		EntryPrice: "100",
+		ExitRules: []strategy.ExitRule{{
+			Type: strategy.ExitReasonTrailingStop, SizePct: 1,
+			Metadata: map[string]string{"trail_pct": "5", "reference_price": "100"},
+		}},
+	}
+
+	plan, fill := manager.RiskExitBar(&current, "100", "120", "113")
+	if plan != nil || fill != "" {
+		t.Fatalf("same-bar plan/fill = %#v/%q, want deferred trailing reference", plan, fill)
+	}
+	current = RefreshPositionBarExtremesAt(current, "120", "113", 1000)
+	plan, fill = manager.RiskExitBar(&current, "115", "116", "113")
+	if plan == nil || plan.ExitReason != strategy.ExitReasonTrailingStop || fill != "114" {
+		t.Fatalf("next-bar plan/fill = %#v/%q, want trailing exit at 114", plan, fill)
 	}
 }
 

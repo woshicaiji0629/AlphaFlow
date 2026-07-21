@@ -74,6 +74,9 @@ func (a *SimulatedAccount) ApplyEvents(events []strategy.StrategyEvent) {
 	if a == nil {
 		return
 	}
+	if a.liquidated {
+		return
+	}
 	for _, event := range events {
 		if event.EventType != strategy.EventTypeOrderFilled {
 			continue
@@ -113,9 +116,46 @@ func (a *SimulatedAccount) Snapshot(item strategy.Context, positions []strategy.
 }
 
 func (a *SimulatedAccount) SnapshotAt(openTime int64, positions []strategy.Position) report.AccountEquityPoint {
+	return a.snapshotAtPrices(openTime, positions, a.latestPrices)
+}
+
+func (a *SimulatedAccount) SnapshotWorstBar(contexts []strategy.Context, positions []strategy.Position) (report.AccountEquityPoint, map[string]float64, bool) {
+	if a == nil || len(contexts) == 0 {
+		return report.AccountEquityPoint{}, nil, false
+	}
+	prices := make(map[string]float64, len(a.latestPrices))
+	for symbol, price := range a.latestPrices {
+		prices[symbol] = price
+	}
+	openTime := int64(0)
+	for _, item := range contexts {
+		snapshot, ok := item.Snapshots[item.Target.Interval]
+		if !ok {
+			continue
+		}
+		if openTime == 0 {
+			openTime = snapshot.Current.OpenTime
+		}
+		low, lowOK := parseExecutorFloat(snapshot.Current.Low)
+		high, highOK := parseExecutorFloat(snapshot.Current.High)
+		if !lowOK || !highOK || low <= 0 || high < low {
+			continue
+		}
+		lowPnL := symbolUnrealizedPnL(positions, item.Target.Symbol, low)
+		highPnL := symbolUnrealizedPnL(positions, item.Target.Symbol, high)
+		if lowPnL <= highPnL {
+			prices[item.Target.Symbol] = low
+		} else {
+			prices[item.Target.Symbol] = high
+		}
+	}
+	return a.snapshotAtPrices(openTime, positions, prices), prices, true
+}
+
+func (a *SimulatedAccount) snapshotAtPrices(openTime int64, positions []strategy.Position, prices map[string]float64) report.AccountEquityPoint {
 	unrealizedPnL := 0.0
 	for _, currentPosition := range positions {
-		positionPrice, hasPrice := a.latestPrices[currentPosition.Symbol]
+		positionPrice, hasPrice := prices[currentPosition.Symbol]
 		if !hasPrice {
 			positionPrice, _ = parseExecutorFloat(currentPosition.EntryPrice)
 		}
@@ -152,6 +192,16 @@ func (a *SimulatedAccount) SnapshotAt(openTime int64, positions []strategy.Posit
 		point.StoppedReason = a.stoppedReason
 	}
 	return point
+}
+
+func symbolUnrealizedPnL(positions []strategy.Position, symbol string, price float64) float64 {
+	total := 0.0
+	for _, currentPosition := range positions {
+		if currentPosition.Symbol == symbol {
+			total += unrealizedPositionPnL(currentPosition, price)
+		}
+	}
+	return total
 }
 
 func (a *SimulatedAccount) UsedMargin() float64 {

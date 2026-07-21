@@ -207,12 +207,21 @@ func (r *SinglePositionReplay) TryEnter(snapshot strategy.Snapshot, side strateg
 		r.summary.SkippedCooldown++
 		return false, nil
 	}
-	entryPrice, err := parsePositivePrice("entry", snapshot.Current.Close)
+	entryPriceText := snapshot.Current.Close
+	entryTime := snapshot.Current.CloseTime
+	if snapshot.Target.Scope == strategy.PositionScopeBacktest {
+		if snapshot.Execution == nil || snapshot.Execution.Price.LastPrice == "" || snapshot.Execution.Time <= 0 {
+			return false, nil
+		}
+		entryPriceText = snapshot.Execution.Price.LastPrice
+		entryTime = snapshot.Execution.Time
+	}
+	entryPrice, err := parsePositivePrice("entry", entryPriceText)
 	if err != nil {
 		return false, err
 	}
 	r.position = &singlePosition{
-		side: side, entryPrice: entryPrice, entryTimeMS: snapshot.Current.CloseTime,
+		side: side, entryPrice: entryPrice, entryTimeMS: entryTime,
 		stopBps: -r.config.InitialStopBps, entryRegime: *regime,
 	}
 	return true, nil
