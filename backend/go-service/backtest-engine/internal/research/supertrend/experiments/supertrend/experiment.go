@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"alphaflow/go-service/backtest-engine/cmd/supertrend-signal-research/experiments"
+	"alphaflow/go-service/backtest-engine/internal/research/supertrend/experiments"
 	"alphaflow/go-service/pkg/marketmodel"
 	"alphaflow/go-service/pkg/marketregime"
 	"alphaflow/go-service/pkg/signalresearch"

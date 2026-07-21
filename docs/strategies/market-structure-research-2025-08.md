@@ -73,7 +73,7 @@ B 分支用于捕捉没有连续压缩、直接发生方向运动的行情。验
 
 ## 代码入口
 
-- Episode 与报告入口：`backend/go-service/backtest-engine/cmd/market-structure-regime-research/main.go`
-- 原始路径特征：`backend/go-service/backtest-engine/cmd/market-structure-regime-research/path_features.go`
-- A 分支和形态诊断：`backend/go-service/backtest-engine/cmd/market-structure-regime-research/market_state_machine.go`
+- Episode 与报告实现：`backend/go-service/backtest-engine/internal/research/marketstructure/research.go`
+- 原始路径特征：`backend/go-service/backtest-engine/internal/research/marketstructure/path_features.go`
+- A 分支和形态诊断：`backend/go-service/backtest-engine/internal/research/marketstructure/market_state_machine.go`
 - 公共市场结构特征：`backend/go-service/pkg/signalresearch/market_structure_regime.go`

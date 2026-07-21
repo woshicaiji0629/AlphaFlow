@@ -1,6 +1,7 @@
 package signalresearch
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"strconv"
@@ -35,6 +36,7 @@ type SwingOpportunity struct {
 	StartPrice        float64              `json:"start_price"`
 	EndPrice          float64              `json:"end_price"`
 	MovePoints        float64              `json:"move_points"`
+	MoveBucket        string               `json:"move_bucket"`
 	MovePct           float64              `json:"move_pct"`
 	DurationMinutes   float64              `json:"duration_minutes"`
 	HitStage          string               `json:"hit_stage"`
@@ -46,6 +48,29 @@ type SwingOpportunity struct {
 	MissReason        string               `json:"miss_reason,omitempty"`
 	OpportunityType   string               `json:"opportunity_type,omitempty"`
 	Evidence          *SwingEvidence       `json:"evidence,omitempty"`
+}
+
+const MarketSwingDefinitionVersion = "absolute-points-v1"
+
+// MarketSwing is a strategy- and run-independent market fact.
+type MarketSwing struct {
+	SwingID           string
+	Exchange          string
+	Market            string
+	Symbol            string
+	Interval          string
+	DefinitionVersion string
+	MinimumMovePoints float64
+	ReversalPoints    float64
+	StartTimeMS       int64
+	EndTimeMS         int64
+	Side              strategy.SignalSide
+	StartPrice        float64
+	EndPrice          float64
+	MovePoints        float64
+	MoveBucket        string
+	MovePct           float64
+	DurationMinutes   float64
 }
 
 type SwingReviewReport struct {
@@ -87,7 +112,12 @@ func ReviewSwings(bars []marketmodel.Kline, signals []SwingSignal, evidence []Sw
 		if end.price < start.price {
 			side = strategy.SignalSideSell
 		}
-		op := SwingOpportunity{StartTimeMS: start.timeMS, EndTimeMS: end.timeMS, Side: side, StartPrice: start.price, EndPrice: end.price, MovePoints: move, MovePct: move / start.price * 100, DurationMinutes: float64(end.timeMS-start.timeMS) / 60000, HitStage: "missed"}
+		op := SwingOpportunity{
+			StartTimeMS: start.timeMS, EndTimeMS: end.timeMS, Side: side,
+			StartPrice: start.price, EndPrice: end.price, MovePoints: move,
+			MoveBucket: SwingMoveBucket(move), MovePct: move / start.price * 100,
+			DurationMinutes: float64(end.timeMS-start.timeMS) / 60000, HitStage: "missed",
+		}
 		if side == strategy.SignalSideBuy {
 			report.UpSwings++
 		} else {
@@ -146,6 +176,43 @@ func ReviewSwings(bars []marketmodel.Kline, signals []SwingSignal, evidence []Sw
 		report.Opportunities = append(report.Opportunities, op)
 	}
 	return report, nil
+}
+
+func BuildMarketSwings(exchange, market, symbol, interval string, report SwingReviewReport) []MarketSwing {
+	items := make([]MarketSwing, 0, len(report.Opportunities))
+	for _, opportunity := range report.Opportunities {
+		identity := fmt.Sprintf("%s|%s|%s|%s|%s|%g|%g|%d|%d|%s",
+			exchange, market, symbol, interval, MarketSwingDefinitionVersion,
+			report.MinimumMovePoints, report.ReversalPoints, opportunity.StartTimeMS,
+			opportunity.EndTimeMS, opportunity.Side)
+		digest := sha256.Sum256([]byte(identity))
+		items = append(items, MarketSwing{
+			SwingID: fmt.Sprintf("%x", digest[:16]), Exchange: exchange, Market: market,
+			Symbol: symbol, Interval: interval, DefinitionVersion: MarketSwingDefinitionVersion,
+			MinimumMovePoints: report.MinimumMovePoints, ReversalPoints: report.ReversalPoints,
+			StartTimeMS: opportunity.StartTimeMS, EndTimeMS: opportunity.EndTimeMS, Side: opportunity.Side,
+			StartPrice: opportunity.StartPrice, EndPrice: opportunity.EndPrice,
+			MovePoints: opportunity.MovePoints, MoveBucket: opportunity.MoveBucket, MovePct: opportunity.MovePct,
+			DurationMinutes: opportunity.DurationMinutes,
+		})
+	}
+	return items
+}
+
+// SwingMoveBucket assigns every eligible swing to exactly one reporting bucket.
+func SwingMoveBucket(movePoints float64) string {
+	switch {
+	case movePoints >= 150:
+		return "150_plus"
+	case movePoints >= 100:
+		return "100_150"
+	case movePoints >= 60:
+		return "60_100"
+	case movePoints >= 30:
+		return "30_60"
+	default:
+		return "below_30"
+	}
 }
 
 func classifyMissedSwing(start swingPoint, end swingPoint, side strategy.SignalSide, evidence []SwingEvidence) (string, *SwingEvidence) {

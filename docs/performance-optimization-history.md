@@ -276,10 +276,10 @@ go run ./market-data/cmd/market-data-indicator-loadtest \
 ```sh
 cd backend/go-service
 
-go run ./backtest-engine/cmd/backtest-dataset-check \
+go run ./backtest-engine/cmd/backtest-engine dataset-check \
   -config configs/backtest-engine.ethusdt-1y.toml
 
-go run ./backtest-engine/cmd/backtest-engine \
+go run ./backtest-engine/cmd/backtest-engine run \
   -config configs/backtest-engine.ethusdt-1y.toml
 ```
 

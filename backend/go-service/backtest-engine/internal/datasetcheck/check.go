@@ -1,14 +1,11 @@
-package main
+package datasetcheck
 
 import (
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"alphaflow/go-service/backtest-engine/internal/config"
@@ -18,21 +15,18 @@ import (
 	"alphaflow/go-service/pkg/strategyregistry"
 )
 
-func main() {
-	configPath := flag.String("config", "", "path to backtest-engine config file")
-	startOverride := flag.String("start", "", "override start time (RFC3339)")
-	endOverride := flag.String("end", "", "override end time (RFC3339)")
-	warmupOverride := flag.Int64("warmup", -1, "override warmup bars")
-	jsonOutput := flag.Bool("json", false, "print JSON report")
-	missingLimit := flag.Int("missing-limit", 20, "maximum missing timestamps printed per phase")
-	flag.Parse()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, *configPath, *startOverride, *endOverride, *warmupOverride, *jsonOutput, *missingLimit); err != nil {
-		fmt.Fprintln(os.Stderr, "backtest dataset check failed:", err)
-		os.Exit(1)
+func Run(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("backtest-engine dataset-check", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to backtest-engine config file")
+	startOverride := flags.String("start", "", "override start time (RFC3339)")
+	endOverride := flags.String("end", "", "override end time (RFC3339)")
+	warmupOverride := flags.Int64("warmup", -1, "override warmup bars")
+	jsonOutput := flags.Bool("json", false, "print JSON report")
+	missingLimit := flags.Int("missing-limit", 20, "maximum missing timestamps printed per phase")
+	if err := flags.Parse(args); err != nil {
+		return err
 	}
+	return run(ctx, *configPath, *startOverride, *endOverride, *warmupOverride, *jsonOutput, *missingLimit)
 }
 
 func run(ctx context.Context, configPath string, startOverride string, endOverride string, warmupOverride int64, jsonOutput bool, missingLimit int) error {

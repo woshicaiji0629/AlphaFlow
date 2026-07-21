@@ -1,4 +1,4 @@
-package main
+package supertrend
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"alphaflow/go-service/backtest-engine/cmd/supertrend-signal-research/experiments"
-	supertrendexperiment "alphaflow/go-service/backtest-engine/cmd/supertrend-signal-research/experiments/supertrend"
 	"alphaflow/go-service/backtest-engine/internal/config"
 	"alphaflow/go-service/backtest-engine/internal/reader"
+	"alphaflow/go-service/backtest-engine/internal/research/supertrend/experiments"
+	supertrendexperiment "alphaflow/go-service/backtest-engine/internal/research/supertrend/experiments/supertrend"
 	"alphaflow/go-service/backtest-engine/internal/simulator"
 	"alphaflow/go-service/pkg/clickhousemarket"
 	"alphaflow/go-service/pkg/indicatorcalc"

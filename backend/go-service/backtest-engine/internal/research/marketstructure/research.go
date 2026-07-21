@@ -1,4 +1,4 @@
-package main
+package marketstructure
 
 import (
 	"context"
@@ -6,10 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"alphaflow/go-service/backtest-engine/internal/config"
 	"alphaflow/go-service/backtest-engine/internal/reader"
@@ -95,17 +93,17 @@ type episodeEvaluation struct {
 	Episodes                       []episode         `json:"episodes"`
 }
 
-func main() {
-	configPath := flag.String("config", "configs/market-structure-regime-research.ethusdt-training.toml", "research config path")
-	outputPath := flag.String("output", "", "JSON output path; defaults to result.report_json_path")
-	flag.Parse()
-	if err := run(*configPath, *outputPath); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func Run(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("market-research structure-regime", flag.ContinueOnError)
+	configPath := flags.String("config", "configs/market-structure-regime-research.ethusdt-training.toml", "research config path")
+	outputPath := flags.String("output", "", "JSON output path; defaults to result.report_json_path")
+	if err := flags.Parse(args); err != nil {
+		return err
 	}
+	return run(ctx, *configPath, *outputPath)
 }
 
-func run(configPath string, outputPath string) error {
+func run(ctx context.Context, configPath string, outputPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load research config: %w", err)
@@ -130,8 +128,6 @@ func run(configPath string, outputPath string) error {
 	}
 	maxHorizon := signalresearch.DefaultForwardHorizons[len(signalresearch.DefaultForwardHorizons)-1]
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	dialTimeout, err := config.ClickHouseDialTimeout(cfg)
 	if err != nil {
 		return err

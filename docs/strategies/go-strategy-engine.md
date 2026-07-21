@@ -21,7 +21,7 @@
 - 在线策略引擎 app 编排：`strategy-engine/internal/app`
 - 在线策略引擎内部 runner：`strategy-engine/internal/runner`
 - 独立回测引擎入口、历史读取、滚动 snapshot、模拟成交和结果持久化：`backtest-engine`
-- 回测数据完整性检查命令：`backtest-engine/cmd/backtest-dataset-check`
+- 回测数据完整性检查命令：`backtest-engine/cmd/backtest-engine dataset-check`
 - 独立仓位/执行路由服务：`position-engine`
 - 策略决策 NATS JetStream 协议：`pkg/strategybus`
 - 策略结果路由公共包：`pkg/strategyroute`
@@ -232,7 +232,7 @@ backend/go-service/backtest-engine/internal/simulator/summary.go
 
 回测仓位使用进程内 `MemoryStore` 和 `PositionScopeBacktest`，不会把当前仓位写入线上 Redis，也不会与 `paper` / `live` scope 冲突。命中的策略事件和成交结果批量持久化到 ClickHouse；`MemoryStore.EventsSince` 用于分批提取新增事件，避免每批复制全部历史事件。
 
-年度回测运行前应先使用 `backtest-dataset-check` 验证所有入场和确认周期的 warmup、缺口与时间边界。示例配置位于：
+年度回测运行前应先使用 `backtest-engine dataset-check` 验证所有入场和确认周期的 warmup、缺口与时间边界。示例配置位于：
 
 ```text
 backend/go-service/configs/backtest-engine.ethusdt-1y.toml
@@ -240,7 +240,24 @@ backend/go-service/configs/backtest-engine.ethusdt-1y.toml
 
 性能判断以预编译二进制、真实多周期数据和结构化进度日志为准；`go run` 包含编译时间，短样本还会被各周期 warmup 占比放大，不适合直接线性外推年度耗时。
 
-`backtest-engine/cmd/supertrend-signal-research` 是独立研究回放，不等同正式账户回测。其回测作用域入场同样使用 `Snapshot.Execution` 的下一开盘价和时间，最后一根没有执行视图时不建仓；但账户保证金、清算和事件持久化仍以正式 `backtest-engine` 报告为准。`forward-market-label-research` 和 `market-structure-regime-research` 使用当前收盘价作为未来标签基准，输出是研究标签而不是可成交收益。
+`market-research supertrend-signal` 是独立研究回放，不等同正式账户回测。其回测作用域入场同样使用 `Snapshot.Execution` 的下一开盘价和时间，最后一根没有执行视图时不建仓；但账户保证金、清算和事件持久化仍以正式 `backtest-engine` 报告为准。`market-research forward-label` 和 `market-research structure-regime` 使用当前收盘价作为未来标签基准，输出是研究标签而不是可成交收益。
+
+回测目录只保留两个命令入口：
+
+```text
+backtest-engine
+├── run
+└── dataset-check
+
+market-research
+├── swing
+├── analysis
+├── forward-label
+├── structure-regime
+└── supertrend-signal
+```
+
+`backtest-engine run` 是唯一正式策略回测入口；`dataset-check` 是正式回测前的数据验证步骤。`market-research` 下的功能彼此独立，不使用策略批次定义市场波段，也不把市场分析结果直接视为开单或收益。新版本通过参数或内部实现版本管理，不新增 `cmd` 目录。
 
 ### `pkg/positionhandler/paper`
 
@@ -482,6 +499,8 @@ backend/go-service/backtest-engine/internal/app/
 backend/go-service/backtest-engine/internal/config/
 backend/go-service/backtest-engine/internal/reader/
 backend/go-service/backtest-engine/internal/simulator/
+backend/go-service/backtest-engine/cmd/market-research/
+backend/go-service/backtest-engine/internal/research/
 ```
 
 当前回测职责：
@@ -511,7 +530,7 @@ backend/go-service/backtest-engine/internal/simulator/
 运行正式回测前可使用只读数据检查命令验证重复 K 线、缺口、连续区间和可用 warmup：
 
 ```sh
-go run ./backtest-engine/cmd/backtest-dataset-check -config configs/backtest-engine.local.toml
+go run ./backtest-engine/cmd/backtest-engine dataset-check -config configs/backtest-engine.local.toml
 ```
 
 回测配置 `[data]` 还支持：

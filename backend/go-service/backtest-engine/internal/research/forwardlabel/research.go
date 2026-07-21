@@ -1,4 +1,4 @@
-package main
+package forwardlabel
 
 import (
 	"context"
@@ -6,9 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"alphaflow/go-service/backtest-engine/internal/reader"
@@ -22,28 +20,24 @@ const (
 	defaultEnd   = "2024-11-01T00:00:00Z"
 )
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func run() error {
+func Run(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("market-research forward-label", flag.ContinueOnError)
 	var (
-		exchange = flag.String("exchange", "binance", "exchange name")
-		market   = flag.String("market", "um", "market name")
-		symbol   = flag.String("symbol", "ETHUSDT", "symbol")
-		interval = flag.String("interval", "3m", "kline interval")
-		start    = flag.String("start", defaultStart, "sample start in RFC3339")
-		end      = flag.String("end", defaultEnd, "sample end in RFC3339")
-		output   = flag.String("output", "", "optional JSON output path; stdout when empty")
-		addr     = flag.String("clickhouse-addr", envOrDefault("ALPHAFLOW_CLICKHOUSE_ADDR", "localhost:9000"), "ClickHouse address")
-		database = flag.String("clickhouse-database", envOrDefault("ALPHAFLOW_CLICKHOUSE_DATABASE", "alphaflow"), "ClickHouse database")
-		username = flag.String("clickhouse-username", envOrDefault("ALPHAFLOW_CLICKHOUSE_USERNAME", "alphaflow"), "ClickHouse username")
-		password = flag.String("clickhouse-password", envOrDefault("ALPHAFLOW_CLICKHOUSE_PASSWORD", "alphaflow"), "ClickHouse password")
+		exchange = flags.String("exchange", "binance", "exchange name")
+		market   = flags.String("market", "um", "market name")
+		symbol   = flags.String("symbol", "ETHUSDT", "symbol")
+		interval = flags.String("interval", "3m", "kline interval")
+		start    = flags.String("start", defaultStart, "sample start in RFC3339")
+		end      = flags.String("end", defaultEnd, "sample end in RFC3339")
+		output   = flags.String("output", "", "optional JSON output path; stdout when empty")
+		addr     = flags.String("clickhouse-addr", envOrDefault("ALPHAFLOW_CLICKHOUSE_ADDR", "localhost:9000"), "ClickHouse address")
+		database = flags.String("clickhouse-database", envOrDefault("ALPHAFLOW_CLICKHOUSE_DATABASE", "alphaflow"), "ClickHouse database")
+		username = flags.String("clickhouse-username", envOrDefault("ALPHAFLOW_CLICKHOUSE_USERNAME", "alphaflow"), "ClickHouse username")
+		password = flags.String("clickhouse-password", envOrDefault("ALPHAFLOW_CLICKHOUSE_PASSWORD", "alphaflow"), "ClickHouse password")
 	)
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 
 	startTime, err := time.Parse(time.RFC3339, strings.TrimSpace(*start))
 	if err != nil {
@@ -59,8 +53,6 @@ func run() error {
 	}
 	maxHorizon := signalresearch.DefaultForwardHorizons[len(signalresearch.DefaultForwardHorizons)-1]
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	store, err := clickhousemarket.NewStore(ctx, clickhousemarket.Options{
 		Addr: *addr, Database: *database, Username: *username, Password: *password,
 		DialTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, SkipSchemaInit: true,

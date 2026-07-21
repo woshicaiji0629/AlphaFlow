@@ -10,7 +10,7 @@ Supertrend 是策略方向和交易信号的唯一来源。其他指标只作为
 
 - 正式指标继续使用现有标准、自适应和 AI Supertrend；AI 默认候选因子范围保持 `1-5`。
 - 在线 Supertrend 策略没有接入结构重入、独立 BOS、跨周期 BOS 回踩或 AI 快速变体。
-- `backtest-engine/cmd/supertrend-signal-research` 可以比较三种原始 flip，并输出单持仓、MFE/MAE、回吐、退出原因和多周期快照等诊断；研究输出不等于正式交易规则。
+- `market-research supertrend-signal` 可以比较三种原始 flip，并输出单持仓、MFE/MAE、回吐、退出原因和多周期快照等诊断；研究输出不等于正式交易规则。
 - 市场状态 v4/v5/v6 和压缩突破等实现属于离线研究版本，未经跨月及冻结样本验证不得替换线上默认版本。
 - 2025-08 唯一微利的 AI 基线只有15笔、PF `1.050`，样本不足，不能宣称策略已经盈利。
 

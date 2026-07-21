@@ -21,7 +21,8 @@ AlphaFlow 当前处于行情数据基础设施、Go 策略引擎、回测和 pap
 - Redis 特征 hash，用于策略启动恢复、故障恢复、观测和兼容路径。
 - NATS JetStream market snapshot bus，用于 `market-data -> strategy-engine` 的实时特征同步。
 - Go `strategy-engine` 在线策略服务。
-- Go `backtest-engine` 回测入口、滚动 snapshot、模拟成交和结果持久化。
+- Go `backtest-engine` 正式回测与数据检查统一入口、滚动 snapshot、模拟成交和结果持久化。
+- Go `market-research` 统一离线研究入口，用于独立市场波段、市场状态、未来标签、结构状态和 Supertrend 信号研究。
 - Go `position-engine` 仓位/执行路由服务，已接入 paper route、testnet/live 仓位计划发布、成交回报归因和持仓退出规则扫描。
 - Go `execution-engine` 订单执行服务，支持 paper、testnet、live、多账户 fan-out、交易所 REST 适配和私有状态同步。
 - 策略决策通过 NATS JetStream 从 `strategy-engine` 进入 `position-engine`。
@@ -44,13 +45,22 @@ AlphaFlow/
     go-service/                     # Go 服务，位于同一个 Go module 下
       market-data/                  # 当前活跃的行情数据服务
       strategy-engine/              # 在线策略引擎
-      backtest-engine/              # 回测引擎
+      backtest-engine/              # 回测与市场研究
+        cmd/
+          backtest-engine/          # 正式回测、数据检查
+          market-research/          # 统一离线研究
+        internal/
+          app/                      # 正式回测编排
+          datasetcheck/             # 数据完整性检查
+          research/                 # 各研究子命令实现
       position-engine/              # 仓位/执行路由服务
       pkg/                          # 共享 logger、Redis、HTTP、常量、市场模型、交易所客户端、ClickHouse 历史和纯计算包
   docs/                             # 项目架构和服务说明
 ```
 
 每个服务都应维护自己的配置、测试、运行入口和依赖管理方式。
+
+`backtest-engine/cmd` 的入口边界固定为两个：`backtest-engine` 面向正式回测流程，`market-research` 面向一次性离线研究。`cmd` 只处理信号、子命令路由、统一错误和退出码；数据读取、参数解析、计算和报告实现位于 `internal`。策略版本、市场分析版本和研究模型不得通过新增 `main` 表达。只有出现独立部署、常驻生命周期、不同权限边界或不同资源模型时，才评审新增第三个入口。
 
 ## 服务边界
 

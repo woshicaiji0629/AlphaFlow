@@ -17,6 +17,20 @@
 | Go 策略引擎 | [go-strategy-engine.md](go-strategy-engine.md) | Go-only 在线策略引擎、回测批处理和公共策略包边界设计。 |
 | 市场能力层 | [../market-capability-architecture.md](../market-capability-architecture.md) | 多策略共享的趋势、波动、结构、位置、事件和质量能力边界。 |
 | Supertrend 优化记录 | [supertrend-optimization.md](supertrend-optimization.md) | Supertrend 优化假设、实现变化、重点行情与年度回测结论。 |
+| 市场结构研究 | [market-structure-research-2025-08.md](market-structure-research-2025-08.md) | 市场结构 Episode、路径特征和状态机研究。 |
+| 市场波段与准入实验归档 | [market-swing-admission-research-2025-08-10.md](market-swing-admission-research-2025-08-10.md) | 独立波段口径、V4/V5/V6 命中漏斗、失败方法与禁止重试边界。 |
+
+## 回测与研究命令
+
+- `backtest-engine run`：正式策略回测。
+- `backtest-engine dataset-check`：回测数据完整性检查。
+- `market-research swing`：与策略无关的独立市场波段。
+- `market-research analysis`：V4/V5/V6 市场分析观察。
+- `market-research forward-label`：未来路径标签分布。
+- `market-research structure-regime`：市场结构和状态研究。
+- `market-research supertrend-signal`：Supertrend 信号与版本实验。
+
+研究命令只能生成市场事实、标签、诊断和实验报告；不得把研究命中率表述为正式策略收益，也不得绕过正式回测和 paper 验证进入线上策略。
 
 ## 通用约定
 

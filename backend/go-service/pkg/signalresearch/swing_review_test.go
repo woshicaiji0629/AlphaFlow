@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestSwingMoveBucketUsesMutuallyExclusiveBoundaries(t *testing.T) {
+	tests := map[float64]string{
+		29.99: "below_30", 30: "30_60", 59.99: "30_60", 60: "60_100",
+		99.99: "60_100", 100: "100_150", 149.99: "100_150", 150: "150_plus",
+	}
+	for move, want := range tests {
+		if got := SwingMoveBucket(move); got != want {
+			t.Fatalf("SwingMoveBucket(%v)=%q, want %q", move, got, want)
+		}
+	}
+}
+
 func TestReviewSwingsFindsThirtyPointMoves(t *testing.T) {
 	bars := []marketmodel.Kline{
 		{CloseTime: 1, High: "100", Low: "100", Close: "100"},
@@ -23,6 +35,19 @@ func TestReviewSwingsFindsThirtyPointMoves(t *testing.T) {
 	if report.Opportunities[0].MovePoints != 32 || report.Opportunities[1].MovePoints != 44 {
 		t.Fatalf("unexpected moves: %+v", report.Opportunities)
 	}
+	for _, opportunity := range report.Opportunities {
+		if opportunity.MoveBucket != "30_60" {
+			t.Fatalf("unexpected bucket: %+v", opportunity)
+		}
+	}
+	marketSwings := BuildMarketSwings("binance", "um", "ETHUSDT", "3m", report)
+	if len(marketSwings) != 2 || marketSwings[0].SwingID == "" || marketSwings[0].SwingID == marketSwings[1].SwingID {
+		t.Fatalf("unexpected market swings: %+v", marketSwings)
+	}
+	second := BuildMarketSwings("binance", "um", "ETHUSDT", "3m", report)
+	if marketSwings[0].SwingID != second[0].SwingID {
+		t.Fatalf("market swing identity changed across builds: %q != %q", marketSwings[0].SwingID, second[0].SwingID)
+	}
 }
 
 func TestReviewSwingsClassifiesEarlySignal(t *testing.T) {
@@ -33,6 +58,28 @@ func TestReviewSwingsClassifiesEarlySignal(t *testing.T) {
 	}
 	if len(report.Opportunities) != 1 || report.Opportunities[0].HitStage != "early" {
 		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestMarketSwingsDoNotDependOnStrategySignals(t *testing.T) {
+	bars := []marketmodel.Kline{
+		{CloseTime: 100, High: "100", Low: "100", Close: "100"},
+		{CloseTime: 200, High: "140", Low: "101", Close: "139"},
+		{CloseTime: 300, High: "139", Low: "125", Close: "126"},
+	}
+	config := SwingReviewConfig{MinimumMovePoints: 30, ReversalPoints: 10}
+	withoutStrategy, err := ReviewSwings(bars, nil, nil, nil, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withStrategy, err := ReviewSwings(bars, []SwingSignal{{TimeMS: 100, Side: "buy", Allowed: true}}, nil, nil, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := BuildMarketSwings("binance", "um", "ETHUSDT", "3m", withoutStrategy)
+	compared := BuildMarketSwings("binance", "um", "ETHUSDT", "3m", withStrategy)
+	if len(base) != len(compared) || len(base) != 1 || base[0] != compared[0] {
+		t.Fatalf("market swings changed with strategy input: base=%+v compared=%+v", base, compared)
 	}
 }
 

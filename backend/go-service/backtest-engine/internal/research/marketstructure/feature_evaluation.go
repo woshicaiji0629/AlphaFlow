@@ -1,4 +1,4 @@
-package main
+package marketstructure
 
 import (
 	"math"

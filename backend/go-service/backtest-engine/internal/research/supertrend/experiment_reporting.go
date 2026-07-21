@@ -1,4 +1,4 @@
-package main
+package supertrend
 
 import (
 	"bytes"
@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"os"
 
-	"alphaflow/go-service/backtest-engine/cmd/supertrend-signal-research/experiments"
-	supertrendexperiment "alphaflow/go-service/backtest-engine/cmd/supertrend-signal-research/experiments/supertrend"
+	"alphaflow/go-service/backtest-engine/internal/research/supertrend/experiments"
+	supertrendexperiment "alphaflow/go-service/backtest-engine/internal/research/supertrend/experiments/supertrend"
 )
 
 func reportSupertrendExperiment(result experiments.Result, runID, regimeVersion, swingReviewPath, stopReviewPath string) error {

@@ -150,10 +150,123 @@ func (s *Store) initSchema(ctx context.Context) error {
 		) ENGINE = ReplacingMergeTree
 		ORDER BY (run_id, bar_close_time_ms)`,
 		`ALTER TABLE market_regime_observations ADD COLUMN IF NOT EXISTS lock_reason LowCardinality(String) AFTER dormant_intervals`,
+		`CREATE TABLE IF NOT EXISTS market_swings (
+			swing_id String,
+			exchange LowCardinality(String),
+			market LowCardinality(String),
+			symbol LowCardinality(String),
+			interval LowCardinality(String),
+			definition_version LowCardinality(String),
+			minimum_move_points Float64,
+			reversal_points Float64,
+			start_time_ms Int64,
+			end_time_ms Int64,
+			side LowCardinality(String),
+			start_price Float64,
+			end_price Float64,
+			move_points Float64,
+			move_bucket LowCardinality(String),
+			move_pct Float64,
+			duration_minutes Float64,
+			created_at_ms Int64
+		) ENGINE = ReplacingMergeTree(created_at_ms)
+		PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(start_time_ms))
+		ORDER BY (exchange, market, symbol, interval, definition_version,
+			minimum_move_points, reversal_points, start_time_ms, end_time_ms, side, swing_id)`,
+		`CREATE TABLE IF NOT EXISTS market_analysis_observations (
+			exchange LowCardinality(String),
+			market LowCardinality(String),
+			symbol LowCardinality(String),
+			interval LowCardinality(String),
+			analysis_name LowCardinality(String),
+			analysis_version LowCardinality(String),
+			config_fingerprint String,
+			bar_close_time_ms Int64,
+			state LowCardinality(String),
+			direction LowCardinality(String),
+			allow_long Bool,
+			allow_short Bool,
+			trendability_score Float64,
+			direction_score Float64,
+			confidence Float64,
+			lock_reason LowCardinality(String),
+			state_bars UInt16,
+			reasons_json String,
+			evidence_json String,
+			created_at_ms Int64
+		) ENGINE = ReplacingMergeTree(created_at_ms)
+		PARTITION BY toYYYYMM(fromUnixTimestamp64Milli(bar_close_time_ms))
+		ORDER BY (exchange, market, symbol, interval, analysis_name,
+			analysis_version, config_fingerprint, bar_close_time_ms)`,
 	}
 	for _, query := range queries {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("initialize signal research schema: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveMarketAnalysisObservations(ctx context.Context, exchange, market, symbol, interval, fingerprint string, items []marketregime.Result, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	createdAtMS := time.Now().UnixMilli()
+	for start := 0; start < len(items); start += batchSize {
+		end := min(start+batchSize, len(items))
+		rows := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*20)
+		for _, item := range items[start:end] {
+			reasonsJSON, err := json.Marshal(item.Reasons)
+			if err != nil {
+				return fmt.Errorf("marshal market analysis reasons: %w", err)
+			}
+			evidenceJSON, err := json.Marshal(item.Evidence)
+			if err != nil {
+				return fmt.Errorf("marshal market analysis evidence: %w", err)
+			}
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, exchange, market, symbol, interval, "market_regime", string(item.Version), fingerprint,
+				item.BarCloseTimeMS, string(item.State), string(item.Direction), item.AllowLong, item.AllowShort,
+				item.TrendabilityScore, item.DirectionScore, item.Confidence, item.LockReason, item.StateBars,
+				string(reasonsJSON), string(evidenceJSON), createdAtMS)
+		}
+		query := `INSERT INTO market_analysis_observations (
+			exchange, market, symbol, interval, analysis_name, analysis_version, config_fingerprint,
+			bar_close_time_ms, state, direction, allow_long, allow_short,
+			trendability_score, direction_score, confidence, lock_reason, state_bars,
+			reasons_json, evidence_json, created_at_ms
+		) VALUES ` + strings.Join(rows, ", ")
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert market analysis observations: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SaveMarketSwings(ctx context.Context, items []MarketSwing, batchSize int) error {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	createdAtMS := time.Now().UnixMilli()
+	for start := 0; start < len(items); start += batchSize {
+		end := min(start+batchSize, len(items))
+		rows := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*18)
+		for _, item := range items[start:end] {
+			rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, item.SwingID, item.Exchange, item.Market, item.Symbol, item.Interval,
+				item.DefinitionVersion, item.MinimumMovePoints, item.ReversalPoints, item.StartTimeMS, item.EndTimeMS,
+				string(item.Side), item.StartPrice, item.EndPrice, item.MovePoints, item.MoveBucket,
+				item.MovePct, item.DurationMinutes, createdAtMS)
+		}
+		query := `INSERT INTO market_swings (
+			swing_id, exchange, market, symbol, interval, definition_version,
+			minimum_move_points, reversal_points, start_time_ms, end_time_ms, side,
+			start_price, end_price, move_points, move_bucket, move_pct, duration_minutes, created_at_ms
+		) VALUES ` + strings.Join(rows, ", ")
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert market swings: %w", err)
 		}
 	}
 	return nil
